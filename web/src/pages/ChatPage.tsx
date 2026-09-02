@@ -42,7 +42,7 @@ import {
   useSurfaceFrontmost,
 } from "@/hooks/useNativeServerSwitcher";
 import { isIOSShell, onNativeSidebarDrag, setNativeServerSwitcherHidden } from "@/lib/nativeBridge";
-import { type Agent, useSessionAgent, useAgents } from "@/hooks/useAgents";
+import { type Agent, type McpServerSummary, useSessionAgent, useAgents } from "@/hooks/useAgents";
 import { agentDisplayLabel } from "@/components/AgentInfo";
 import {
   BRAIN_HARNESS_LABELS,
@@ -60,7 +60,7 @@ import {
   isOwnerLevel,
   isSessionSharedWithOthers,
 } from "@/lib/permissionsApi";
-import { getCurrentAuthorId } from "@/lib/identity";
+import { authenticatedFetch, getCurrentAuthorId } from "@/lib/identity";
 import { retrySession } from "@/lib/sessionsApi";
 import { codexEffortLevelsForModel, findNativeModelOption } from "@/lib/codexNativeModels";
 import { modelConfigurationSourceRows } from "@/lib/modelConfigurationSource";
@@ -1996,6 +1996,44 @@ export function buildSlashCommandWithArgsSet(
   return s;
 }
 
+/**
+ * Format the session agent's MCP servers for inline ``/mcp`` feedback.
+ * One line per server: name, transport, and the endpoint (URL for http,
+ * command for stdio), plus the optional description. Header values are
+ * already redacted server-side, so nothing here can leak a secret.
+ *
+ * :param servers: Safe MCP server summaries from the session-agent API.
+ * :returns: A human-readable multi-line report.
+ */
+export function formatMcpServersReport(servers: readonly McpServerSummary[]): string {
+  if (servers.length === 0) return "No MCP servers configured for this agent.";
+  const lines = servers.map((s) => {
+    const endpoint =
+      s.transport === "http"
+        ? (s.url ?? "")
+        : [s.command, ...(s.args ?? [])].filter(Boolean).join(" ");
+    const desc = s.description ? ` — ${s.description}` : "";
+    return `${s.name} (${s.transport})${endpoint ? `: ${endpoint}` : ""}${desc}`;
+  });
+  return [`MCP servers (${servers.length}):`, ...lines].join("\n");
+}
+
+/**
+ * Fetch the session agent's MCP servers and format them for the
+ * composer's inline ``/mcp`` feedback.
+ *
+ * :param sessionId: The active conversation id.
+ * :returns: The formatted report (see :func:`formatMcpServersReport`).
+ */
+export async function fetchMcpServersReport(sessionId: string): Promise<string> {
+  const res = await authenticatedFetch(
+    `/v1/sessions/${encodeURIComponent(sessionId)}/agent/mcp-servers`,
+  );
+  if (!res.ok) throw new Error(`Failed to load MCP servers: ${res.status} ${res.statusText}`);
+  const json = (await res.json()) as { data?: McpServerSummary[] };
+  return formatMcpServersReport(json.data ?? []);
+}
+
 /** Circumference of the progress ring (r=5.5). */
 const RING_CIRCUMFERENCE = 2 * Math.PI * 5.5;
 
@@ -3021,6 +3059,23 @@ function ComposerImpl({
         }
         lines.push(`Items in context: ${blocks.length}`);
         setCommandError(lines.join("\n"));
+        return true;
+      }
+      case "/mcp": {
+        if (conversationId === null) {
+          setCommandError("No active session.");
+          return true;
+        }
+        dirtyRef.current = true;
+        setValue("");
+        // Placeholder while the fetch is in flight so the command visibly
+        // took effect; replaced by the report (or the failure) when it lands.
+        setCommandError("Loading MCP servers…");
+        void fetchMcpServersReport(conversationId)
+          .then((report) => setCommandError(report))
+          .catch((err: unknown) => {
+            setCommandError(err instanceof Error ? err.message : "Failed to load MCP servers");
+          });
         return true;
       }
       case "/help": {
