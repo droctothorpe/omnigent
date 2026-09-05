@@ -82,7 +82,7 @@ import {
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isSingleUserMode } from "@/lib/capabilities";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
-import { useChatStore } from "@/store/chatStore";
+import { isTempConvId, useChatStore } from "@/store/chatStore";
 import {
   STARTING_GRACE_S,
   livenessRowFromSession,
@@ -222,6 +222,11 @@ export function AppShell() {
     conversationId: string;
     extensionId: string;
   }>();
+  // A client-only temp id (`temp:*`, shown while `createSession` is in flight)
+  // has no server session behind it. Feed every server-scoped hook this instead
+  // of the raw route id so none of them fetch `/v1/sessions/temp:*` during the
+  // create window (or on a stale temp reload, before ChatPage redirects).
+  const serverConversationId = isTempConvId(conversationId) ? undefined : conversationId;
   const [fileViewerCommentsOpen, setFileViewerCommentsOpen] = useState(false);
   const [rightRailTab, setRightRailTab] = useState<RightRailTab>(() =>
     conversationId ? (readSessionWorkspaceState(conversationId).rightRailTab ?? "files") : "files",
@@ -412,7 +417,7 @@ export function AppShell() {
   // terminal. The hook is react-query-backed and dedup'd with the rail.
   // reconcileWhilePending: self-heals if the live resource.created SSE was
   // missed (see UseTerminalsOptions for the why).
-  const { terminals } = useTerminals(conversationId ?? null, {
+  const { terminals } = useTerminals(serverConversationId ?? null, {
     reconcileWhilePending: terminalPending,
   });
   const agentTerminal = useMemo(() => findAgentTerminal(terminals), [terminals]);
@@ -444,7 +449,7 @@ export function AppShell() {
   // For sub-agent (child) sessions the sidebar list omits the row, so this
   // is the only path through which the UI learns the user's permission
   // level. ``derivePermissionLevel`` prefers this over ``activeConv``.
-  const { session: activeSession, isLoading: sessionLoading } = useSession(conversationId);
+  const { session: activeSession, isLoading: sessionLoading } = useSession(serverConversationId);
   // Same liveness the chat surface switches on (see ChatPage / useSessionLiveness).
   // AppShell reads it only to drive the Terminal pill's "loading" state: a session
   // in `starting` (a relaunch the moment a message is sent — `turnActive`) is
@@ -752,7 +757,7 @@ export function AppShell() {
   // resource instead of the root filesystem listing: it is enough to prove
   // availability without paying for directory contents. The probe is disabled
   // for a non-browsing viewer so it never fires a request the server refuses.
-  const environmentQuery = useWorkspaceEnvironment(conversationId, {
+  const environmentQuery = useWorkspaceEnvironment(serverConversationId, {
     enabled: canBrowseWorkspace,
   });
   const showFilesPanel = canBrowseWorkspace && environmentQuery.data?.available !== false;
@@ -763,7 +768,7 @@ export function AppShell() {
   // gate. While the info is still loading the tab stays, matching the Files
   // gate's no-flash default. Shares ChatPage's status-line query cache, so no
   // extra fetch.
-  const githubInfoQuery = useGithubInfo(conversationId);
+  const githubInfoQuery = useGithubInfo(serverConversationId);
   const showGithubTab = showFilesPanel && githubInfoQuery.data?.reason !== "not_a_git_repo";
   // Per-tab availability for the right workspace rail — the single source
   // of truth shared by the tab-fallback effect below, the rail's mount
