@@ -1242,9 +1242,8 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
 
     End-to-end through ``POST /v1/sessions/{conv}/events`` (no live LLM):
     the scripted harness emits an ``action_required`` for a spec-declared
-    python tool, and the runner must dispatch it locally with
-    ``runner_workspace`` set to the resolved ``ResolvedSpec.workdir`` (the
-    bundle dir), not the generic CLI ``runner_workspace``. This is the
+    python tool, and the runner must dispatch it locally with the session
+    workspace kept separate from the resolved ``ResolvedSpec.workdir``. This is the
     dispatch-time counterpart to
     :func:`test_runner_session_tool_schemas_use_resolved_bundle_workdir`,
     which only proved schema generation used the bundle workdir.
@@ -1260,6 +1259,8 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    session_workspace = tmp_path / "session-worktree"
+    session_workspace.mkdir()
     spec = AgentSpec(
         spec_version=1,
         name="bundle-agent",
@@ -1272,10 +1273,15 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
         ],
     )
 
-    captured_workspaces: list[Path | None] = []
+    captured_workspaces: list[tuple[Path | None, Path | None]] = []
 
-    async def _fake_dispatch(*, runner_workspace: Path | None = None, **kwargs: Any) -> str:
-        captured_workspaces.append(runner_workspace)
+    async def _fake_dispatch(
+        *,
+        runner_workspace: Path | None = None,
+        local_tool_workdir: Path | None = None,
+        **kwargs: Any,
+    ) -> str:
+        captured_workspaces.append((runner_workspace, local_tool_workdir))
         return "ok"
 
     monkeypatch.setattr(_tool_dispatch, "dispatch_tool_locally", _fake_dispatch)
@@ -1303,10 +1309,23 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
         del agent_id, session_id
         return ResolvedSpec(spec=spec, workdir=bundle_dir)
 
+    class _WorkspaceServerClient(NullServerClient):
+        class _WorkspaceResponse(NullServerClient._Response):
+            def json(self) -> dict[str, Any]:
+                return {
+                    "workspace": str(session_workspace),
+                    "agent_id": "31ebfedf721b44dabd76f662cb70a400",
+                }
+
+        async def get(self, url: str, **kwargs: Any) -> NullServerClient._Response:
+            if url.startswith("/v1/sessions/"):
+                return self._WorkspaceResponse()
+            return await super().get(url, **kwargs)
+
     app = create_runner_app(
         process_manager=pm,  # type: ignore[arg-type]
         spec_resolver=_resolver,
-        server_client=NullServerClient(),  # type: ignore[arg-type]
+        server_client=_WorkspaceServerClient(),  # type: ignore[arg-type]
         runner_workspace=workspace,
     )
     async with _runner_client(app) as client:
@@ -1328,10 +1347,7 @@ async def test_sessions_native_dispatches_native_tool_with_bundle_workdir(
             await asyncio.sleep(0.05)
 
     assert captured_workspaces, "native tool must be dispatched locally"
-    assert captured_workspaces[0] == bundle_dir, (
-        "dispatch must use the resolved bundle workdir, not runner_workspace "
-        f"({workspace!r}); got {captured_workspaces[0]!r}"
-    )
+    assert captured_workspaces[0] == (session_workspace.resolve(), bundle_dir)
 
 
 @pytest.mark.asyncio
@@ -2073,6 +2089,17 @@ async def test_create_session_envelope_is_single_flight_and_skips_metadata_callb
                     (),
                     {"status_code": 200, "json": lambda self: {"data": []}},
                 )()
+            if path.endswith("/child_sessions"):
+                # Restart recovery lists the session's children; an empty
+                # list ends the scan after this single read.
+                return type(
+                    "Response",
+                    (),
+                    {
+                        "status_code": 200,
+                        "json": lambda self: {"data": [], "has_more": False},
+                    },
+                )()
             raise AssertionError(f"unexpected metadata callback: {path}")
 
     server_client = _ServerClient()
@@ -2130,7 +2157,13 @@ async def test_create_session_envelope_is_single_flight_and_skips_metadata_callb
     assert first_response.json()["session_init_protocol_version"] == 2
     assert resolver_calls == 1
     assert len(pm.get_client_calls) == 1
-    assert server_client.get_paths == [f"/v1/sessions/{session_id}/items"]
+    # The envelope supplies session metadata, so the only snapshot-style
+    # callback is the history read; restart recovery adds one read of the
+    # durable child-session list, which is empty here.
+    assert server_client.get_paths == [
+        f"/v1/sessions/{session_id}/child_sessions",
+        f"/v1/sessions/{session_id}/items",
+    ]
 
 
 @pytest.mark.asyncio

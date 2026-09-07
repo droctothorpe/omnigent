@@ -310,6 +310,13 @@ export function HeaderConversationMenu({
     <>
       <DropdownMenu
         open={menuOpen}
+        // Radix's modal mode sets `pointer-events: none` on <body> while the
+        // menu is open, leaving the menu as the only touch target on screen.
+        // Browser touch-target adjustment then snaps outside taps near the
+        // menu onto it, so on a phone the menu can't be dismissed. Non-modal
+        // keeps the page interactive, so an outside tap lands on real content
+        // and dismisses the menu.
+        modal={!isMobile}
         onOpenChange={(open) => {
           setMenuOpen(open);
           if (!open) setProjectPickerOpen(false);
@@ -322,9 +329,9 @@ export function HeaderConversationMenu({
             size={isMobile ? "icon" : "icon-xs"}
             aria-label="Conversation actions"
             data-testid="header-conversation-actions"
-            className="shrink-0 border-none text-muted-foreground hover:text-foreground max-md:rounded-full"
+            className="shrink-0 border-none text-muted-foreground hover:text-foreground max-md:size-11 max-md:rounded-full"
           >
-            <EllipsisIcon className={isMobile ? "size-4" : "size-3.5"} />
+            <EllipsisIcon className={isMobile ? "size-5" : "size-3.5"} />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent

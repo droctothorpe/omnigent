@@ -14,10 +14,13 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
+from http.client import BadStatusLine, RemoteDisconnected
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TextIO
+from unittest.mock import Mock
+from urllib.error import URLError
 
 import pytest
 
@@ -1052,6 +1055,106 @@ def test_read_transcript_items_since_flags_compact_summary(tmp_path: Path) -> No
     assert items[0].is_compact_summary is True
     assert items[0].item_type == "message"
     assert items[0].data["content"][0]["text"].startswith("This session is being continued")
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "Not enough messages to compact.",
+        "not enough messages to compact",
+        "Nothing to compact.",
+    ],
+)
+def test_read_transcript_items_since_flags_compact_noop(tmp_path: Path, stdout: str) -> None:
+    """
+    A ``/compact`` refusal stdout record is surfaced with its text.
+
+    When Claude declines ``/compact`` (context too small), it writes the
+    refusal to a standalone ``local_command`` stdout record — separate from
+    the ``/compact`` command echo. The bridge must surface it as a
+    ``slash_command`` item flagged ``is_compact_noop=True`` (so the forwarder
+    dismisses the stranded "Compacting…" spinner) carrying the refusal text as
+    ``output`` (so the web shows the same message Claude did).
+    """
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "uuid": "compact-cmd",
+                        "message": {
+                            "role": "user",
+                            "content": (
+                                "<command-name>/compact</command-name>\n"
+                                "            <command-message>compact</command-message>\n"
+                                "            <command-args></command-args>"
+                            ),
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "system",
+                        "subtype": "local_command",
+                        "uuid": "compact-stdout",
+                        "isMeta": False,
+                        "content": f"<local-command-stdout>{stdout}</local-command-stdout>",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _cursor, _current_response_id, items = read_transcript_items_since(
+        transcript_path,
+        0,
+        agent_name="claude-native-ui",
+    )
+
+    # Exactly one bubble: the bare ``/compact`` echo is deduped away so the
+    # web shows a single "Command compact" row (like the terminal), and it
+    # carries the refusal text as ``output``.
+    compact_items = [item for item in items if item.data.get("name") == "compact"]
+    assert len(compact_items) == 1, f"expected one /compact bubble, got {items!r}"
+    noop = compact_items[0]
+    assert noop.is_compact_noop is True
+    assert noop.item_type == "slash_command"
+    assert noop.data["kind"] == "command"
+    assert noop.data["output"] == stdout.strip()
+
+
+def test_read_transcript_items_since_keeps_real_bash_local_command(tmp_path: Path) -> None:
+    """
+    A non-refusal ``local_command`` stdout is not mistaken for a compact noop.
+
+    A shell ``!cmd`` record still surfaces as a terminal command, never a
+    flagged compact-noop item.
+    """
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "type": "system",
+                "subtype": "local_command",
+                "uuid": "bash-1",
+                "content": ("<bash-input>echo hi</bash-input>\n<bash-stdout>hi</bash-stdout>"),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _cursor, _current_response_id, items = read_transcript_items_since(
+        transcript_path,
+        0,
+        agent_name="claude-native-ui",
+    )
+
+    assert all(not item.is_compact_noop for item in items), items
 
 
 @pytest.mark.parametrize(
@@ -3407,6 +3510,233 @@ def test_inject_user_message_escapes_unsupported_slash_command_payload(
     assert not loaded_payloads[1].startswith("\ufeff".encode("utf-8"))
 
 
+def _rejection_pane(name: str, draft: str = "") -> str:
+    """
+    Render a pane where Claude Code has rejected an unknown command.
+
+    Mirrors the real TUI output: the rejection prints as its own
+    bullet-led transcript line above the (now empty) composer.
+
+    :param name: The rejected command name without the slash.
+    :param draft: Text sitting in the composer; empty means idle.
+    :returns: The pane text.
+    """
+    return f"""\
+● Unknown command: /{name}
+──────────────────────────────
+❯ {draft}
+──────────────────────────────
+  ? for shortcuts
+"""
+
+
+def _run_unknown_command_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    content: str,
+    reject_name: str | None,
+) -> list[bytes]:
+    """
+    Drive ``inject_user_message`` against a fake TUI, optionally rejecting.
+
+    The fake pane accepts the paste into the composer; on Enter it either
+    starts a turn silently (``reject_name=None`` — a recognized skill) or
+    prints the "Unknown command" rejection line the way Claude Code does
+    for a name it cannot resolve.
+
+    :param tmp_path: Test temp dir for the bridge directory.
+    :param monkeypatch: Pytest monkeypatch for subprocess + timeouts.
+    :param content: User text to inject.
+    :param reject_name: Command name the fake TUI rejects, or ``None``.
+    :returns: The byte payloads delivered via ``load-buffer``, in order.
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    # Keep the rejection watch fast: it polls the pane, which the fake
+    # answers instantly, so a short timeout keeps the no-rejection case
+    # from sleeping out the full production window.
+    monkeypatch.setattr("omnigent.claude_native_bridge._UNKNOWN_COMMAND_WATCH_TIMEOUT_S", 0.5)
+
+    loaded_payloads: list[bytes] = []
+    tui: dict[str, Any] = {"pane": _composer_pane(), "submits": 0}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """
+        Record buffer payloads and simulate accept/reject on submit.
+
+        :param cmd: Argv list passed to subprocess.run.
+        :param kwargs: Subprocess kwargs (ignored).
+        :returns: Fake CompletedProcess with rc=0.
+        """
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "load-buffer" in cmd:
+            loaded_payloads.append(Path(cmd[-1]).read_bytes())
+        if "paste-buffer" in cmd:
+            tui["pane"] = _composer_pane("[Pasted text #1 +2 lines]")
+        if cmd[-1] == "Enter":
+            tui["submits"] += 1
+            if reject_name is not None and tui["submits"] == 1:
+                tui["pane"] = _rejection_pane(reject_name)
+            else:
+                tui["pane"] = _composer_pane()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    inject_user_message(bridge_dir, content=content)
+    return loaded_payloads
+
+
+def test_unknown_command_rejection_redelivers_escaped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A message rejected as "Unknown command" is re-delivered escaped.
+
+    Claude Code drops a message whose leading ``/name`` it does not
+    recognize without ever calling the model — the message would be
+    silently swallowed. The bridge must watch for the rejection and paste
+    the message again with the zero-width escape so it reaches the model
+    as plain user text.
+    """
+    payloads = _run_unknown_command_injection(
+        tmp_path,
+        monkeypatch,
+        content="/not-a-real-skill hello world",
+        reject_name="not-a-real-skill",
+    )
+    assert len(payloads) == 2, (
+        f"Expected the rejected message to be pasted twice (raw, then escaped); "
+        f"got {len(payloads)} paste(s)."
+    )
+    assert payloads[0].startswith(b"/not-a-real-skill")
+    assert payloads[1].startswith("\ufeff/not-a-real-skill hello world".encode("utf-8"))
+
+
+def test_unknown_name_accepted_as_skill_is_not_redelivered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    An unknown-to-the-bridge name Claude Code accepts runs exactly once.
+
+    A real skill invocation prints no rejection, so the watch must lapse
+    without a second paste — re-delivering would run the skill twice.
+    """
+    payloads = _run_unknown_command_injection(
+        tmp_path,
+        monkeypatch,
+        content="/my-real-skill do the thing",
+        reject_name=None,
+    )
+    assert len(payloads) == 1, (
+        f"Expected a single paste for an accepted skill; got {len(payloads)}."
+    )
+    assert payloads[0].startswith(b"/my-real-skill")
+
+
+def test_plain_text_skips_the_rejection_watch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A message with no leading slash command never watches for a rejection.
+
+    The watch costs up to the full timeout when no rejection prints, so
+    ordinary messages must skip it entirely (no second paste either).
+    """
+    payloads = _run_unknown_command_injection(
+        tmp_path,
+        monkeypatch,
+        content="just a normal message",
+        reject_name=None,
+    )
+    assert len(payloads) == 1
+
+
+def test_stale_rejection_in_scrollback_does_not_trigger_redelivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A rejection of the same name already in scrollback is not "fresh".
+
+    The watch counts rejection lines against a pre-submit baseline; a
+    stale line from an earlier message keeps the count flat, so an
+    accepted skill re-sent after an earlier typo must not be re-delivered
+    escaped (which would duplicate the message).
+    """
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    monkeypatch.setattr("omnigent.claude_native_bridge._UNKNOWN_COMMAND_WATCH_TIMEOUT_S", 0.5)
+    stale = "● Unknown command: /my-skill\n"
+
+    loaded_payloads: list[bytes] = []
+    tui = {"pane": stale + _composer_pane()}
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """
+        Serve a pane whose scrollback already carries the rejection.
+
+        :param cmd: Argv list passed to subprocess.run.
+        :param kwargs: Subprocess kwargs (ignored).
+        :returns: Fake CompletedProcess with rc=0.
+        """
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=tui["pane"], stderr="")
+        if "load-buffer" in cmd:
+            loaded_payloads.append(Path(cmd[-1]).read_bytes())
+        if "paste-buffer" in cmd:
+            tui["pane"] = stale + _composer_pane("[Pasted text #1 +2 lines]")
+        if cmd[-1] == "Enter":
+            # Accepted this time: the stale rejection stays, no new one.
+            tui["pane"] = stale + _composer_pane()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    inject_user_message(bridge_dir, content="/my-skill retry after typo fix")
+    assert len(loaded_payloads) == 1, (
+        f"A stale rejection must not trigger escaped re-delivery; "
+        f"got {len(loaded_payloads)} paste(s)."
+    )
+
+
+def test_rejection_line_matching_ignores_message_echo() -> None:
+    """
+    The rejection matcher counts rejections, not echoed composer text.
+
+    A user message *containing* the words "Unknown command: /x" renders
+    on a composer row (behind the prompt glyph) and must not count. The
+    TUI also reflows the rejection at the pane width — "Unknown command:"
+    and the name can land on separate lines — so a wrapped rejection must
+    still count.
+    """
+    counter = claude_native_bridge._count_unknown_command_rejections
+    needle = "Unknown command: /x"
+    assert counter("● Unknown command: /x\n❯ \n", needle) == 1
+    # Echoed in the composer draft — not a rejection line.
+    assert counter("❯ say Unknown command: /x\n", needle) == 0
+    assert counter("● Unknown command: /x\n● Unknown command: /x\n", needle) == 2
+    # Narrow pane: the TUI wraps the name onto its own line.
+    wrapped = "● Unknown command:\n  /x\n❯ \n"
+    assert counter(wrapped, needle) == 1
+    long_needle = "Unknown command: /definitely-not-a-real-command"
+    long_wrapped = "● Unknown command:\n  /definitely-not-a-real-command\n❯ \n"
+    assert counter(long_wrapped, long_needle) == 1
+
+
 def test_inject_user_message_raises_when_tmux_target_never_published(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4505,6 +4835,48 @@ def test_inject_slash_command_raises_when_tmux_target_never_published(
             command="/effort high",
             timeout_s=0.0,
         )
+
+
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        URLError("bridge unavailable"),
+        ConnectionResetError("connection reset"),
+        RemoteDisconnected("bridge disconnected"),
+        TimeoutError("notification timed out"),
+        BadStatusLine("invalid response"),
+    ],
+)
+def test_post_tools_changed_normalizes_transport_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport_error: Exception
+) -> None:
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "_wait_for_server_info",
+        Mock(return_value={"url": "http://127.0.0.1:12345", "token": "test-token"}),
+    )
+    monkeypatch.setattr(claude_native_bridge.request, "urlopen", Mock(side_effect=transport_error))
+
+    with pytest.raises(RuntimeError, match="failed to notify Claude tool list change") as caught:
+        post_tools_changed(tmp_path)
+
+    assert caught.value.__cause__ is transport_error
+
+
+def test_post_tools_changed_preserves_programming_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "_wait_for_server_info",
+        Mock(return_value={"url": "http://127.0.0.1:12345", "token": "test-token"}),
+    )
+    monkeypatch.setattr(
+        claude_native_bridge.request, "urlopen", Mock(side_effect=ValueError("bug"))
+    )
+
+    with pytest.raises(ValueError, match="bug"):
+        post_tools_changed(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -5669,6 +6041,37 @@ def test_read_transcript_items_from_offset_returns_latest_model(
     )
 
     assert result.latest_model == "claude-opus-4-7"
+
+
+@pytest.mark.parametrize("initial_model", [None, "gateway-claude-model"])
+def test_transcript_synthetic_error_preserves_model(
+    tmp_path: Path, initial_model: str | None
+) -> None:
+    transcript_path = tmp_path / "session.jsonl"
+    models = [initial_model, "<synthetic>"] if initial_model else ["<synthetic>"]
+    transcript_path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": f"a{index}",
+                    "message": {
+                        "role": "assistant",
+                        "model": model,
+                        "content": [{"type": "text", "text": "API Error: 429"}],
+                    },
+                }
+            )
+            + "\n"
+            for index, model in enumerate(models)
+        ),
+        encoding="utf-8",
+    )
+    result = read_transcript_items_from_offset(
+        transcript_path, 0, start_line=0, agent_name="claude-native-ui"
+    )
+    assert result.latest_model == initial_model
+    assert result.items  # Error messages remain visible; only model metadata is ignored.
 
 
 def test_read_transcript_items_surfaces_custom_title_without_an_item(
@@ -7608,6 +8011,43 @@ _REVERSE_SEARCH_PANE = """\
   ↑/↓ to nav · Enter to use · Esc to cancel · ctrl+s to scope
 """
 
+# The same ctrl+r search as Claude Code 2.1.212 renders it: the search rides
+# the framed composer as its filter field, so the frame and ❯ glyph read
+# exactly like a free input box — only the lowercase footer under the
+# closing rule tells it apart. Typing filters history; Enter replays an
+# old prompt.
+_INLINE_REVERSE_SEARCH_PANE = """\
+❯ hello history entry
+  ⎿  Not logged in · Please run /login
+──────────────────────────────
+❯ 
+──────────────────────────────
+  search prompts:   ⏸ manual mode on · ← for agents
+"""
+
+# The same inline search in a narrow pane: the footer's left cell wraps
+# ("search" / "prompts:") with the right column's text interleaved, so no
+# single row carries the whole marker.
+_INLINE_REVERSE_SEARCH_WRAPPED_PANE = """\
+❯ hello history entry
+──────────────────────────────
+❯ 
+──────────────────────────────
+  search        ⏸ manual mode on · gh auth login fo
+  prompts:
+  ✘ Auto-update failed · Try claude doctor or npm …
+"""
+
+# The same inline search with a filter that matches nothing — the footer
+# switches to "no matching prompt: <filter>", the only visible difference.
+_INLINE_REVERSE_SEARCH_NO_MATCH_PANE = """\
+❯ hello history entry
+──────────────────────────────
+❯ 
+──────────────────────────────
+  no matching prompt: usr-2-injected  ⏸ manual mode on
+"""
+
 # Shell mode, as Claude Code 2.1.240 renders it: typing ``!`` at an empty
 # composer swaps the ``❯`` glyph for ``!`` and everything typed there runs
 # as a bash command. Note the ``❯`` echoes left in the transcript above —
@@ -8250,12 +8690,20 @@ def test_an_effort_injection_with_no_dialog_completes_without_hanging(
     "occupied_pane",
     [
         _REVERSE_SEARCH_PANE,
+        _INLINE_REVERSE_SEARCH_PANE,
         _MODEL_PICKER_PANE,
         _SHELL_MODE_PANE,
         _REWIND_PANE,
         _SETTINGS_PANEL_PANE,
     ],
-    ids=["reverse-search", "model-picker", "shell-mode", "rewind", "settings-panel"],
+    ids=[
+        "reverse-search",
+        "inline-reverse-search",
+        "model-picker",
+        "shell-mode",
+        "rewind",
+        "settings-panel",
+    ],
 )
 def test_inject_user_message_restores_an_occupied_input_box_first(
     occupied_pane: str,
@@ -8323,20 +8771,76 @@ def test_inject_user_message_restores_an_occupied_input_box_first(
 
 @pytest.mark.parametrize(
     "occupied_pane",
-    [_SHELL_MODE_PANE, _REWIND_PANE],
-    ids=["shell-mode", "rewind"],
+    [
+        _SHELL_MODE_PANE,
+        _REWIND_PANE,
+        _INLINE_REVERSE_SEARCH_PANE,
+        _INLINE_REVERSE_SEARCH_NO_MATCH_PANE,
+        _INLINE_REVERSE_SEARCH_WRAPPED_PANE,
+    ],
+    ids=[
+        "shell-mode",
+        "rewind",
+        "inline-reverse-search",
+        "inline-reverse-search-no-match",
+        "inline-reverse-search-wrapped",
+    ],
 )
 def test_an_occupied_pane_never_reads_as_a_mounted_input_box(occupied_pane: str) -> None:
     """
     An occupied pane is not a mounted chat input, ``❯`` in it or not.
 
-    Both panes carry the glyph — shell mode leaves earlier prompt echoes
-    in the transcript above the ``!`` composer, the rewind dialog marks
-    its selected row with it — and both have an input-box rule somewhere
-    below it. Reading that as "ready" is what handed a chat message to
-    bash and to a checkpoint restore; only the framed composer row counts.
+    All these panes carry the glyph — shell mode leaves earlier prompt
+    echoes in the transcript above the ``!`` composer, the rewind dialog
+    marks its selected row with it, and the inline ctrl+r search rides
+    the framed composer itself as its filter field. Reading them as
+    "ready" is what handed a chat message to bash, to a checkpoint
+    restore, and to a history replay; only a framed composer row with no
+    search footer counts.
     """
     assert _claude_prompt_rendered(occupied_pane) is False
+
+
+@pytest.mark.parametrize(
+    "occupied_pane",
+    [
+        _INLINE_REVERSE_SEARCH_PANE,
+        _INLINE_REVERSE_SEARCH_NO_MATCH_PANE,
+        _INLINE_REVERSE_SEARCH_WRAPPED_PANE,
+    ],
+    ids=["idle-filter", "no-match-filter", "wrapped-footer"],
+)
+def test_the_inline_history_search_reads_as_occupying(occupied_pane: str) -> None:
+    """
+    The composer-riding ctrl+r search is named as the occupying surface.
+
+    Its frame and ``❯`` glyph are indistinguishable from a free composer,
+    so without the footer read the reclaim would skip the Escape and the
+    injected message would filter history instead of being delivered.
+    """
+    assert _occupying_surface(occupied_pane) == "the prompt-history search"
+
+
+def test_search_chrome_in_the_transcript_does_not_read_as_occupying() -> None:
+    """
+    Search-footer text echoed into scrollback is not a live search.
+
+    The footer read is anchored below the input box's closing rule, so a
+    conversation ABOUT the history search — its chrome quoted in the
+    transcript above the box — must not draw an Escape at a free composer.
+    """
+    pane = "\n".join(
+        [
+            "❯ what does 'search prompts:' mean?",
+            "  ⎿  It is the ctrl+r history search footer.",
+            "──────────────────────────────",
+            "❯ ",
+            "──────────────────────────────",
+            "  ? for shortcuts",
+        ]
+    )
+    assert _occupying_surface(pane) is None
+    assert _claude_prompt_rendered(pane) is True
 
 
 def test_a_multiline_draft_in_a_sliver_pane_still_reads_as_ready() -> None:
@@ -8773,7 +9277,7 @@ async def test_hook_evaluate_endpoint_returns_deny_hook_output(
 async def test_hook_evaluate_endpoint_fails_closed_on_unreachable_upstream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Upstream failure denies PreToolUse and stays open for PostToolUse."""
+    """Upstream failure asks for PreToolUse approval and stays open for PostToolUse."""
     client = _ScriptedPolicyClient(None)
     relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
     try:
@@ -8784,7 +9288,7 @@ async def test_hook_evaluate_endpoint_fails_closed_on_unreachable_upstream(
             _PRE_TOOL_USE_PAYLOAD,
         )
         output = json.loads(body)
-        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
 
         post_body = await asyncio.to_thread(
             _relay_request_raw,
@@ -8859,5 +9363,56 @@ async def test_curl_evaluate_policy_command_round_trips(
     )
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
-    assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
     assert output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+# ── owner-pid marker + orphan prune (bridge-dir reaping) ────────────────────
+
+
+def test_prepare_bridge_dir_writes_owner_pid_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prepare_bridge_dir records the creating pid so the periodic sweep can
+    prune the dir only when its owner is provably dead."""
+    from omnigent.claude_native_bridge import prepare_bridge_dir
+
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "claude-native")
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+
+    bridge_dir = prepare_bridge_dir("conv_owner", workspace=tmp_path)
+
+    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+
+
+def test_prune_orphaned_bridge_dirs_only_removes_dead_owners(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prune removes only provably-dead-owner dirs; live and unmarked survive."""
+    from omnigent.claude_native_bridge import prune_orphaned_bridge_dirs
+
+    root = tmp_path / "claude-native"
+    root.mkdir(parents=True)
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", root)
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    dead_dir = root / "deadowner"
+    dead_dir.mkdir()
+    (dead_dir / "owner.pid").write_text(str(dead.pid), encoding="utf-8")
+
+    live_dir = root / "liveowner"
+    live_dir.mkdir()
+    (live_dir / "owner.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    unmarked_dir = root / "unmarked"
+    unmarked_dir.mkdir()
+
+    pruned = prune_orphaned_bridge_dirs()
+
+    assert pruned == 1
+    assert not dead_dir.exists()
+    assert live_dir.exists()
+    assert unmarked_dir.exists()
