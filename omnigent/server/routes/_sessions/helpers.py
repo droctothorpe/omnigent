@@ -4405,6 +4405,47 @@ def _publish_status(
     session_stream.publish(session_id, payload)
 
 
+def reconcile_orphaned_running_status(session_id: str) -> str:
+    """
+    Settle a session that reads ``running`` but whose runner is
+    confirmed gone down to a non-running resting state.
+
+    A ``running`` live-status is only meaningful while a runner is
+    actually executing the turn. When the runner (and its host) have
+    dropped past the liveness window — a server replica that restarted
+    and outlived the runner, a crashed host, a graceful disconnect
+    mid-turn — the persisted ``running`` is stale: no executor will
+    ever emit the terminal edge that would clear it, so it sticks
+    forever. The sidebar then shows a turn that isn't happening, and
+    ``stop_session`` reports a success it never delivered.
+
+    This is the lazy-on-read backstop for that stale state. Callers
+    that observe a ``running`` session whose runner is confirmed
+    offline route it through here to settle it to ``idle`` — Stop is
+    non-sticky, so the transcript is intact and the next message
+    relaunches the runner. Reconciliation funnels through
+    :func:`_publish_status`, so the same edge updates the in-memory
+    status cache, streams a ``session.status`` event to any watcher,
+    mirrors the row for other replicas, and completes a still-running
+    scheduled run. It is only ever called once the runner is known to
+    be gone (checked by the caller against
+    :func:`runner_seen_is_fresh` / live liveness), never on a runner
+    that is merely mid-reconnect inside the grace window.
+
+    :param session_id: Session/conversation identifier to settle.
+    :returns: The effective resting status after reconciliation —
+        ``"idle"`` normally, or ``"failed"`` when a terminal failure
+        was already latched (``_publish_status`` keeps ``failed``
+        sticky against ``idle``). Both are non-running, so callers can
+        safely surface the returned value in place of ``running``.
+    """
+    _publish_status(session_id, "idle")
+    # ``failed`` is sticky against ``idle`` inside ``_publish_status`` — report
+    # whatever resting state actually latched so callers surface the truth
+    # rather than a hard-coded ``idle`` the cache may not agree with.
+    return _session_status_cache.get(session_id, "idle")
+
+
 def _truncate_label(value: str) -> str:
     """Truncate a label value to fit the ``conversation_labels.value`` column.
 
