@@ -373,6 +373,67 @@ describe("NewChatLandingScreen create flow", () => {
     );
   });
 
+  it("keeps a failed create's restored draft when a newer create succeeds", async () => {
+    let resolveFirst!: (response: Response) => void;
+    let resolveSecond!: (response: Response) => void;
+    vi.mocked(authenticatedFetch)
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        }) as ReturnType<typeof authenticatedFetch>,
+      )
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveSecond = resolve;
+        }) as ReturnType<typeof authenticatedFetch>,
+      );
+    beginLocalConversationMock
+      .mockReturnValueOnce({ tempConvId: "temp:aaaaaaaa", pendingMsgTempId: "pend_a" })
+      .mockReturnValueOnce({ tempConvId: "temp:bbbbbbbb", pendingMsgTempId: "pend_b" });
+
+    renderLanding();
+    await waitForWorkspaceSeed();
+    typeMessage("restore this draft");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
+    cleanup();
+
+    renderLanding();
+    await waitForWorkspaceSeed();
+    typeMessage("newer successful create");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(2));
+    cleanup();
+
+    resolveFirst({
+      ok: false,
+      status: 500,
+      json: async () => ({ detail: "first create failed" }),
+    } as unknown as Response);
+    await waitFor(() => expect(removeLocalConversationMock).toHaveBeenCalledWith("temp:aaaaaaaa"));
+
+    resolveSecond({
+      ok: true,
+      json: async () => ({ id: "conv_second" }),
+    } as unknown as Response);
+    await waitFor(() =>
+      expect(hydrateLocalConversationMock).toHaveBeenCalledWith(
+        "temp:bbbbbbbb",
+        "conv_second",
+        "ag_hello",
+        "newer successful create",
+        [],
+        "pend_b",
+        null,
+        navigateMock,
+        expect.any(Function),
+      ),
+    );
+
+    renderLanding();
+    expect(screen.getByTestId("new-chat-landing-input")).toHaveValue("restore this draft");
+  });
+
   it("records the launched workspace under its host without corrupting other recents", async () => {
     // Write-back hygiene for omnigent:recent-workspaces: the launched path
     // moves to the front of ITS host's list (deduplicated, not appended

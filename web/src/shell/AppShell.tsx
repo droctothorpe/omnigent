@@ -440,11 +440,12 @@ export function AppShell() {
   );
   useSeedReadState(allConversations);
   const activeConv = useMemo(() => {
-    if (!conversationId) return null;
+    if (!serverConversationId) return null;
     return (
-      conversationsData?.pages.flatMap((p) => p.data).find((c) => c.id === conversationId) ?? null
+      conversationsData?.pages.flatMap((p) => p.data).find((c) => c.id === serverConversationId) ??
+      null
     );
-  }, [conversationId, conversationsData]);
+  }, [serverConversationId, conversationsData]);
   // Single-conversation snapshot (shared cache with chatStore.bindStream).
   // For sub-agent (child) sessions the sidebar list omits the row, so this
   // is the only path through which the UI learns the user's permission

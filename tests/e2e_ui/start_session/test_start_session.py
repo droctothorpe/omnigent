@@ -723,39 +723,26 @@ async def _drive_send_busy_spinner(base_url: str, session_id: str) -> None:
             await browser.close()
 
 
-def test_start_session_opens_before_the_create_responds(seeded_session: tuple[str, str]) -> None:
-    """Send opens the session on the stream's announcement, not the response.
+def test_start_session_ignores_uncorrelated_announcement_while_create_pending(
+    seeded_session: tuple[str, str],
+) -> None:
+    """The temp chat waits for the create response's authoritative session id.
 
-    ``POST /v1/sessions`` doesn't answer until the host has finished spawning a
-    runner — a process boot, seconds of it — and the landing screen used to sit
-    on that whole wait before routing anywhere. But the server writes the
-    session row and announces it on ``WS /v1/sessions/updates`` almost
-    immediately, so the id is available long before the response is. This holds
-    the create POST open for the entire test and announces the session over the
-    stream: the chat page must open anyway.
-
-    A regression that goes back to awaiting the response would never leave the
-    landing screen here, since the create never answers.
-
-    The announcement is injected through a mocked updates socket rather than a
-    real create, because this suite has no host daemon for a host-bound create
-    to actually succeed against. The row carries the stubbed agent/host the
-    composer just asked for — that pairing is what the screen matches on to
-    tell its own new session apart from every other session the stream
-    announces to this user.
+    A session update with the same agent and host is not correlated to this
+    request, so it must not replace the temporary route. Once the create
+    responds, the temp chat hydrates onto that returned id.
     """
     base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_open_before_create_responds(base_url, session_id))
+    _run_in_fresh_loop(_drive_ignore_uncorrelated_announcement(base_url, session_id))
 
 
-async def _drive_open_before_create_responds(base_url: str, session_id: str) -> None:
+async def _drive_ignore_uncorrelated_announcement(base_url: str, session_id: str) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
         page = await browser.new_page()
         try:
             create_seen = asyncio.Event()
-            # Released only at teardown, so the create is pending for every
-            # assertion below.
+            # Held until the uncorrelated announcement has been observed.
             release_create = asyncio.Event()
             sockets: list[Any] = []
 
@@ -827,9 +814,8 @@ async def _drive_open_before_create_responds(base_url: str, session_id: str) -> 
             # The create is in flight and will stay that way.
             await _wait_until(create_seen.is_set)
 
-            # A brand-new session the page has never seen, on the agent and
-            # host the composer just asked for: the server's announcement of
-            # the row it wrote before starting the runner.
+            # Another same-agent/host session is indistinguishable from this
+            # create without a request correlation token.
             announced_id = "conv_announced_e2e"
             sockets[0].send(
                 json.dumps(
@@ -853,13 +839,16 @@ async def _drive_open_before_create_responds(base_url: str, session_id: str) -> 
                 )
             )
 
-            # KEY ASSERTION: routed to the announced session while the create
-            # is still pending — the landing composer is gone and the URL is
-            # the announced id, not the one the (unanswered) create would
-            # eventually return.
-            await expect(page).to_have_url(f"{base_url}/c/{announced_id}", timeout=20_000)
+            # Stay on the already-open temp chat; never guess that the pushed
+            # row belongs to this request.
+            await expect(page).to_have_url(
+                re.compile(rf"{re.escape(base_url)}/c/temp:[0-9a-f]{{8}}")
+            )
             await expect(page.get_by_test_id("new-chat-landing-input")).to_have_count(0)
             assert not release_create.is_set(), "the create must still be unanswered here"
+
+            release_create.set()
+            await expect(page).to_have_url(f"{base_url}/c/{session_id}", timeout=30_000)
         finally:
             release_create.set()
             await browser.close()

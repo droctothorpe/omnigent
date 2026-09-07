@@ -2200,12 +2200,18 @@ interface LandingDraft {
 }
 
 let landingDraft: LandingDraft | null = null;
+let landingDraftRevision = 0;
+
+function writeLandingDraft(draft: LandingDraft | null): void {
+  landingDraft = draft;
+  landingDraftRevision += 1;
+}
 
 // Test-only: clears the preserved landing draft so each case starts from a
 // clean module state (the draft is module-scoped and survives unmount by
 // design, which would otherwise leak between tests).
 export function resetLandingDraft(): void {
-  landingDraft = null;
+  writeLandingDraft(null);
 }
 
 export function NewChatLandingScreen() {
@@ -2690,6 +2696,7 @@ export function NewChatLandingScreen() {
   // `submittedRef` is flipped once the draft is sent to a create, so the
   // snapshot is dropped instead of resurrected.
   const submittedRef = useRef(false);
+  const submittedDraftRevisionRef = useRef<number | null>(null);
   // Whether this composer is still on screen. The create POST can outlive
   // it — the user opens another session while the session bootstraps — and
   // the post-create navigation must not follow them there.
@@ -2727,7 +2734,11 @@ export function NewChatLandingScreen() {
     onScreenRef.current = true;
     return () => {
       onScreenRef.current = false;
-      landingDraft = submittedRef.current ? null : draftRef.current;
+      if (!submittedRef.current) {
+        writeLandingDraft(draftRef.current);
+      } else if (submittedDraftRevisionRef.current === landingDraftRevision) {
+        writeLandingDraft(null);
+      }
     };
   }, []);
 
@@ -4239,7 +4250,8 @@ export function NewChatLandingScreen() {
   // dropped it on the strength of the submit.
   function returnDraftToUser() {
     submittedRef.current = false;
-    if (!onScreenRef.current) landingDraft = draftRef.current;
+    submittedDraftRevisionRef.current = null;
+    if (!onScreenRef.current) writeLandingDraft(draftRef.current);
   }
 
   async function handleCreate() {
@@ -4282,6 +4294,7 @@ export function NewChatLandingScreen() {
     // hand it back pre-filled. Flipped here rather than on the response
     // because the create outlives an unmount; a create that fails hands the
     // draft back via returnDraftToUser.
+    submittedDraftRevisionRef.current = landingDraftRevision;
     submittedRef.current = true;
     try {
       const trimmedBranch = branchName.trim();
@@ -4694,7 +4707,9 @@ export function NewChatLandingScreen() {
       appendPromptHistoryEntry(initialPrompt, data.id);
       // The session was created — drop any draft a detour back to this
       // screen stashed, so the next visit starts clean.
-      landingDraft = null;
+      if (submittedDraftRevisionRef.current === landingDraftRevision) {
+        writeLandingDraft(null);
+      }
       void queryClient.invalidateQueries({ queryKey: ["directory-sessions"] });
 
       // `localConv` is set only when a real agent id was resolved up front, so
