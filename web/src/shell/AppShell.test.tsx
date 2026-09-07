@@ -570,6 +570,14 @@ describe("AppShell header", () => {
     expect(screen.getByRole("button", { name: /sidebar/i })).toBeInTheDocument();
   });
 
+  it("does not fetch child sessions for a temp id in debug mode", () => {
+    mockConversations([]);
+    renderShell("/c/temp:12345678?debug=1");
+
+    expect(useChildSessionsMock).not.toHaveBeenCalledWith("temp:12345678");
+    expect(screen.queryByTestId("execution-logs-card")).toBeNull();
+  });
+
   it("shows owner actions for a top-level session omitted from conversation pages", () => {
     mockConversations([]);
     useSessionMock.mockReturnValue({

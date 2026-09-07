@@ -2058,10 +2058,10 @@ export function AppShell() {
               push panel is open (the panel itself becomes the focus). Only
               rendered in debug mode so the column doesn't occupy space in
               normal use. */}
-                {conversationId && debugMode && !panelOpen && !executionLogsOpen && (
+                {serverConversationId && debugMode && !panelOpen && !executionLogsOpen && (
                   <div className="hidden md:flex md:flex-col md:w-56 md:shrink-0 md:border-l md:border-border md:overflow-y-auto md:px-2 md:pb-2 md:pt-12 md:gap-2">
                     <SessionRail
-                      conversationId={conversationId}
+                      conversationId={serverConversationId}
                       onExpandExecutionLogs={openExecutionLogsPanel}
                       suppressed={false}
                     />

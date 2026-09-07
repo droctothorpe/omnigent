@@ -713,9 +713,7 @@ async def _drive_send_busy_spinner(base_url: str, session_id: str) -> None:
             await expect(composer).to_be_disabled()
             await expect(composer).to_have_attribute("placeholder", "Starting the session…")
             await expect(
-                page.get_by_test_id("message-bubble").get_by_text(
-                    "set up the project", exact=True
-                )
+                page.get_by_test_id("message-bubble").get_by_text("set up the project", exact=True)
             ).to_be_visible()
 
             # Release the create: the same chat hydrates onto the real id.
