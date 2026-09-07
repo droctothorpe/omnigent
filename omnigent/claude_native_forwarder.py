@@ -1581,7 +1581,9 @@ async def _forward_available_subagents(
                         child_conversation_id=entry.child_conversation_id,
                         byte_offset=entry.byte_offset,
                         seen_source_ids=_bounded_seen_source_ids(seen_source_ids),
-                        last_activity_ts=new_entry.last_activity_ts,
+                        # A dropped item is still observed activity: it anchors
+                        # quiescence on a cold entry so ``failed`` can fire.
+                        last_activity_ts=now,
                         last_status=new_entry.last_status,
                         dropped_item=True,
                     )
@@ -1612,7 +1614,8 @@ async def _forward_available_subagents(
                         child_conversation_id=entry.child_conversation_id,
                         byte_offset=entry.byte_offset,
                         seen_source_ids=_bounded_seen_source_ids(seen_source_ids),
-                        last_activity_ts=new_entry.last_activity_ts,
+                        # Observed activity, as in the permanent-rejection drop.
+                        last_activity_ts=now,
                         last_status=new_entry.last_status,
                         dropped_item=True,
                     )
@@ -1664,7 +1667,9 @@ async def _forward_available_subagents(
                 child_conversation_id=entry.child_conversation_id,
                 byte_offset=result.byte_offset,
                 seen_source_ids=_bounded_seen_source_ids(seen_source_ids),
-                last_activity_ts=now if had_item else entry.last_activity_ts,
+                # Carry the in-loop stamp: item flow set ``now`` there, and a
+                # drop's anchor must survive this rebuild on a cold entry.
+                last_activity_ts=new_entry.last_activity_ts,
                 last_status=new_entry.last_status,
                 dropped_item=new_entry.dropped_item,
             )
@@ -1692,9 +1697,9 @@ async def _forward_available_subagents(
         if had_item:
             desired_status = "running"
         elif (
-            # Items are retried across polls, so a child that went quiet on
-            # failing POSTs is not quiescent; its ``idle`` would carry no
-            # ``output`` and reach the parent as a successful completion.
+            # Items retry across polls: quiet-on-failing-POSTs is not
+            # quiescence (a bare ``idle`` reads as success), and a sustained
+            # outage holds the child running until its POSTs recover.
             not items_failed
             and new_entry.last_activity_ts is not None
             and now - new_entry.last_activity_ts > _SUBAGENT_IDLE_QUIESCENCE_S

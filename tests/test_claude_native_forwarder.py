@@ -5432,6 +5432,32 @@ def _quiesce_subagent_state(
     )
 
 
+def _age_subagent_activity(
+    state: forwarder.SubagentForwardState,
+) -> forwarder.SubagentForwardState:
+    """
+    Push existing last-activity stamps past the quiescence window, keeping ``None``.
+
+    Unlike ``_quiesce_subagent_state`` this never fabricates a timestamp, so an
+    entry that has observed no activity keeps the ``None`` a fresh registration
+    starts with — the shape the quiescence gate must handle on its own.
+
+    :param state: Cursor map returned by a previous watcher tick.
+    :returns: A copy whose stamped entries read as quiet to the next tick.
+    """
+    quiet_since = time.time() - (forwarder._SUBAGENT_IDLE_QUIESCENCE_S + 60.0)
+    return forwarder.SubagentForwardState(
+        subagents={
+            subagent_id: (
+                replace(entry, last_activity_ts=quiet_since)
+                if entry.last_activity_ts is not None
+                else entry
+            )
+            for subagent_id, entry in state.subagents.items()
+        }
+    )
+
+
 async def _tick_subagents(
     client: httpx.AsyncClient,
     *,
@@ -5534,7 +5560,7 @@ async def test_subagent_watcher_publishes_idle_for_a_healthy_quiet_child(
             state=state,
             item_retry_tracker=item_retry_tracker,
         )
-        state = await _tick_subagents(
+        await _tick_subagents(
             client,
             bridge_dir=bridge_dir,
             transcript_path=transcript_path,
@@ -5670,7 +5696,7 @@ async def test_subagent_watcher_defers_failed_for_a_dropped_item_to_quiescence(
             )
         assert state.subagents["poison1"].dropped_item is True
         assert statuses == [], f"a still-working child was aborted at the drop; {statuses}"
-        state = await _tick_subagents(
+        await _tick_subagents(
             client,
             bridge_dir=bridge_dir,
             transcript_path=transcript_path,
@@ -5768,7 +5794,7 @@ async def test_subagent_watcher_keeps_the_drop_marker_across_a_later_item_failur
             state=_quiesce_subagent_state(state),
             item_retry_tracker=item_retry_tracker,
         )
-        state = await _tick_subagents(
+        await _tick_subagents(
             client,
             bridge_dir=bridge_dir,
             transcript_path=transcript_path,
@@ -5783,6 +5809,165 @@ async def test_subagent_watcher_keeps_the_drop_marker_across_a_later_item_failur
         "/v1/sessions/conv_child_mixed/events",
         {"status": "failed", "output": forwarder._SUBAGENT_DROPPED_ITEM_REASON},
     )
+
+
+async def test_subagent_watcher_fails_a_cold_child_whose_only_item_is_dropped(
+    tmp_path: Path,
+) -> None:
+    """
+    A never-active child whose only item is dropped still reaches ``failed``.
+
+    A freshly registered entry starts with ``last_activity_ts=None`` and the
+    quiescence edge requires a timestamp, so unless the drop itself counts as
+    observed activity there is no anchor: the watcher would publish neither
+    ``idle`` nor ``failed`` and the parent would wait on the child forever.
+    """
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="cold1",
+        agent_type="Explore",
+        description="first item rejected",
+        tool_use_id="toolu_cold",
+        transcript_records=[_assistant_record("sa-assistant-cold", "the answer")],
+    )
+    # The exact shape registration creates: no activity observed yet.
+    state = forwarder.SubagentForwardState(
+        subagents={
+            "cold1": forwarder.SubagentEntry(
+                subagent_id="cold1",
+                child_conversation_id="conv_child_cold",
+            )
+        }
+    )
+    statuses: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """
+        Permanently reject every item POST, accepting everything else.
+
+        :param request: Request issued by the forwarder.
+        :returns: Canned Omnigent response.
+        """
+        body = json.loads(request.content.decode("utf-8"))
+        if body.get("type") == "external_conversation_item":
+            return httpx.Response(400, json={"error": "rejected"})
+        if body.get("type") == "external_session_status":
+            statuses.append((request.url.path, body["data"]))
+        return httpx.Response(202, json={})
+
+    item_retry_tracker = forwarder._PostRetryTracker(base_delay_s=0.0)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://ap",
+    ) as client:
+        for _ in range(forwarder._HTTP_POST_MAX_PERMANENT_FAILURES):
+            state = await _tick_subagents(
+                client,
+                bridge_dir=bridge_dir,
+                transcript_path=transcript_path,
+                state=state,
+                item_retry_tracker=item_retry_tracker,
+            )
+        entry = state.subagents["cold1"]
+        assert entry.dropped_item is True
+        assert entry.last_activity_ts is not None, (
+            "a dropped item must anchor quiescence on a cold entry"
+        )
+        await _tick_subagents(
+            client,
+            bridge_dir=bridge_dir,
+            transcript_path=transcript_path,
+            state=_age_subagent_activity(state),
+            item_retry_tracker=item_retry_tracker,
+        )
+
+    assert [(path, data["status"]) for path, data in statuses] == [
+        ("/v1/sessions/conv_child_cold/events", "failed")
+    ], f"a cold child with a dropped item never terminated; posted={statuses}"
+    assert statuses[0][1]["output"] == forwarder._SUBAGENT_DROPPED_ITEM_REASON
+
+
+async def test_subagent_watcher_fails_a_cold_child_after_an_ambiguous_drop(
+    tmp_path: Path,
+) -> None:
+    """
+    An ambiguous-delivery drop on a cold child also ends in ``failed``.
+
+    An ambiguous POST failure (request sent, no response) drops the item on
+    the first attempt — no retry budget involved — so a child can go from
+    freshly registered to dropped-item in a single tick. That drop must count
+    as observed activity too, or the child never gets a terminal edge.
+    """
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="ambig1",
+        agent_type="Explore",
+        description="ambiguous delivery",
+        tool_use_id="toolu_ambig",
+        transcript_records=[_assistant_record("sa-assistant-ambig", "the answer")],
+    )
+    state = forwarder.SubagentForwardState(
+        subagents={
+            "ambig1": forwarder.SubagentEntry(
+                subagent_id="ambig1",
+                child_conversation_id="conv_child_ambig",
+            )
+        }
+    )
+    statuses: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """
+        Fail every item POST ambiguously, accepting everything else.
+
+        :param request: Request issued by the forwarder.
+        :returns: Canned Omnigent response.
+        :raises httpx.ReadError: For every item POST (sent, no response).
+        """
+        body = json.loads(request.content.decode("utf-8"))
+        if body.get("type") == "external_conversation_item":
+            raise httpx.ReadError("connection dropped mid-response", request=request)
+        if body.get("type") == "external_session_status":
+            statuses.append((request.url.path, body["data"]))
+        return httpx.Response(202, json={})
+
+    item_retry_tracker = forwarder._PostRetryTracker(base_delay_s=0.0)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://ap",
+    ) as client:
+        state = await _tick_subagents(
+            client,
+            bridge_dir=bridge_dir,
+            transcript_path=transcript_path,
+            state=state,
+            item_retry_tracker=item_retry_tracker,
+        )
+        entry = state.subagents["ambig1"]
+        assert entry.dropped_item is True
+        assert entry.last_activity_ts is not None, (
+            "an ambiguous drop must anchor quiescence on a cold entry"
+        )
+        await _tick_subagents(
+            client,
+            bridge_dir=bridge_dir,
+            transcript_path=transcript_path,
+            state=_age_subagent_activity(state),
+            item_retry_tracker=item_retry_tracker,
+        )
+
+    assert [(path, data["status"]) for path, data in statuses] == [
+        ("/v1/sessions/conv_child_ambig/events", "failed")
+    ], f"a cold child with an ambiguously-dropped item never terminated; posted={statuses}"
+    assert statuses[0][1]["output"] == forwarder._SUBAGENT_DROPPED_ITEM_REASON
 
 
 async def test_subagent_watcher_skips_subagents_already_in_state(
