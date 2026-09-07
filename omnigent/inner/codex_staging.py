@@ -43,17 +43,34 @@ def _staging_root_path() -> Path:
 def codex_home_staging_root() -> Path:
     """Create-and-return the root that per-conversation CODEX_HOMEs live under.
 
-    :returns: The per-user staging root, private (``0o700``) to the current
-        user.
+    :returns: The per-user staging root, verified private (``0o700``) to the
+        current user.
     :raises OSError: When the root cannot be created (e.g. an unwritable
-        system temp dir); callers fall back to a plain temp-dir home, which
-        keeps the session bootable at the cost of sandbox skill exposure.
+        system temp dir), or exists but is not a real directory owned by the
+        current user without group/other write access. Callers fall back to a
+        plain unpredictable temp-dir home, which keeps the session bootable at
+        the cost of sandbox skill exposure.
     """
     root = _staging_root_path()
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # A pre-existing root may carry a permissive umask-derived mode; tighten
-    # it so the globber's safety check keeps accepting the root.
-    with contextlib.suppress(OSError):
+    if not hasattr(os, "getuid"):
+        # Windows temp dirs are already per-user; POSIX ownership semantics
+        # don't apply.
+        return root
+    # ``mkdir(exist_ok=True)`` silently accepts a pre-existing path — even a
+    # symlink to a directory — and the name is predictable in a shared temp
+    # dir, so another principal could have planted it first. Codex later
+    # reads ``config.toml``/``auth.json`` from homes under this root by
+    # pathname, so refuse anything that is not a real directory we own.
+    root_stat = os.lstat(root)
+    if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != os.getuid():
+        raise OSError(
+            f"codex home staging root {root} is not a directory owned by the current user"
+        )
+    if root_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        # A pre-existing root may carry a permissive umask-derived mode;
+        # tighten it — failing loud when we cannot — so no other principal
+        # can rename homes out from under live sessions.
         root.chmod(0o700)
     return root
 

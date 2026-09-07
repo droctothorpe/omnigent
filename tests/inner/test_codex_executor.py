@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import os
 import stat
 import tempfile
 import unittest
@@ -2678,6 +2679,35 @@ def test_populate_codex_skills_copy_mode_materializes_real_directories(
         "into the unmounted bundle directory inside the sandbox"
     )
     assert (staged / "SKILL.md").read_text() == (bundle_skills / "alpha" / "SKILL.md").read_text()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="requires symlink support")
+def test_populate_codex_skills_copy_mode_keeps_skill_symlinks_as_links(
+    tmp_path: Path,
+) -> None:
+    """Copy mode must never dereference a symlink inside a skill directory.
+
+    The staged ``skills/`` subtree is re-exposed read-only inside sandboxes,
+    so following a link would materialize its out-of-bundle target — e.g. a
+    host credential file — into a mounted tree. Copied as a link, an escaping
+    target simply dangles inside the namespace and stays unreadable.
+    """
+    from omnigent.inner.codex_executor import _populate_codex_skills
+
+    secret = tmp_path / "host-secret.json"
+    secret.write_text('{"token": "never-copy-into-a-mounted-tree"}')
+    bundle_skills = tmp_path / "bundle"
+    skill_dir = _make_skill_dir(bundle_skills, "alpha")
+    (skill_dir / "creds").symlink_to(secret)
+
+    target = tmp_path / "codex_home_skills"
+    _populate_codex_skills(target, "all", [bundle_skills], copy_skills=True)
+
+    staged_link = target / "alpha" / "creds"
+    assert staged_link.is_symlink(), (
+        "copy mode dereferenced a skill symlink: the target's bytes were "
+        "materialized into the sandbox-mounted skills subtree"
+    )
 
 
 def test_populate_codex_skills_from_bundle_none_leaves_no_dir(tmp_path: Path) -> None:

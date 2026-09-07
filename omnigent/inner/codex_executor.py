@@ -665,7 +665,11 @@ def _populate_codex_skills(
                     exc,
                 )
         try:
-            shutil.copytree(skill_dir, link_path)
+            # ``symlinks=True``: copy links as links. Dereferencing would
+            # materialize out-of-bundle targets (e.g. a link to a host
+            # credential) into a tree sandboxes re-expose; a copied escaping
+            # link merely dangles inside the mount namespace.
+            shutil.copytree(skill_dir, link_path, symlinks=True)
         except OSError as copy_exc:
             # Copying can fail too (unreadable source, race) — skip this
             # one skill rather than abort the whole session boot.

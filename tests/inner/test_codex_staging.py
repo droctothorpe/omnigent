@@ -18,6 +18,7 @@ import pytest
 
 from omnigent.inner.codex_staging import (
     CODEX_HOME_PREFIX,
+    _staging_root_path,
     codex_home_staging_root,
     staged_codex_skill_dirs,
 )
@@ -109,3 +110,38 @@ def test_globber_fails_closed_on_a_group_or_other_writable_root(
 
     root.chmod(0o707)
     assert staged_codex_skill_dirs() == []
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership semantics")
+def test_staging_root_refuses_a_symlink_squatting_its_name(
+    isolated_tempdir: Path,
+) -> None:
+    """A pre-planted symlink at the root's predictable name must be refused.
+
+    ``mkdir(exist_ok=True)`` accepts a symlink-to-directory silently, so a
+    squatter in the shared temp dir could route every staged home — whose
+    ``config.toml``/``auth.json`` codex reads by pathname — into a tree they
+    control and substitute contents at will.
+    """
+    attacker_tree = isolated_tempdir / "attacker-controlled"
+    attacker_tree.mkdir()
+    _staging_root_path().symlink_to(attacker_tree)
+
+    with pytest.raises(OSError):
+        codex_home_staging_root()
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership semantics")
+def test_staging_root_refuses_a_root_owned_by_another_user(
+    isolated_tempdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing root owned by a different uid must be refused — its
+    owner can rename homes under it and substitute a malicious config that
+    the codex process then loads. The caller's OSError fallback boots the
+    session from a private ``mkdtemp`` home instead.
+    """
+    foreign_uid = os.getuid() + 1
+    monkeypatch.setattr(os, "getuid", lambda: foreign_uid)
+
+    with pytest.raises(OSError):
+        codex_home_staging_root()
