@@ -27,6 +27,9 @@ import { writeDefaultBaseBranch } from "@/lib/baseBranchPreferences";
 // layers are stubbed so the test isolates that wiring.
 const navigateMock = vi.fn();
 const setPendingInitialPromptMock = vi.fn();
+const beginLocalConversationMock = vi.fn();
+const hydrateLocalConversationMock = vi.fn();
+const removeLocalConversationMock = vi.fn();
 
 const RECENT_KEY = "omnigent:recent-workspaces";
 // Prompt history is scoped per conversation; the landing composer writes under
@@ -50,6 +53,9 @@ vi.mock("@/lib/routing", () => ({
 // The screen hands the first message to ChatPage through the chatStore
 // (keyed by conversation id), not router state — assert on that call.
 vi.mock("@/store/chatStore", () => ({
+  beginLocalConversation: (...args: unknown[]) => beginLocalConversationMock(...args),
+  hydrateLocalConversation: (...args: unknown[]) => hydrateLocalConversationMock(...args),
+  removeLocalConversation: (...args: unknown[]) => removeLocalConversationMock(...args),
   setPendingInitialPrompt: (...args: unknown[]) => setPendingInitialPromptMock(...args),
 }));
 
@@ -262,6 +268,11 @@ function saveConfig(): void {
 beforeEach(() => {
   navigateMock.mockReset();
   setPendingInitialPromptMock.mockReset();
+  beginLocalConversationMock.mockReset();
+  beginLocalConversationMock.mockReturnValue(null);
+  hydrateLocalConversationMock.mockReset();
+  removeLocalConversationMock.mockReset();
+  removeLocalConversationMock.mockReturnValue(false);
   pushMatchers.length = 0;
   announcePushedSession = null;
   vi.mocked(authenticatedFetch).mockReset();
@@ -321,6 +332,45 @@ describe("NewChatLandingScreen create flow", () => {
 
     // On success the screen routes to the freshly created session.
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/c/conv_new"));
+  });
+
+  it("uses the response id for a navigate-first create instead of matching a pushed row", async () => {
+    let resolveCreate!: (response: Response) => void;
+    vi.mocked(authenticatedFetch).mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        resolveCreate = resolve;
+      }) as ReturnType<typeof authenticatedFetch>,
+    );
+    beginLocalConversationMock.mockReturnValue({
+      tempConvId: "temp:12345678",
+      pendingMsgTempId: "pend_1",
+    });
+
+    renderLanding();
+    await waitForWorkspaceSeed();
+    typeMessage("inspect the repo");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/c/temp:12345678"));
+    expect(pushMatchers).toHaveLength(0);
+
+    resolveCreate({
+      ok: true,
+      json: async () => ({ id: "conv_authoritative" }),
+    } as unknown as Response);
+    await waitFor(() =>
+      expect(hydrateLocalConversationMock).toHaveBeenCalledWith(
+        "temp:12345678",
+        "conv_authoritative",
+        "ag_hello",
+        "inspect the repo",
+        [],
+        "pend_1",
+        null,
+        navigateMock,
+        expect.any(Function),
+      ),
+    );
   });
 
   it("records the launched workspace under its host without corrupting other recents", async () => {

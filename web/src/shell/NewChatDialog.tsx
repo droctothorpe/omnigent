@@ -4272,9 +4272,10 @@ export function NewChatLandingScreen() {
     // failure after the navigate-first jump strands a read-only phantom chat.
     const tearDownLocalConversation = () => {
       if (localConv === null) return;
+      const stillOnTempRoute = window.location.pathname.endsWith(`/c/${localConv.tempConvId}`);
       const wasViewing = removeLocalConversation(localConv.tempConvId);
       // Gated on `wasViewing` (not `onScreenRef` — the landing already unmounted).
-      if (wasViewing) navigate("/");
+      if (wasViewing && stillOnTempRoute) navigate("/");
     };
     // The draft is spent from the moment it is submitted: it belongs to the
     // session now being created, so a detour back to this screen must not
@@ -4465,7 +4466,7 @@ export function NewChatLandingScreen() {
         // A sandbox create has no host to match on until the sandbox
         // registers one, so it waits for the response like before.
         const matchOwnCreate =
-          sandboxSelected || !selectedHostId
+          localConv !== null || sandboxSelected || !selectedHostId
             ? null
             : (item: SessionListWireItem) =>
                 !knownSessionIds.has(item.id) &&
@@ -4565,12 +4566,10 @@ export function NewChatLandingScreen() {
               smartRoutingHarnessSelected || pinnedNativeRoutes ? initialPrompt : undefined,
           }),
         });
-        // The create doesn't answer until the host has spawned a runner — a
-        // process boot, seconds of it — but the session row exists (and is
-        // announced on the updates stream) almost immediately. Open the chat
-        // on whichever id lands first: the pushed row typically wins by
-        // seconds, and the chat page renders from the id alone, showing its
-        // own starting spinner while the runner comes up.
+        // The server-first fallback can still open from the pushed row before
+        // the create responds. Navigate-first is already showing its temp chat,
+        // so it waits for the response's authoritative id instead of guessing
+        // which same-agent/host push belongs to this request.
         const abortPush = new AbortController();
         const pushedRow =
           matchOwnCreate === null
@@ -4701,6 +4700,7 @@ export function NewChatLandingScreen() {
       // `localConv` is set only when a real agent id was resolved up front, so
       // it's safe to POST the first message with it.
       if (localConv !== null && effectiveAgentId !== null) {
+        const tempRouteSuffix = `/c/${localConv.tempConvId}`;
         // Hydrate the temp id onto the real id and POST the first message.
         hydrateLocalConversation(
           localConv.tempConvId,
@@ -4711,6 +4711,7 @@ export function NewChatLandingScreen() {
           localConv.pendingMsgTempId,
           skill,
           navigate,
+          () => window.location.pathname.endsWith(tempRouteSuffix),
         );
         void queryClient.refetchQueries({ queryKey: ["conversations"] });
       } else {

@@ -370,7 +370,9 @@ describe("Sidebar session list", () => {
     // A client-only temp row has no server session, so its per-row mutations
     // (kebab: rename/delete/archive/move/share) must be suppressed — invoking
     // them would POST to /v1/sessions/temp:* (Polly B-3).
-    mockConversations([conv("temp:0a1b2c3d", "Claude Code", { title: "new chat", provisional: true })]);
+    mockConversations([
+      conv("temp:0a1b2c3d", "Claude Code", { title: "new chat", provisional: true }),
+    ]);
     renderSidebar();
 
     // Navigable: the row is still a link into the (soon-to-exist) conversation.

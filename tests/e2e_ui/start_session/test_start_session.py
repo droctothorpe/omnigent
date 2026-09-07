@@ -619,16 +619,13 @@ async def _drive_permission_mode(base_url: str, session_id: str) -> None:
             await browser.close()
 
 
-def test_start_session_send_shows_busy_spinner(seeded_session: tuple[str, str]) -> None:
-    """Send shows a busy spinner while the create is in flight, then navigates.
+def test_start_session_navigates_while_create_is_pending(seeded_session: tuple[str, str]) -> None:
+    """Send immediately opens a temporary chat, then hydrates its real id.
 
-    The create awaits the backend (session bootstrap + git worktree setup)
-    before navigating, so the landing screen lingers for the whole round-trip.
-    Without feedback the Send button just goes inert and the typed message sits
-    in the composer, so the click reads as "frozen". This holds the create POST
-    open with a gate so that in-flight window is observable, and asserts the
-    Send button flips to a busy/spinning state (disabled + ``aria-busy`` +
-    "Starting session" label) before the response lands and navigation happens.
+    The create response is held so the test can verify the navigate-first
+    window: the landing composer is already gone, the URL uses a client-only
+    ``temp:`` id, and the optimistic prompt is visible in a read-only chat.
+    Releasing the response must replace that temporary URL with the real id.
     """
     base_url, session_id = seeded_session
     _run_in_fresh_loop(_drive_send_busy_spinner(base_url, session_id))
@@ -641,8 +638,7 @@ async def _drive_send_busy_spinner(base_url: str, session_id: str) -> None:
         try:
             create_bodies: list[dict[str, Any]] = []
             # A gate the create handler awaits before responding, so the POST
-            # stays pending long enough to observe the button's busy state. The
-            # test opens it after asserting the spinner, letting navigation run.
+            # stays pending long enough to observe the temporary chat.
             release_create = asyncio.Event()
 
             async def handle_hosts(route: Route) -> None:
@@ -665,8 +661,7 @@ async def _drive_send_busy_spinner(base_url: str, session_id: str) -> None:
             async def handle_sessions(route: Route) -> None:
                 if route.request.method == "POST":
                     create_bodies.append(route.request.post_data_json)
-                    # Hold the create open so the composer stays in its
-                    # `creating` state — the window under test.
+                    # Hold the create open so the temp-id chat remains visible.
                     await release_create.wait()
                     await route.fulfill(
                         status=200,
@@ -704,29 +699,28 @@ async def _drive_send_busy_spinner(base_url: str, session_id: str) -> None:
                 state="visible", timeout=30_000
             )
 
-            submit = page.get_by_test_id("new-chat-landing-submit")
             await page.get_by_test_id("new-chat-landing-input").fill("set up the project")
-            # Idle with a message typed: enabled, not busy (arrow, no spin).
-            await expect(submit).to_be_enabled()
-            await expect(submit).to_have_attribute("aria-busy", "false")
+            await page.get_by_test_id("new-chat-landing-submit").click()
 
-            await submit.click()
-
-            # The POST reached the server (proving we're truly in flight, not
-            # blocked by a disabled button) and the button shows the busy state.
+            # The create is still in flight, but the landing screen is gone and
+            # the optimistic prompt is already visible under a temporary URL.
             await _wait_until(lambda: len(create_bodies) == 1)
-            await expect(submit).to_be_disabled()
-            await expect(submit).to_have_attribute("aria-busy", "true")
-            await expect(submit).to_have_attribute("aria-label", "Starting session")
-            # Still on the landing screen — the "frozen"-looking window.
-            await expect(page.get_by_test_id("new-chat-landing-input")).to_be_visible()
-
-            # Release the create: the flow completes and navigates to the
-            # session, so the landing composer unmounts.
-            release_create.set()
-            await expect(page.get_by_test_id("new-chat-landing-input")).to_have_count(
-                0, timeout=30_000
+            await expect(page).to_have_url(
+                re.compile(rf"{re.escape(base_url)}/c/temp:[0-9a-f]{{8}}")
             )
+            await expect(page.get_by_test_id("new-chat-landing-input")).to_have_count(0)
+            composer = page.get_by_role("textbox", name="Message the agent")
+            await expect(composer).to_be_disabled()
+            await expect(composer).to_have_attribute("placeholder", "Starting the session…")
+            await expect(
+                page.get_by_test_id("message-bubble").get_by_text(
+                    "set up the project", exact=True
+                )
+            ).to_be_visible()
+
+            # Release the create: the same chat hydrates onto the real id.
+            release_create.set()
+            await expect(page).to_have_url(f"{base_url}/c/{session_id}", timeout=30_000)
         finally:
             await browser.close()
 

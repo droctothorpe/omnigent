@@ -309,6 +309,7 @@ export function hydrateLocalConversation(
   pendingMsgTempId: string,
   skill: { name: string; args: string } | null,
   navigate: (to: string, opts?: { replace?: boolean }) => void,
+  isStillViewing: () => boolean = () => true,
 ): void {
   // Registry entry (carrying the optimistic bubble) + the sidebar row, both
   // id-addressed. Rekey the row BEFORE the caller's refetch so a lagging index
@@ -318,7 +319,7 @@ export function hydrateLocalConversation(
   conversationRegistry.rekey(tempConvId, realId);
   rekeyConvRow(tempConvId, realId, text);
 
-  const stillViewing = useChatStore.getState().conversationId === tempConvId;
+  const stillViewing = useChatStore.getState().conversationId === tempConvId && isStillViewing();
   if (stillViewing) {
     useChatStore.setState({ conversationId: realId });
     conversationRegistry.setActive(realId);
@@ -1858,15 +1859,18 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     if (!agentId) {
       throw new Error("chatStore.send: no agentId");
     }
-    const retryId = get().pendingRetryStableId;
-    if (retryId !== null) setActive({ pendingRetryStableId: null });
-    const stableId = opts?.stableId ?? retryId ?? randomUUID().replace(/-/g, "");
     // Target session: an explicit pin (navigate-first background POST) overrides
     // the visible conversation, so a send whose session was created while the
     // user moved to another chat still lands on the right one, not the one on
     // screen. `pinnedSetter` routes every write for this send there.
     const pinnedId = opts?.pinnedConversationId ?? null;
     const pinnedSetter: typeof setActive = pinnedId === null ? setActive : setterFor(pinnedId);
+    const retryId =
+      pinnedId === null
+        ? get().pendingRetryStableId
+        : (setterForState(pinnedId)?.pendingRetryStableId ?? null);
+    if (retryId !== null) pinnedSetter({ pendingRetryStableId: null });
+    const stableId = opts?.stableId ?? retryId ?? randomUUID().replace(/-/g, "");
     // Sending while a response is already streaming is allowed — the
     // session API queues item-typed events and the server delivers them
     // into the running task's inbox. Keep `activeResponse` untouched in
