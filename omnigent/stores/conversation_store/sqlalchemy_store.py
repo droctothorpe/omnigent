@@ -142,6 +142,9 @@ _SESSION_OVERRIDE_KEYS = (
     "cost_control_mode_override",
     "subagent_routing_override",
     "harness_override",
+    # Stored as the string ``"on"`` when the owner shares workspace files
+    # with view-level collaborators; absent (SQL NULL blob key) otherwise.
+    "share_workspace_files",
 )
 
 
@@ -234,6 +237,8 @@ def _to_conversation(
         cost_control_mode_override=overrides["cost_control_mode_override"],
         subagent_routing_override=overrides["subagent_routing_override"],
         harness_override=overrides["harness_override"],
+        # Stored as ``"on"`` / absent; surfaced as a plain bool on the entity.
+        share_workspace_files=overrides["share_workspace_files"] == "on",
         sub_agent_name=meta.sub_agent_name if meta else None,
         task_summary=meta.task_summary if meta else None,
         external_session_id=meta.external_session_id if meta else None,
@@ -2867,6 +2872,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         _unset_subagent_routing_override: bool = False,
         harness_override: str | None = None,
         _unset_harness_override: bool = False,
+        share_workspace_files: bool | None = None,
         terminal_launch_args: list[str] | None = None,
         archived: bool | None = None,
         reported_model: str | None = None,
@@ -2904,6 +2910,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param _unset_harness_override: When ``True``, clear
             ``harness_override`` to ``None`` (used to replace the
             ``"auto"`` sentinel after first-message routing resolves).
+        :param share_workspace_files: Whether view-level collaborators may
+            browse the workspace. ``True`` stores the share flag, ``False``
+            clears it (back to edit-only), ``None`` leaves it unchanged.
         :param terminal_launch_args: Per-session native-terminal
             pass-through args, e.g.
             ``["--dangerously-skip-permissions"]``. ``None`` leaves
@@ -2962,6 +2971,11 @@ class SqlAlchemyConversationStore(ConversationStore):
                 overrides_changed = True
             elif harness_override is not None:
                 overrides["harness_override"] = harness_override
+                overrides_changed = True
+            # Two-state flag: True stores ``"on"``, False clears it (edit-only
+            # again), None leaves it untouched.
+            if share_workspace_files is not None:
+                overrides["share_workspace_files"] = "on" if share_workspace_files else None
                 overrides_changed = True
             if overrides_changed:
                 row.session_overrides = _encode_session_overrides(overrides)

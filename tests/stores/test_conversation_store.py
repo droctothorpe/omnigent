@@ -3484,6 +3484,44 @@ def test_update_conversation_terminal_launch_args_empty_list_distinct_from_none(
     assert updated.terminal_launch_args == []
 
 
+def test_update_conversation_share_workspace_files_round_trips(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """The share-workspace-files opt-in persists as a two-state flag.
+
+    ``True`` stores the share, ``False`` clears it back to the edit-only
+    default, and ``None`` (the default arg) leaves whatever was stored
+    untouched — the same "None = unchanged" contract as the other
+    per-session overrides. A fresh session starts unshared.
+    """
+    created = conversation_store.create_session_with_agent(
+        agent_id="c0ffee00c0ffee00c0ffee00c0ffee00",
+        agent_name="share-agent",
+        agent_bundle_location="c0ffee00c0ffee00c0ffee00c0ffee00/bundle1",
+        agent_description=None,
+    )
+    conv_id = created.conversation.id
+    # Default: unshared.
+    assert created.conversation.share_workspace_files is False
+
+    shared = conversation_store.update_conversation(conv_id, share_workspace_files=True)
+    assert shared is not None
+    assert shared.share_workspace_files is True
+    # Survives a reload (decoded from the persisted override blob).
+    assert conversation_store.get_conversation(conv_id).share_workspace_files is True
+
+    # None leaves it on.
+    untouched = conversation_store.update_conversation(conv_id, title="renamed")
+    assert untouched is not None
+    assert untouched.share_workspace_files is True
+
+    # False clears it back to edit-only.
+    cleared = conversation_store.update_conversation(conv_id, share_workspace_files=False)
+    assert cleared is not None
+    assert cleared.share_workspace_files is False
+    assert conversation_store.get_conversation(conv_id).share_workspace_files is False
+
+
 def test_set_host_id_no_workspace_fails_when_row_has_none(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

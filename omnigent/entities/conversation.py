@@ -155,6 +155,15 @@ class Conversation:
         allowlisted ``args.harness`` (gated by the sub-agent spec's
         ``executor.config.allowed_harnesses``); that value is set on the
         child's own row, not inherited.
+    :param share_workspace_files: Whether the owner opted into letting
+        people with *view* (read-only) access browse the session's
+        workspace files — the Files/Changes/GitHub-diff surfaces and the
+        file contents behind them. ``False`` (the default) keeps those
+        surfaces edit-only, so a plain read grant shares the conversation
+        without exposing the workspace (which routinely holds secrets like
+        ``.env`` / key files). Set from the share dialog (manage-gated) via
+        ``PATCH /v1/sessions/{id}``; never widens absolute-path browsing,
+        which stays owner-only. See ``designs/SESSIONS_AUTH.md``.
     :param sub_agent_name: For sub-agent sessions (``kind="sub_agent"``),
         the sub-agent type name within the parent's spec tree,
         e.g. ``"summarizer"``. The runner uses this to resolve the
@@ -237,6 +246,7 @@ class Conversation:
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
     harness_override: str | None = None
+    share_workspace_files: bool = False
     sub_agent_name: str | None = None
     task_summary: str | None = None
     external_session_id: str | None = None
