@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 
 import httpx
+import pytest
 import pytest_asyncio
 
 from omnigent.db.utils import generate_agent_id
@@ -49,7 +50,11 @@ def _seed_running_session(db_uri: str, *, runner_fresh: bool) -> str:
     agent_store = SqlAlchemyAgentStore(db_uri)
     conv_store = SqlAlchemyConversationStore(db_uri)
     agent_id = generate_agent_id()
-    agent_store.create(agent_id, name="orphan-agent", bundle_location="test:///bundle")
+    agent_store.create(
+        agent_id,
+        name=f"orphan-agent-{agent_id}",
+        bundle_location="test:///bundle",
+    )
     conv = conv_store.create_conversation(agent_id=agent_id)
     runner_id = f"runner_{conv.id}"
     assert conv_store.set_runner_id(conv.id, runner_id)
@@ -75,27 +80,40 @@ def _isolate_status_cache() -> None:
 # ── reconcile_orphaned_running_status helper ─────────────────────────────
 
 
-def test_reconcile_settles_running_to_idle() -> None:
-    """A running session with a gone runner settles to idle."""
-    sid = f"conv_{generate_agent_id()}"
-    _session_status_cache[sid] = "running"
-    try:
-        assert reconcile_orphaned_running_status(sid) == "idle"
-        assert _session_status_cache[sid] == "idle"
-    finally:
-        _session_status_cache.pop(sid, None)
+def test_reconcile_is_conditional_and_marks_scheduled_run_incomplete(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a stale running row settles, and a scheduled fire fails."""
+    from omnigent.server import session_live_state
 
+    sid = _seed_running_session(db_uri, runner_fresh=False)
+    store = SqlAlchemyConversationStore(db_uri)
+    completions: list[tuple[str, str, str | None]] = []
 
-def test_reconcile_preserves_failed() -> None:
-    """A terminal ``failed`` state is sticky — reconciliation never
-    downgrades it to idle."""
-    sid = f"conv_{generate_agent_id()}"
-    _session_status_cache[sid] = "failed"
-    try:
-        assert reconcile_orphaned_running_status(sid) == "failed"
-        assert _session_status_cache[sid] == "failed"
-    finally:
-        _session_status_cache.pop(sid, None)
+    def _record_completion(
+        conversation_id: str,
+        status: str,
+        *,
+        error_code: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        del error
+        completions.append((conversation_id, status, error_code))
+
+    monkeypatch.setattr(session_live_state, "persist_scheduled_run_completion", _record_completion)
+
+    assert reconcile_orphaned_running_status(sid, store, int(time.time()) - 90)
+    assert store.get_conversation(sid).live_status == "idle"  # type: ignore[union-attr]
+    assert _session_status_cache[sid] == "idle"
+    assert completions == [(sid, "failed", "incomplete")]
+    assert not reconcile_orphaned_running_status(sid, store, int(time.time()) - 90)
+
+    fresh_sid = _seed_running_session(db_uri, runner_fresh=True)
+    assert not reconcile_orphaned_running_status(fresh_sid, store, int(time.time()) - 90)
+    fresh = store.get_conversation(fresh_sid)
+    assert fresh is not None
+    assert fresh.live_status == "running"
 
 
 # ── Facet 1: GET /v1/sessions settles orphaned "running" rows ────────────

@@ -4262,6 +4262,8 @@ def _publish_status(
     background_task_count: int | None = None,
     background_tasks: list[BackgroundTaskInfo] | None = None,
     blocked_on: str | None = None,
+    persist_live_status: bool = True,
+    scheduled_run_outcome: Literal["auto", "failed"] = "auto",
 ) -> None:
     """
     Publish a typed :class:`SessionStatusEvent` to the live stream and
@@ -4315,7 +4317,8 @@ def _publish_status(
     # Mirror the transition onto the conversation row (best-effort,
     # deduplicated, off-loop) so replicas that don't hold this session's
     # runner tunnel serve the same sidebar status.
-    session_live_state.persist_live_status(session_id, status)
+    if persist_live_status:
+        session_live_state.persist_live_status(session_id, status)
     # Event-driven scheduled-run completion. A terminal edge (idle = the turn
     # completed; failed = it errored/disconnected) flips the conversation's
     # still-``running`` scheduled_task_run to succeeded/failed. This is the
@@ -4326,7 +4329,14 @@ def _publish_status(
     # the common case: interactive (non-scheduled) conversations have no
     # running run, and the reverse lookup cheaply returns None. running/waiting
     # edges are skipped entirely so the hot path pays nothing mid-turn.
-    if status == "idle":
+    if scheduled_run_outcome == "failed":
+        session_live_state.persist_scheduled_run_completion(
+            session_id,
+            "failed",
+            error_code="incomplete",
+            error="runner disappeared before the turn reached a terminal state",
+        )
+    elif status == "idle":
         session_live_state.persist_scheduled_run_completion(session_id, "succeeded")
     elif status == "failed":
         # Canonical server-side broken-turn signal: every server-originated
@@ -4405,7 +4415,11 @@ def _publish_status(
     session_stream.publish(session_id, payload)
 
 
-def reconcile_orphaned_running_status(session_id: str) -> str:
+def reconcile_orphaned_running_status(
+    session_id: str,
+    conversation_store: ConversationStore,
+    stale_before: int,
+) -> bool:
     """
     Settle a session that reads ``running`` but whose runner is
     confirmed gone down to a non-running resting state.
@@ -4419,31 +4433,26 @@ def reconcile_orphaned_running_status(session_id: str) -> str:
     forever. The sidebar then shows a turn that isn't happening, and
     ``stop_session`` reports a success it never delivered.
 
-    This is the lazy-on-read backstop for that stale state. Callers
-    that observe a ``running`` session whose runner is confirmed
-    offline route it through here to settle it to ``idle`` — Stop is
-    non-sticky, so the transcript is intact and the next message
-    relaunches the runner. Reconciliation funnels through
-    :func:`_publish_status`, so the same edge updates the in-memory
-    status cache, streams a ``session.status`` event to any watcher,
-    mirrors the row for other replicas, and completes a still-running
-    scheduled run. It is only ever called once the runner is known to
-    be gone (checked by the caller against
-    :func:`runner_seen_is_fresh` / live liveness), never on a runner
-    that is merely mid-reconnect inside the grace window.
+    This is the lazy-on-read backstop for that stale state. The store performs
+    one conditional transition so a fresh liveness stamp or terminal status
+    written by another replica wins the race. A successful transition updates
+    the local cache and stream without issuing a second status write, and
+    classifies any associated scheduled run as failed/incomplete.
 
     :param session_id: Session/conversation identifier to settle.
-    :returns: The effective resting status after reconciliation —
-        ``"idle"`` normally, or ``"failed"`` when a terminal failure
-        was already latched (``_publish_status`` keeps ``failed``
-        sticky against ``idle``). Both are non-running, so callers can
-        safely surface the returned value in place of ``running``.
+    :param conversation_store: Store performing the conditional transition.
+    :param stale_before: Runner stamps at or after this epoch are fresh.
+    :returns: Whether this call performed the transition.
     """
-    _publish_status(session_id, "idle")
-    # ``failed`` is sticky against ``idle`` inside ``_publish_status`` — report
-    # whatever resting state actually latched so callers surface the truth
-    # rather than a hard-coded ``idle`` the cache may not agree with.
-    return _session_status_cache.get(session_id, "idle")
+    if not conversation_store.settle_orphaned_live_status(session_id, stale_before):
+        return False
+    _publish_status(
+        session_id,
+        "idle",
+        persist_live_status=False,
+        scheduled_run_outcome="failed",
+    )
+    return True
 
 
 def _truncate_label(value: str) -> str:

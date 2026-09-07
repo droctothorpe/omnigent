@@ -207,6 +207,7 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.conversation_store import (
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
+    RUNNER_LIVENESS_TTL_S,
     ConversationNotFoundError,
     pinned_label_key,
 )
@@ -1279,6 +1280,15 @@ def register_core_routes(
                 and conv.runner_id is not None
                 and conv.live_status in ("running", "waiting")
                 and _session_status_cache.get(conv.id) is None
+                and (
+                    permission_store is None
+                    or _permission_level_from_grants(
+                        user_id,
+                        perms_by_conv.get(conv.id, []),
+                        user_is_admin,
+                    )
+                    == LEVEL_OWNER
+                )
             ]
             if orphan_suspects:
                 orphan_liveness = await asyncio.to_thread(
@@ -1291,7 +1301,12 @@ def register_core_routes(
                     # stale past the TTL), so this fires for a genuinely
                     # orphaned runner, never one mid-reconnect within grace.
                     if result is not None and not result.runner_online:
-                        reconcile_orphaned_running_status(conv.id)
+                        await asyncio.to_thread(
+                            reconcile_orphaned_running_status,
+                            conv.id,
+                            conversation_store,
+                            int(time.time()) - RUNNER_LIVENESS_TTL_S,
+                        )
         # Build items after reconciliation so each settled row reads its new
         # status straight from the (now-updated) cache.
         items: list[SessionListItem] = [
@@ -1309,7 +1324,8 @@ def register_core_routes(
             for conv in page.data
             if conv.agent_id is not None
         ]
-        # The list deliberately does NOT compute per-item liveness
+        # Apart from the bounded orphan-suspect probe above, the list does not
+        # compute per-item liveness
         # (runner_online / host_online). No list consumer reads it: the
         # sidebar no longer surfaces connection state, and the only live
         # consumer — the open-session view — sources liveness from the

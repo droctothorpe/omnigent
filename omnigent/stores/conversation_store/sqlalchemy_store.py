@@ -3149,6 +3149,33 @@ class SqlAlchemyConversationStore(ConversationStore):
                 .values(live_status=encode_session_live_status(status))
             )
 
+    def settle_orphaned_live_status(self, conversation_id: str, stale_before: int) -> bool:
+        """Settle a stale running row with one conditional update."""
+        with self._session("settle_orphaned_live_status") as session:
+            result = cast(
+                _RowCountResult,
+                session.execute(
+                    update(SqlConversationMetadata)
+                    .where(
+                        SqlConversationMetadata.workspace_id == current_workspace_id(),
+                        SqlConversationMetadata.id == conversation_id,
+                        SqlConversationMetadata.runner_id.is_not(None),
+                        SqlConversationMetadata.live_status.in_(
+                            [
+                                encode_session_live_status("running"),
+                                encode_session_live_status("waiting"),
+                            ]
+                        ),
+                        or_(
+                            SqlConversationMetadata.runner_last_seen.is_(None),
+                            SqlConversationMetadata.runner_last_seen < stale_before,
+                        ),
+                    )
+                    .values(live_status=encode_session_live_status("idle"))
+                ),
+            )
+            return result.rowcount == 1
+
     def set_pending_elicitation_count(self, conversation_id: str, count: int) -> None:
         """
         Persist the outstanding elicitation count for one session.

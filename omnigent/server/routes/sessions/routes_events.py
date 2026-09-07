@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import secrets
+import time
 import weakref
 from collections.abc import Callable
 from typing import Any, Literal, cast
@@ -215,7 +216,7 @@ from omnigent.session_lifecycle import (
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
-from omnigent.stores.conversation_store import runner_seen_is_fresh
+from omnigent.stores.conversation_store import RUNNER_LIVENESS_TTL_S, runner_seen_is_fresh
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.host_store import host_is_live
 from omnigent.stores.permission_store import PermissionStore
@@ -1034,7 +1035,12 @@ def register_events_routes(
                     )
                     == "running"
                 ):
-                    reconcile_orphaned_running_status(session_id)
+                    await asyncio.to_thread(
+                        reconcile_orphaned_running_status,
+                        session_id,
+                        conversation_store,
+                        int(time.time()) - RUNNER_LIVENESS_TTL_S,
+                    )
             # Stop is non-sticky: no persistent marker is written. The
             # runner tunnel dropping above flips ``runner_online`` to false
             # honestly, and the next message auto-relaunches the session on

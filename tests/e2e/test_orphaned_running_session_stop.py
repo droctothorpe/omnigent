@@ -161,7 +161,8 @@ def _spawn_server(
             if httpx.get(f"{base_url}/health", timeout=2.0, trust_env=False).status_code == 200:
                 return proc, base_url
         except httpx.HTTPError:
-            pass
+            # The subprocess may still be starting; retry until the deadline.
+            continue
         time.sleep(POLL_INTERVAL_S)
     proc.kill()
     log_handle.close()
@@ -208,14 +209,20 @@ def _spawn_runner(
             "RUNNER_SERVER_URL": base_url,
         }
     )
-    log_handle = open(log_path, "w")  # noqa: SIM115 — closed on teardown by the OS
-    return subprocess.Popen(
-        [runner_executable(), "-m", "omnigent.runner._entry"],
-        env=runner_env,
-        cwd=compat_runner_cwd(),
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-    )
+    log_handle = open(log_path, "w")  # noqa: SIM115 — child inherits the descriptor
+    try:
+        proc = subprocess.Popen(
+            [runner_executable(), "-m", "omnigent.runner._entry"],
+            env=runner_env,
+            cwd=compat_runner_cwd(),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
+    except Exception:
+        log_handle.close()
+        raise
+    log_handle.close()
+    return proc
 
 
 def _base_env(config_home: Path, mock_llm_server_url: str) -> dict[str, str]:
