@@ -431,7 +431,9 @@ def test_upsert_stamps_a_fresh_connect_generation(
         user_id="dana@example.com",
     )
     assert second.connect_generation is not None
-    assert second.connect_generation > first.connect_generation
+    # Distinctness is the invariant the guard needs (equality match), not
+    # ordering — the token is wall-clock and could step backwards.
+    assert second.connect_generation != first.connect_generation
 
 
 def test_set_offline_if_generation_matches_current_row(
@@ -544,7 +546,8 @@ def test_managed_connect_stamps_fresh_connect_generation(db_uri: str) -> None:
         managed_token="raw-launch-token-gen",
     )
     assert second.connect_generation is not None
-    assert second.connect_generation > first.connect_generation
+    # Distinctness, not ordering — see test_upsert_stamps_a_fresh_connect_generation.
+    assert second.connect_generation != first.connect_generation
 
     # The superseded connect's guarded cleanup must not offline the row.
     assert store.set_offline_if_generation(first.host_id, first.connect_generation) is False

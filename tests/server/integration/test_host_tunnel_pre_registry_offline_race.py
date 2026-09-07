@@ -30,7 +30,6 @@ from fastapi import FastAPI, WebSocket
 import omnigent.server.routes.host_tunnel as tunnel_mod
 from omnigent.host.frames import HostConnectionErrorFrame, decode_host_frame
 from omnigent.server.host_registry import HostConnection, HostRegistry
-from omnigent.server.routes.host_tunnel import create_host_tunnel_router
 from omnigent.stores.host_store import HostStore, host_is_live
 from tests.server.integration.test_host_tunnel_route import (
     _connect_route,
@@ -66,7 +65,7 @@ async def test_stale_pre_registry_cleanup_cannot_offline_newer_connection(
     registry = HostRegistry()
     store = HostStore(db_uri)
     app = FastAPI()
-    app.include_router(create_host_tunnel_router(registry, store), prefix="/v1")
+    app.include_router(tunnel_mod.create_host_tunnel_router(registry, store), prefix="/v1")
 
     # First register call (connection A) fails after the upsert persisted the
     # row; later calls (connection B's reconnect) register normally.

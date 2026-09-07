@@ -8,10 +8,12 @@ Adds ``hosts.connect_generation`` — an epoch-microseconds token stamped by
 each connect's ``upsert_on_connect``. Cleanup paths that hold no live
 ``HostConnection`` (a connect that persisted its row but failed before
 registering) mark the row offline with a compare-and-update against this
-token, so a superseded connection cannot overwrite a newer connect's
-online row — including across server replicas. NULL means the row was
-last written before the column existed; a NULL token never matches, so
-legacy rows are simply never conditionally offlined.
+token, so a superseded connection's guarded cleanup cannot overwrite a
+newer connect's online row — including across server replicas. Only
+writes that use the compare-and-update are covered; the
+registered-connection offline paths still write unconditionally. NULL
+means the row was last written before the column existed; a NULL token
+never matches, so legacy rows are simply never conditionally offlined.
 """
 
 from __future__ import annotations

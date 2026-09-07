@@ -1329,9 +1329,11 @@ class SqlHost(OmnigentBase):
     :param connect_generation: Epoch-microseconds token stamped by each
         connect's upsert. Conditional cleanup writes (a failed connect
         marking its own row offline) compare against it at the DB level,
-        so a superseded connection cannot overwrite a newer connect's
-        row — including from another server replica. ``NULL`` on rows
-        last written before the column existed.
+        so a superseded connection's guarded cleanup cannot overwrite a
+        newer connect's row — including from another server replica.
+        Offline writes that skip the guard (the registered-connection
+        deregister paths) are not covered. ``NULL`` on rows last written
+        before the column existed.
     """
 
     __tablename__ = "hosts"
