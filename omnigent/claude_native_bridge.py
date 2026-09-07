@@ -185,14 +185,25 @@ _SUBMIT_RETRY_INTERVAL_S = 1.0
 # How long to watch for Claude Code's "Unknown command" rejection after a
 # message leading with an unrecognized slash command was submitted
 # unescaped. The rejection prints within ~1s of the swallowed submit and
-# stays in scrollback; a recognized skill just starts its turn and the
-# watch lapses.
+# stays in the visible transcript; a recognized skill just starts its
+# turn and the watch lapses.
 _UNKNOWN_COMMAND_WATCH_TIMEOUT_S = 3.0
 # The line Claude Code prints when it drops input whose leading ``/name``
 # it does not recognize as a built-in, plugin command, or skill. The
 # command name is appended at the call site so a rejection of an older
 # message cannot match a different name.
 _UNKNOWN_COMMAND_REJECTION_PREFIX = "Unknown command: "
+# Transcript bullet Claude Code renders before its own output lines,
+# including the "Unknown command" rejection. Anchoring the rejection
+# match to it keeps mid-line quotes of the rejection text from counting.
+_TRANSCRIPT_BULLET_GLYPH = "●"
+# Characters that may continue a slash-command name (skills and plugin
+# commands use ``a-z``, digits, ``-``, ``_`` and ``:``). Used as the exact
+# name boundary when matching a rejection so a watch for ``/x`` cannot
+# match a rejection of ``/xylophone``.
+_SLASH_COMMAND_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-:"
+)
 # Claude Code collapses large pastes into this placeholder in the
 # input box instead of rendering the text itself.
 _PASTED_PLACEHOLDER_PREFIX = "[Pasted text"
@@ -3226,8 +3237,8 @@ def inject_user_message(
     # rejects the whole message ("Unknown command: /<name>") without ever
     # calling the model, silently swallowing the user's text. Baseline the
     # rejection count before submitting so a stale rejection already in
-    # scrollback (same name, earlier message) cannot masquerade as this
-    # message's rejection.
+    # the visible pane (same name, earlier message) cannot masquerade as
+    # this message's rejection.
     unknown_name = _passthrough_slash_command_name(content)
     rejection_needle: str | None = None
     rejection_baseline = 0
@@ -3374,17 +3385,21 @@ def _paste_and_submit(
 
 def _count_unknown_command_rejections(pane: str, needle: str) -> int:
     """
-    Count rejections of one command name in a captured pane.
+    Count bullet-led rejections of one command name in a captured pane.
 
     Claude Code's TUI reflows the rejection at the pane width — on a
     narrow pane "Unknown command:" and the ``/<name>`` land on separate
     lines (a long name can even hard-wrap mid-word) — so the match must
-    ignore line structure and whitespace entirely: composer rows (any line
-    carrying the prompt glyph — the live draft and transcript echoes of
-    submitted messages both render behind it) are dropped so a user
-    message merely *containing* the rejection words cannot count, then the
-    rest is collapsed to a whitespace-free string and searched for the
-    equally collapsed needle.
+    ignore line structure and whitespace: composer rows (any line carrying
+    the prompt glyph — the live draft and transcript echoes of submitted
+    messages both render behind it) are dropped, the rest is collapsed to
+    a whitespace-free string, and the equally collapsed needle is
+    searched. To keep quoted or colliding text from counting, a match is
+    only a rejection when it is anchored to the transcript bullet (the
+    rejection renders as ``● Unknown command: /<name>``) and the name ends
+    at an exact boundary: end of pane, end of a pane line, or a character
+    that cannot continue a command name — so a watch for ``/x`` never
+    matches a rejection of ``/xylophone``.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :param needle: The exact rejection text, e.g.
@@ -3392,11 +3407,33 @@ def _count_unknown_command_rejections(pane: str, needle: str) -> int:
     :returns: Number of rejections for this name currently visible.
     """
     lines = [line for line in pane.splitlines() if _CLAUDE_PROMPT_GLYPH not in line]
-    collapsed = "".join("".join(line.split()) for line in lines)
+    fragments = ["".join(line.split()) for line in lines]
+    collapsed = "".join(fragments)
+    # Collapsed offsets where a pane line ends: a genuine rejection line
+    # ends with the name, so a line break is a valid name boundary even
+    # when the next line's text abuts it in the collapsed string.
+    line_ends: set[int] = set()
+    offset = 0
+    for fragment in fragments:
+        offset += len(fragment)
+        line_ends.add(offset)
     target = "".join(needle.split())
     if not target:
         return 0
-    return collapsed.count(target)
+    count = 0
+    search_from = 0
+    while (start := collapsed.find(target, search_from)) != -1:
+        search_from = start + 1
+        if start == 0 or collapsed[start - 1] != _TRANSCRIPT_BULLET_GLYPH:
+            continue  # not bullet-led: quoted text, not a rejection
+        end = start + len(target)
+        if (
+            end == len(collapsed)
+            or end in line_ends
+            or collapsed[end] not in _SLASH_COMMAND_NAME_CHARS
+        ):
+            count += 1
+    return count
 
 
 def _unknown_command_rejection_appeared(
@@ -3413,10 +3450,11 @@ def _unknown_command_rejection_appeared(
     when it does not recognize the leading slash command; a recognized
     skill starts its turn and never prints one, so the watch lapses. A
     fresh rejection means the count of rejection lines rose above
-    *baseline* — a stale rejection of the same name already in scrollback
-    keeps the count at the baseline and does not count. (If new output
-    scrolls a stale occurrence off while the fresh one prints, the count
-    stays flat and the miss degrades to the pre-watch behavior.)
+    *baseline* — a stale rejection of the same name already in the
+    visible pane keeps the count at the baseline and does not count. (If
+    new output scrolls a stale occurrence out of the visible pane while
+    the fresh one prints, the count stays flat and the miss degrades to
+    the pre-watch behavior.)
 
     :param socket_path: Absolute path to the tmux socket.
     :param tmux_target: tmux pane target string, e.g. ``"main"``.

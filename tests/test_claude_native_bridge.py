@@ -3735,6 +3735,13 @@ def test_rejection_line_matching_ignores_message_echo() -> None:
     long_needle = "Unknown command: /definitely-not-a-real-command"
     long_wrapped = "● Unknown command:\n  /definitely-not-a-real-command\n❯ \n"
     assert counter(long_wrapped, long_needle) == 1
+    # Exact name boundary: a rejection of a longer name must not count.
+    assert counter("● Unknown command: /xylophone\n❯ \n", needle) == 0
+    # A pane line break after the name is a valid boundary even when the
+    # next line's text abuts the name in the collapsed string.
+    assert counter("● Unknown command: /x\nxylophones are neat\n❯ \n", needle) == 1
+    # Transcript text quoting the rejection mid-line is not bullet-led.
+    assert counter("● the log said Unknown command: /x today\n❯ \n", needle) == 0
 
 
 def test_inject_user_message_raises_when_tmux_target_never_published(
