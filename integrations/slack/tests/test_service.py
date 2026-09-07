@@ -21,6 +21,7 @@ from omnigent_slack.service import (
     _STREAM_INTERRUPTED_TEXT,
     SlackOmnigentService,
 )
+from omnigent_slack.setup import SetupFlow
 from omnigent_slack.store import SQLiteStore
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_slack_response import AsyncSlackResponse
@@ -3039,3 +3040,183 @@ async def test_interruption_preserves_chronological_order(tmp_path: Path) -> Non
     deny = next(p for p in slack.posts if "Blocked by policy" in str(p.get("text")))
     # Chronological: segment-1 opened, then the deny posted, then segment-2 opened.
     assert slack.streams[0].open_order < deny["order"] < slack.streams[1].open_order
+
+
+# ── resuming the mention that triggered setup ─────────────────────────────────
+
+
+async def _noop_ack(**kwargs: Any) -> None:
+    return None
+
+
+def _select_submit_payload(team_id: str, user_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A valid select-modal Save submission for ``SetupFlow._handle_select_submit``."""
+    view = {
+        "state": {
+            "values": {
+                "agent_block": {
+                    "agent_select": {
+                        "selected_option": {
+                            "text": {"type": "plain_text", "text": "Helper"},
+                            "value": "ag_1",
+                        }
+                    }
+                },
+                "host_block": {
+                    "host_select": {
+                        "selected_option": {
+                            "text": {"type": "plain_text", "text": "Host One"},
+                            "value": "h1",
+                        }
+                    }
+                },
+                "workspace_block": {"workspace_input": {"value": "/tmp/workspace"}},
+            }
+        },
+    }
+    body = {"team": {"id": team_id}, "user": {"id": user_id}}
+    return body, view
+
+
+def _real_setup_service(
+    store: SQLiteStore, omnigent: FakeOmnigentClient
+) -> tuple[SlackOmnigentService, SetupFlow]:
+    """The app's real object graph: a SetupFlow whose completion resumes turns."""
+    pool = FakePool(omnigent)
+    setup = SetupFlow(store=store, pool=pool, server_url="http://omnigent.test")  # type: ignore[arg-type]
+    service = SlackOmnigentService(
+        store=store,
+        pool=pool,  # type: ignore[arg-type]
+        setup=setup,
+        server_url="http://omnigent.test",
+    )
+    return service, setup
+
+
+async def test_first_mention_from_unconfigured_user_runs_after_setup(tmp_path: Path) -> None:
+    # The message that triggered setup must run once setup completes — not
+    # silently vanish, forcing the user to notice and re-send it.
+    store = await _store(tmp_path)
+    slack = FakeSlackClient()
+    omnigent = FakeOmnigentClient()
+    service, setup = _real_setup_service(store, omnigent)
+
+    await service.handle_app_mention(
+        body={"team_id": "T1", "event_id": "Ev1"},
+        event={"channel": "C1", "ts": "100.1", "user": "U1", "text": "<@B1> hello"},
+        client=slack,
+        context={"bot_user_id": "B1"},
+    )
+    # Unconfigured: nudged into setup (a DM with the setup button), nothing ran.
+    assert omnigent.turns == []
+    assert any(p.get("channel") == "D-U1" for p in slack.posts)
+
+    body, view = _select_submit_payload("T1", "U1")
+    await setup._handle_select_submit(_noop_ack, body, view, slack)
+    stream = await _wait_for_stream_stop(slack)
+    await service.shutdown()
+
+    # The original mention ran as a turn in its original thread.
+    assert omnigent.turns == [("conv_1", "hello")]
+    assert stream.start_kwargs["thread_ts"] == "100.1"
+    record = await store.get_session(ThreadKey(team_id="T1", channel_id="C1", thread_ts="100.1"))
+    assert record is not None and record.owner_user_id == "U1"
+
+
+async def test_setup_completion_replays_only_newest_pending_mention(tmp_path: Path) -> None:
+    # A second mention before setup finishes overwrites the stash: completing
+    # setup replays only the newest message, and only once.
+    store = await _store(tmp_path)
+    slack = FakeSlackClient()
+    omnigent = FakeOmnigentClient()
+    service, setup = _real_setup_service(store, omnigent)
+
+    for event_id, ts, text in (
+        ("Ev1", "100.1", "<@B1> first"),
+        ("Ev2", "200.1", "<@B1> second"),
+    ):
+        await service.handle_app_mention(
+            body={"team_id": "T1", "event_id": event_id},
+            event={"channel": "C1", "ts": ts, "user": "U1", "text": text},
+            client=slack,
+            context={"bot_user_id": "B1"},
+        )
+    assert omnigent.turns == []
+
+    body, view = _select_submit_payload("T1", "U1")
+    await setup._handle_select_submit(_noop_ack, body, view, slack)
+    stream = await _wait_for_stream_stop(slack)
+
+    assert omnigent.turns == [("conv_1", "second")]
+    assert stream.start_kwargs["thread_ts"] == "200.1"
+
+    # The stash was consumed — re-saving setup later replays nothing.
+    await setup._handle_select_submit(_noop_ack, body, view, slack)
+    await asyncio.sleep(0.05)
+    await service.shutdown()
+    assert len(omnigent.turns) == 1
+
+
+async def test_first_dm_from_unconfigured_user_runs_after_setup(tmp_path: Path) -> None:
+    # DMs fire no app_mention, so the plain-message path must stash and resume too.
+    store = await _store(tmp_path)
+    slack = FakeSlackClient()
+    omnigent = FakeOmnigentClient()
+    service, setup = _real_setup_service(store, omnigent)
+
+    await service.handle_message(
+        body={"team_id": "T1", "event_id": "Ev1"},
+        event={
+            "channel": "D1",
+            "channel_type": "im",
+            "ts": "100.1",
+            "user": "U1",
+            "text": "help me",
+        },
+        client=slack,
+        context={"bot_user_id": "B1"},
+    )
+    assert omnigent.turns == []
+
+    body, view = _select_submit_payload("T1", "U1")
+    await setup._handle_select_submit(_noop_ack, body, view, slack)
+    stream = await _wait_for_stream_stop(slack)
+    await service.shutdown()
+
+    assert omnigent.turns == [("conv_1", "help me")]
+    assert stream.start_kwargs["channel"] == "D1"
+
+
+async def test_unconfigured_mention_is_stashed_for_resume(tmp_path: Path) -> None:
+    # The service owns the stash — it's written even with the setup double.
+    store = await _store(tmp_path)
+    slack = FakeSlackClient()
+    omnigent = FakeOmnigentClient()
+    service, _pool, _setup = _service(store, omnigent)
+
+    await service.handle_app_mention(
+        body={"team_id": "T1", "event_id": "Ev1"},
+        event={"channel": "C1", "ts": "100.1", "user": "U1", "text": "<@B1> hello"},
+        client=slack,
+        context={"bot_user_id": "B1"},
+    )
+    await service.shutdown()
+
+    pending = await store.pop_pending_setup_message("T1", "U1")
+    assert pending is not None
+    assert (pending.channel_id, pending.thread_ts, pending.text) == ("C1", "100.1", "hello")
+
+
+async def test_resume_without_pending_message_is_noop(tmp_path: Path) -> None:
+    # Setup completed with nothing stashed (e.g. /omnigent ran unprompted).
+    store = await _store(tmp_path)
+    slack = FakeSlackClient()
+    omnigent = FakeOmnigentClient()
+    service, _pool, _setup = _service(store, omnigent)
+    await _configure_user(store, "T1", "U1")
+
+    await service.resume_pending_message("T1", "U1", slack)
+    await service.shutdown()
+
+    assert omnigent.turns == []
+    assert slack.posts == []

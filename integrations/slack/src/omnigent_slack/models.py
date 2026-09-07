@@ -79,6 +79,19 @@ class SessionRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingSetupMessage:
+    """A message from an unconfigured user, stashed until their setup completes.
+
+    One slot per (team, user): a newer message overwrites it, and completing
+    setup pops it so the original message runs instead of silently vanishing.
+    """
+
+    channel_id: str
+    thread_ts: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class SlackTurn:
     key: ThreadKey
     text: str

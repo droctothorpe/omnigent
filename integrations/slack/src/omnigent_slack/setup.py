@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,11 @@ _MAX_SELECT_OPTIONS = 100
 # Pause after views.open before the first views_update, so the client has
 # rendered the modal and won't drop the update (see _open_connecting_modal).
 _MODAL_SETTLE_SECONDS = 0.6
+
+# Post-setup hook: (team_id, user_id, slack_client), awaited after a user's
+# config is saved. The service wires it to resume the message that triggered
+# setup — SetupFlow has no reference to turn routing itself.
+SetupCompleteCallback = Callable[[str, str, Any], Awaitable[None]]
 
 
 class _ViewUpdateAck:
@@ -109,6 +114,9 @@ class SetupFlow:
         # is used.
         self._enrollment_url = enrollment_url
         self._logger = logging.getLogger(__name__)
+        # Wired post-construction (the service takes SetupFlow as a dependency,
+        # not the other way around); None until then.
+        self.on_setup_complete: SetupCompleteCallback | None = None
 
     def register(self, app: AsyncApp) -> None:
         app.command(COMMAND_NAME)(self._handle_config_command)
@@ -719,6 +727,16 @@ class SetupFlow:
             ),
             purpose="setup confirmation",
         )
+
+        if self.on_setup_complete is not None:
+            # Best-effort: setup is already saved, so a failed resume is
+            # logged rather than surfaced into the (already acked) modal.
+            try:
+                await self.on_setup_complete(team_id, user_id, client)
+            except Exception:
+                self._logger.exception(
+                    "Setup completion hook failed team=%s user=%s", team_id, user_id
+                )
 
 
 def default_workspace() -> str:

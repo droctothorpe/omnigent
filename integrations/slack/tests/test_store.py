@@ -78,3 +78,40 @@ async def test_store_unclaim_event_allows_reclaim(tmp_path: Path) -> None:
     # A no-op without an id, and harmless on an unknown id.
     await store.unclaim_event(None)
     await store.unclaim_event("never-seen")
+
+
+async def test_store_pending_setup_message_pop_clears_and_overwrites(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "store.sqlite3")
+    await store.initialize()
+
+    assert await store.pop_pending_setup_message("T1", "U1") is None
+
+    await store.upsert_pending_setup_message(
+        "T1", "U1", channel_id="C1", thread_ts="100.1", text="first"
+    )
+    # A newer message before setup completes overwrites — never queues both.
+    await store.upsert_pending_setup_message(
+        "T1", "U1", channel_id="C2", thread_ts="200.1", text="second"
+    )
+    pending = await store.pop_pending_setup_message("T1", "U1")
+    assert pending is not None
+    assert (pending.channel_id, pending.thread_ts, pending.text) == ("C2", "200.1", "second")
+    # Pop consumes: the message is resumed at most once.
+    assert await store.pop_pending_setup_message("T1", "U1") is None
+    # Users are isolated.
+    await store.upsert_pending_setup_message(
+        "T1", "U1", channel_id="C1", thread_ts="100.1", text="mine"
+    )
+    assert await store.pop_pending_setup_message("T1", "U2") is None
+
+
+async def test_store_clear_user_data_drops_pending_setup_message(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "store.sqlite3")
+    await store.initialize()
+
+    await store.upsert_pending_setup_message(
+        "T1", "U1", channel_id="C1", thread_ts="100.1", text="hello"
+    )
+    await store.clear_user_data("T1", "U1")
+    # Logout resets everything — a stale stash must not replay after re-setup.
+    assert await store.pop_pending_setup_message("T1", "U1") is None

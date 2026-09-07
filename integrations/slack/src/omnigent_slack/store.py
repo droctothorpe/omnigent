@@ -5,7 +5,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from omnigent_slack.models import SessionRecord, ThreadKey, UserConfig
+from omnigent_slack.models import PendingSetupMessage, SessionRecord, ThreadKey, UserConfig
 
 
 class SQLiteStore:
@@ -51,6 +51,20 @@ class SQLiteStore:
                     workspace TEXT,
                     host_id TEXT,
                     host_name TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (team_id, user_id)
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_setup_messages (
+                    team_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    thread_ts TEXT NOT NULL,
+                    text TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (team_id, user_id)
@@ -177,13 +191,64 @@ class SQLiteStore:
             )
             await db.commit()
 
+    async def upsert_pending_setup_message(
+        self, team_id: str, user_id: str, *, channel_id: str, thread_ts: str, text: str
+    ) -> None:
+        """Stash the message that triggered setup for ``(team, user)``.
+
+        One slot per user: a newer message before setup completes overwrites
+        the older one rather than queueing both.
+        """
+        now = int(time.time())
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                """
+                INSERT INTO pending_setup_messages (
+                    team_id, user_id, channel_id, thread_ts, text, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(team_id, user_id) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    thread_ts = excluded.thread_ts,
+                    text = excluded.text,
+                    updated_at = excluded.updated_at
+                """,
+                (team_id, user_id, channel_id, thread_ts, text, now, now),
+            )
+            await db.commit()
+
+    async def pop_pending_setup_message(
+        self, team_id: str, user_id: str
+    ) -> PendingSetupMessage | None:
+        """Return and clear the stashed message, so it is resumed at most once."""
+        async with aiosqlite.connect(self._path) as db:
+            cursor = await db.execute(
+                """
+                SELECT channel_id, thread_ts, text
+                FROM pending_setup_messages
+                WHERE team_id = ? AND user_id = ?
+                """,
+                (team_id, user_id),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                return None
+            await db.execute(
+                "DELETE FROM pending_setup_messages WHERE team_id = ? AND user_id = ?",
+                (team_id, user_id),
+            )
+            await db.commit()
+        return PendingSetupMessage(channel_id=str(row[0]), thread_ts=str(row[1]), text=str(row[2]))
+
     async def clear_user_data(self, team_id: str, user_id: str) -> None:
         """Delete a user's saved config and every session thread they own.
 
         Backs ``/omnigent logout``: after this the user is fully reset —
-        their agent/host/workspace choice is gone and their channel/DM
-        threads no longer map to any Omnigent session, so a later message
-        starts fresh (once they reconfigure).
+        their agent/host/workspace choice is gone, their channel/DM threads
+        no longer map to any Omnigent session, and no stashed pre-setup
+        message lingers, so a later message starts fresh (once they
+        reconfigure).
         """
         async with aiosqlite.connect(self._path) as db:
             await db.execute(
@@ -192,6 +257,10 @@ class SQLiteStore:
             )
             await db.execute(
                 "DELETE FROM thread_sessions WHERE team_id = ? AND owner_user_id = ?",
+                (team_id, user_id),
+            )
+            await db.execute(
+                "DELETE FROM pending_setup_messages WHERE team_id = ? AND user_id = ?",
                 (team_id, user_id),
             )
             await db.commit()

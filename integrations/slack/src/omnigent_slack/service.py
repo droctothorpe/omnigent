@@ -156,6 +156,9 @@ class SlackOmnigentService:
         self._store = store
         self._pool = pool
         self._setup = setup
+        # Resume the message that triggered setup once the user completes it.
+        # SetupFlow can't reach turn routing, so the hook is wired backwards here.
+        setup.on_setup_complete = self.resume_pending_message
         # The one operator-configured Omnigent server. Always the routing
         # target — any server_url persisted on an older config/session row is
         # ignored, so a config change points every thread at the new server.
@@ -324,6 +327,44 @@ class SlackOmnigentService:
             await self._unclaim_event(body, event)
             raise
 
+    async def resume_pending_message(
+        self, team_id: str, user_id: str, client: SlackClientProtocol
+    ) -> None:
+        """Run the message that triggered setup, now that the user is configured.
+
+        Wired as SetupFlow's completion hook. Pops the stash first so the
+        message runs at most once; routing then mirrors a fresh mention, so
+        every ownership/busy gate re-applies.
+        """
+        pending = await self._store.pop_pending_setup_message(team_id, user_id)
+        if pending is None:
+            return
+        key = ThreadKey(
+            team_id=team_id, channel_id=pending.channel_id, thread_ts=pending.thread_ts
+        )
+        self._logger.info(
+            "Resuming stashed message after setup thread=%s user=%s chars=%s",
+            key.display(),
+            user_id,
+            len(pending.text),
+        )
+        # Minimal synthetic event carrying the fields _route_turn reads. The
+        # original message passed the thread-ownership gate to reach the stash,
+        # so it re-passes without parent_user_id.
+        event = {
+            "user": user_id,
+            "channel": pending.channel_id,
+            "ts": pending.thread_ts,
+            "thread_ts": pending.thread_ts,
+        }
+        await self._route_turn(
+            key=key,
+            event=event,
+            text=pending.text,
+            client=client,
+            in_channel=not key.is_dm,
+        )
+
     async def _route_turn(
         self,
         *,
@@ -472,6 +513,16 @@ class SlackOmnigentService:
                     "Unconfigured user thread=%s user=%s; prompting setup",
                     key.display(),
                     requester,
+                )
+                # Stash the message so completing setup resumes it (see
+                # resume_pending_message) instead of silently dropping it; a
+                # newer message before then overwrites the stash.
+                await self._store.upsert_pending_setup_message(
+                    key.team_id,
+                    requester,
+                    channel_id=key.channel_id,
+                    thread_ts=key.thread_ts,
+                    text=text,
                 )
                 await self._setup.prompt_unconfigured(
                     client,

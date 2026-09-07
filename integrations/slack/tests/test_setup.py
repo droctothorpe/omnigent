@@ -932,3 +932,101 @@ async def test_prompt_relogin_reports_when_dm_cannot_open(tmp_path: Path) -> Non
 
     assert delivered is False
     assert client.posts == []
+
+
+def _valid_select_view() -> dict[str, Any]:
+    return {
+        "state": {
+            "values": {
+                AGENT_BLOCK: {
+                    "agent_select": {
+                        "selected_option": {
+                            "text": {"type": "plain_text", "text": "Helper"},
+                            "value": "ag_1",
+                        }
+                    }
+                },
+                HOST_BLOCK: {
+                    "host_select": {
+                        "selected_option": {
+                            "text": {"type": "plain_text", "text": "Host One"},
+                            "value": "h1",
+                        }
+                    }
+                },
+                WORKSPACE_BLOCK: {"workspace_input": {"value": "/home/me/project"}},
+            }
+        },
+    }
+
+
+async def test_select_submit_invokes_completion_hook(tmp_path: Path) -> None:
+    # The service wires this hook to resume the message that triggered setup;
+    # it must fire only after the config is saved.
+    store = await _store(tmp_path)
+    pool = OmnigentClientPool()
+    flow = _flow(store, pool)
+    client = FakeSetupClient()
+    calls: list[tuple[str, str, Any]] = []
+    configured_at_call: list[bool] = []
+
+    async def hook(team_id: str, user_id: str, hook_client: Any) -> None:
+        configured_at_call.append(await store.get_user_config(team_id, user_id) is not None)
+        calls.append((team_id, user_id, hook_client))
+
+    flow.on_setup_complete = hook
+    try:
+        await flow._handle_select_submit(
+            FakeAck(), {"team": {"id": "T1"}, "user": {"id": "U1"}}, _valid_select_view(), client
+        )
+    finally:
+        await pool.aclose_all()
+
+    assert calls == [("T1", "U1", client)]
+    assert configured_at_call == [True]
+
+
+async def test_select_submit_survives_completion_hook_failure(tmp_path: Path) -> None:
+    # A resume failure must not undo or obscure a completed setup.
+    store = await _store(tmp_path)
+    pool = OmnigentClientPool()
+    flow = _flow(store, pool)
+    client = FakeSetupClient()
+
+    async def hook(team_id: str, user_id: str, hook_client: Any) -> None:
+        raise RuntimeError("resume exploded")
+
+    flow.on_setup_complete = hook
+    try:
+        await flow._handle_select_submit(
+            FakeAck(), {"team": {"id": "T1"}, "user": {"id": "U1"}}, _valid_select_view(), client
+        )
+    finally:
+        await pool.aclose_all()
+
+    assert await store.get_user_config("T1", "U1") is not None
+    assert client.posts and "set up" in client.posts[0]["text"].lower()
+
+
+async def test_select_submit_validation_error_skips_completion_hook(tmp_path: Path) -> None:
+    store = await _store(tmp_path)
+    pool = OmnigentClientPool()
+    flow = _flow(store, pool)
+    client = FakeSetupClient()
+    calls: list[str] = []
+
+    async def hook(team_id: str, user_id: str, hook_client: Any) -> None:
+        calls.append(user_id)
+
+    flow.on_setup_complete = hook
+    view = _valid_select_view()
+    del view["state"]["values"][HOST_BLOCK]  # no host selected → inline error
+    try:
+        await flow._handle_select_submit(
+            FakeAck(), {"team": {"id": "T1"}, "user": {"id": "U1"}}, view, client
+        )
+    finally:
+        await pool.aclose_all()
+
+    assert calls == []
+    assert await store.get_user_config("T1", "U1") is None
