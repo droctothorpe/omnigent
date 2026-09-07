@@ -384,7 +384,10 @@ describe("CommandPalette — focus hand-off", () => {
   it("hands focus to the registered composer after a navigating action", async () => {
     const view = openPaletteOverOutsideFocus();
     const stub = screen.getByTestId("composer-stub") as HTMLTextAreaElement;
-    const unregister = registerComposerFocus(() => stub.focus());
+    const unregister = registerComposerFocus(() => {
+      stub.focus();
+      return document.activeElement === stub;
+    });
     try {
       fireEvent.click(screen.getByText("New chat"));
       view.rerender(<Stage open={false} />);
@@ -400,7 +403,10 @@ describe("CommandPalette — focus hand-off", () => {
     setSessions([conv("c1", "Fix the parser")]);
     const view = openPaletteOverOutsideFocus();
     const stub = screen.getByTestId("composer-stub") as HTMLTextAreaElement;
-    const unregister = registerComposerFocus(() => stub.focus());
+    const unregister = registerComposerFocus(() => {
+      stub.focus();
+      return document.activeElement === stub;
+    });
     try {
       fireEvent.click(screen.getByText("Fix the parser"));
       view.rerender(<Stage open={false} />);
@@ -411,10 +417,41 @@ describe("CommandPalette — focus hand-off", () => {
     }
   });
 
+  it("does not punt focus into a stale composer for composer-less destinations", async () => {
+    const view = openPaletteOverOutsideFocus();
+    const stub = screen.getByTestId("composer-stub") as HTMLTextAreaElement;
+    const handOff = vi.fn(() => {
+      stub.focus();
+      return true;
+    });
+    const unregister = registerComposerFocus(handOff);
+    try {
+      fireEvent.click(screen.getByText("Go to Inbox"));
+      view.rerender(<Stage open={false} />);
+
+      await waitFor(() => expect(screen.queryByTestId("command-palette-input")).toBeNull());
+      await act(async () => {
+        await new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      });
+      // Inbox mounts no composer: whatever composer is still registered is
+      // not the destination's, so the hand-off must not fire — the dialog's
+      // default close-time focus handling stays in charge.
+      expect(handOff).not.toHaveBeenCalled();
+      expect(document.activeElement).not.toBe(stub);
+    } finally {
+      unregister();
+    }
+  });
+
   it("leaves the hand-off unused for sidebar toggles (same page, no navigation)", async () => {
     const view = openPaletteOverOutsideFocus();
     const stub = screen.getByTestId("composer-stub") as HTMLTextAreaElement;
-    const handOff = vi.fn(() => stub.focus());
+    const handOff = vi.fn(() => {
+      stub.focus();
+      return true;
+    });
     const unregister = registerComposerFocus(handOff);
     try {
       fireEvent.click(screen.getByText("Toggle conversations sidebar"));

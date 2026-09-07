@@ -2711,12 +2711,16 @@ function ComposerImpl({
 
   // The ⌘K palette hands focus here after a session pick: its dialog's
   // close-time focus handling fires after this composer's own focus effect,
-  // so that effect alone loses the race. Desktop only — mobile keeps its
-  // tap-to-focus behavior.
+  // so that effect alone loses the race. Mobile keeps its tap-to-focus
+  // behavior — declining tells the palette to keep its default restore.
   useEffect(
     () =>
       registerComposerFocus(() => {
-        if (!isMobileRef.current) textareaRef.current?.focus();
+        if (isMobileRef.current) return false;
+        const el = textareaRef.current;
+        if (!el) return false;
+        el.focus();
+        return document.activeElement === el;
       }),
     [],
   );

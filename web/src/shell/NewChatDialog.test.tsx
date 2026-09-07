@@ -7,7 +7,7 @@ import type * as NativeBridgeModule from "@/lib/nativeBridge";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState, type ReactNode } from "react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import {
@@ -29,6 +29,7 @@ import {
   resetLandingDraft,
 } from "./NewChatDialog";
 import { CommandPalette } from "./CommandPalette";
+import { focusComposer } from "@/lib/composerFocus";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import { authenticatedFetch } from "@/lib/identity";
@@ -5732,6 +5733,63 @@ describe("NewChatLandingScreen — command-palette focus hand-off", () => {
     await waitFor(() => expect(screen.queryByTestId("command-palette-input")).toBeNull());
     // …and the landing composer — not the pre-palette element — holds focus.
     const input = await screen.findByTestId("new-chat-landing-input");
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  });
+
+  it("declines the hand-off on mobile so the keyboard stays tap-gated", async () => {
+    // A phone expects a tap before the keyboard appears: the registered
+    // focuser must report that it did NOT take focus, so the palette keeps
+    // its default close behavior instead of suppressing it for nothing.
+    const restoreViewport = forceMobileViewport();
+    try {
+      renderLanding();
+      const input = await screen.findByTestId("new-chat-landing-input");
+
+      expect(focusComposer()).toBe(false);
+      expect(document.activeElement).not.toBe(input);
+    } finally {
+      restoreViewport();
+    }
+  });
+});
+
+// The sidebar's per-project "New session" pencil lands on `/?project=<name>`
+// while the landing screen is already mounted: only the query param swaps, so
+// the textarea's mount-time autoFocus never re-fires. Stand-in for the pencil:
+// a link-shaped button that swaps the param the way the sidebar Link does.
+function ProjectPencilHarness() {
+  const navigate = useNavigate();
+  return (
+    <>
+      <button type="button" data-testid="project-pencil" onClick={() => navigate("/?project=beta")}>
+        New session in beta
+      </button>
+      <NewChatLandingScreen />
+    </>
+  );
+}
+
+describe("NewChatLandingScreen — project pencil focus", () => {
+  beforeEach(() => {
+    setupLandingMocks();
+  });
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+  });
+
+  it("refocuses the composer when the ?project= param swaps while mounted", async () => {
+    renderLanding({}, "/", <ProjectPencilHarness />);
+    const input = await screen.findByTestId("new-chat-landing-input");
+
+    // Clicking the pencil moves focus onto it, exactly like the sidebar link.
+    const pencil = screen.getByTestId("project-pencil");
+    pencil.focus();
+    expect(document.activeElement).not.toBe(input);
+
+    fireEvent.click(pencil);
+
+    // The screen stays mounted; the param swap alone must bring the caret back.
     await waitFor(() => expect(document.activeElement).toBe(input));
   });
 });

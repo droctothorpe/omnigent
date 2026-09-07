@@ -61,11 +61,11 @@ interface ActionCommand {
   icon: LucideIcon;
   /** Extra terms the client-side filter matches against (beyond the label). */
   keywords: string[];
-  /** True when `run` navigates: the pre-palette element is then stale, so the
-      close-time focus restore is suppressed and the destination composer is
-      focused instead (see onCloseAutoFocus). Toggles leave it unset so focus
-      returns to where the user was. */
-  navigates?: boolean;
+  /** True when `run` lands on a page that mounts a composer: the close-time
+      focus restore is then suppressed once that composer takes focus (see
+      onCloseAutoFocus). Composer-less navigations and toggles leave it unset
+      so the dialog's default restore applies. */
+  focusesComposer?: boolean;
   run: () => void;
 }
 
@@ -142,7 +142,7 @@ export function CommandPalette({
         label: "New chat",
         icon: SquarePenIcon,
         keywords: ["compose", "start", "new session"],
-        navigates: true,
+        focusesComposer: true,
         run: () => navigate("/"),
       },
       {
@@ -150,7 +150,6 @@ export function CommandPalette({
         label: "Go to Inbox",
         icon: InboxIcon,
         keywords: ["notifications", "comments", "needs response"],
-        navigates: true,
         run: () => navigate("/inbox"),
       },
       {
@@ -158,7 +157,6 @@ export function CommandPalette({
         label: "Go to Automations",
         icon: CalendarClockIcon,
         keywords: ["scheduled", "recurring", "cron", "automation", "schedule"],
-        navigates: true,
         run: () => navigate("/tasks"),
       },
       {
@@ -166,7 +164,6 @@ export function CommandPalette({
         label: "Go to Settings",
         icon: SettingsIcon,
         keywords: ["preferences", "configuration", "account"],
-        navigates: true,
         run: () => navigate("/settings"),
       },
       {
@@ -226,7 +223,7 @@ export function CommandPalette({
   }, [data, debouncedQuery]);
 
   const runAction = (action: ActionCommand): void => {
-    focusDestinationRef.current = action.navigates === true;
+    focusDestinationRef.current = action.focusesComposer === true;
     close();
     action.run();
   };
@@ -266,14 +263,15 @@ export function CommandPalette({
             : undefined
         }
         showCloseButton={false}
-        // After a navigating selection the pre-palette element is stale (its
-        // page is gone): restoring focus to it would strand focus on <body>
-        // and blur the destination composer, which claims it here instead.
+        // After a selection that lands on a composer page, the dialog's
+        // default restore would blur that composer (its old target is stale).
+        // Suppress it only when the composer actually took focus — otherwise
+        // (mobile's tap-to-focus, a torn-down composer) the default restore
+        // keeps focus somewhere sensible instead of stranding it on <body>.
         onCloseAutoFocus={(e) => {
           if (!focusDestinationRef.current) return;
           focusDestinationRef.current = false;
-          e.preventDefault();
-          focusComposer();
+          if (focusComposer()) e.preventDefault();
         }}
       >
         <DialogTitle className="sr-only">Command palette</DialogTitle>

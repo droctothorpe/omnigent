@@ -2439,14 +2439,29 @@ export function NewChatLandingScreen() {
   // The ⌘K palette's "New chat" lands here while its dialog is still tearing
   // down, so the textarea's mount autoFocus loses to the dialog's close-time
   // focus handling; register so the palette can hand focus over once it's
-  // gone. Desktop only — a phone expects a tap before the keyboard appears.
+  // gone. A phone expects a tap before the keyboard appears — declining
+  // tells the palette to keep its default restore.
   useEffect(
     () =>
       registerComposerFocus(() => {
-        if (!isMobileViewport) textareaRef.current?.focus();
+        if (isMobileViewport) return false;
+        const el = textareaRef.current;
+        if (!el) return false;
+        el.focus();
+        return document.activeElement === el;
       }),
     [isMobileViewport],
   );
+
+  // The textarea's autoFocus fires on mount only, but a project's "New
+  // session" pencil swaps `?project=` while this screen stays mounted —
+  // refocus on the swap so every arrival at the composer is ready to type.
+  const focusedProjectParamRef = useRef(projectParam);
+  useEffect(() => {
+    if (focusedProjectParamRef.current === projectParam) return;
+    focusedProjectParamRef.current = projectParam;
+    if (!isMobileViewport) textareaRef.current?.focus();
+  }, [projectParam, isMobileViewport]);
 
   // Attachments for the first message — same affordances as the in-session
   // composer (paperclip + paste); carried to ChatPage via the pending

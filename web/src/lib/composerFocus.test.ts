@@ -7,9 +7,23 @@ describe("composerFocus", () => {
     expect(focusComposer()).toBe(false);
   });
 
+  it("reports the composer's own verdict so callers can keep their default", () => {
+    // The mobile tap-to-focus path (or a torn-down textarea) declines the
+    // hand-off; the caller must see that and leave its default focus
+    // handling in place.
+    const declines = vi.fn(() => false);
+    const unregister = registerComposerFocus(declines);
+    try {
+      expect(focusComposer()).toBe(false);
+      expect(declines).toHaveBeenCalledTimes(1);
+    } finally {
+      unregister();
+    }
+  });
+
   it("focuses the most recently registered composer", () => {
-    const older = vi.fn();
-    const newer = vi.fn();
+    const older = vi.fn(() => true);
+    const newer = vi.fn(() => true);
     const unregisterOlder = registerComposerFocus(older);
     const unregisterNewer = registerComposerFocus(newer);
     try {
@@ -23,8 +37,8 @@ describe("composerFocus", () => {
   });
 
   it("falls back to the surviving composer after an unregister, then to none", () => {
-    const a = vi.fn();
-    const b = vi.fn();
+    const a = vi.fn(() => true);
+    const b = vi.fn(() => true);
     const unregisterA = registerComposerFocus(a);
     const unregisterB = registerComposerFocus(b);
     unregisterB();
@@ -35,8 +49,8 @@ describe("composerFocus", () => {
   });
 
   it("tolerates out-of-order unregistration (route swaps can overlap mounts)", () => {
-    const outgoing = vi.fn();
-    const incoming = vi.fn();
+    const outgoing = vi.fn(() => true);
+    const incoming = vi.fn(() => true);
     // Incoming page registers before the outgoing page's cleanup runs.
     const unregisterOutgoing = registerComposerFocus(outgoing);
     const unregisterIncoming = registerComposerFocus(incoming);
@@ -51,8 +65,8 @@ describe("composerFocus", () => {
   });
 
   it("makes unregistration idempotent", () => {
-    const a = vi.fn();
-    const b = vi.fn();
+    const a = vi.fn(() => true);
+    const b = vi.fn(() => true);
     const unregisterA = registerComposerFocus(a);
     const unregisterB = registerComposerFocus(b);
     unregisterA();
