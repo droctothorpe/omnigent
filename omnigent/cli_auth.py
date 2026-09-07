@@ -51,13 +51,16 @@ def _token_file_path() -> Path:
     """Return the path to the auth token storage file.
 
     Uses the shared Omnigent state directory, honoring
-    ``OMNIGENT_DATA_DIR``.
+    ``OMNIGENT_DATA_DIR`` (in lock-step with
+    ``omnigent_ui_sdk.terminal._config.state_dir``, computed locally
+    because this runs inside per-hook-event subprocesses that must not
+    pay that package's import graph).
 
     :returns: Path to ``<data-dir>/auth_tokens.json``.
     """
-    from omnigent_ui_sdk.terminal._config import state_dir
-
-    return Path(state_dir()) / _TOKEN_FILE_NAME
+    value = os.environ.get("OMNIGENT_DATA_DIR")
+    data_dir = Path(value).expanduser() if value else Path.home() / ".omnigent"
+    return data_dir / _TOKEN_FILE_NAME
 
 
 def _normalize_server_url(server_url: str) -> str:

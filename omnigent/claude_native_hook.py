@@ -218,11 +218,17 @@ def main(argv: list[str] | None = None) -> int:
         record_hook_event(bridge_dir, payload)
     except Exception as exc:  # noqa: BLE001 - hook must not break Claude Code.
         print(f"omnigent claude hook: failed to record hook: {exc}", file=sys.stderr)
-    conversation_url = _conversation_url_for_active_session(bridge_dir, args.conversation_url)
-    if conversation_url and payload.get("hook_event_name") == "SessionStart":
-        print(
-            json.dumps({"systemMessage": (f"Open this session in Omnigent: {conversation_url}")})
-        )
+    # Only SessionStart surfaces the conversation URL, and building it walks
+    # the auth/config import graph; every other event is a blocking observer
+    # spawn that must stay import-light.
+    if payload.get("hook_event_name") == "SessionStart":
+        conversation_url = _conversation_url_for_active_session(bridge_dir, args.conversation_url)
+        if conversation_url:
+            print(
+                json.dumps(
+                    {"systemMessage": (f"Open this session in Omnigent: {conversation_url}")}
+                )
+            )
     return 0
 
 

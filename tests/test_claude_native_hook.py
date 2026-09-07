@@ -731,6 +731,36 @@ def test_non_session_start_hook_does_not_emit_conversation_url_context(
     assert captured.err == ""
 
 
+def test_non_session_start_hook_skips_conversation_url_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Observer events never pay the conversation-URL construction cost.
+
+    Building the URL walks the auth/config import graph and only
+    ``SessionStart`` surfaces the result. Fails when ``main()`` goes back
+    to constructing (and discarding) the URL for every Stop/
+    UserPromptSubmit/Task spawn — the per-event TUI stall, since Claude
+    Code blocks on each freshly spawned observer hook.
+    """
+    bridge_dir = tmp_path / "bridge"
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    calls: list[tuple[object, ...]] = []
+
+    def _record_call(*args: object) -> str:
+        calls.append(args)
+        return "http://127.0.0.1:8787/c/conv_abc"
+
+    monkeypatch.setattr(claude_native_hook, "_conversation_url_for_active_session", _record_call)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"hook_event_name": "Stop"})))
+
+    exit_code = claude_native_hook.main(["--bridge-dir", str(bridge_dir)])
+
+    assert exit_code == 0
+    assert calls == []
+
+
 def test_permission_request_hook_posts_to_active_session_from_bridge_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
