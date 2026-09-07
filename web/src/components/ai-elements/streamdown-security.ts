@@ -1,3 +1,8 @@
+// Keep streamdown's lazily-imported highlighted-body facade in the static
+// bundle so a mid-session chunk fetch can never degrade a code block (see the
+// module header).
+import "./eagerHighlightedBodyFacade";
+
 import { cjk } from "@streamdown/cjk";
 import { createMathPlugin } from "@streamdown/math";
 import { mermaid } from "@streamdown/mermaid";
