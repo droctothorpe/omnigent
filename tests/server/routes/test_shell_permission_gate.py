@@ -71,12 +71,19 @@ class _StubConversationStore:
     def get_conversation(self, conversation_id: str) -> Conversation | None:
         return self._conversations.get(conversation_id)
 
-    def add(self, conversation_id: str, *, share_workspace_files: bool = False) -> None:
+    def add(
+        self,
+        conversation_id: str,
+        *,
+        share_workspace_files: bool = False,
+        parent_conversation_id: str | None = None,
+    ) -> None:
         self._conversations[conversation_id] = Conversation(
             id=conversation_id,
             created_at=0,
             updated_at=0,
-            root_conversation_id=conversation_id,
+            root_conversation_id=parent_conversation_id or conversation_id,
+            parent_conversation_id=parent_conversation_id,
             agent_id="ag_test",
             share_workspace_files=share_workspace_files,
         )
@@ -274,6 +281,15 @@ def app(runner_globals_reset: None, runner_client: _RecordingRunnerClient) -> Fa
     # A second session whose owner opted into sharing workspace files with
     # view-level collaborators — same grant shape, share flag on.
     conv_store.add("conv_open", share_workspace_files=True)
+    # Sub-agent children of conv_share: NO grants of their own — access is
+    # inherited from the parent. One keeps the fail-closed default, one has
+    # the owner's share opt-in turned on.
+    conv_store.add("conv_child", parent_conversation_id="conv_share")
+    conv_store.add(
+        "conv_child_open",
+        parent_conversation_id="conv_share",
+        share_workspace_files=True,
+    )
     perm_store = _StubPermissionStore()
     perm_store.add_grant("owner@example.com", "conv_share", LEVEL_EDIT)
     perm_store.add_grant("viewer@example.com", "conv_share", LEVEL_READ)
@@ -631,6 +647,62 @@ async def test_workspace_reads_stay_open_to_edit_collaborators(
     outright."""
     resp = await client.get(
         url_tmpl.format(cid="conv_share"), headers={"X-Forwarded-Email": "owner@example.com"}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert len(runner_client.gets) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url_tmpl", _CONTENT_READ_PATHS, ids=_CONTENT_READ_IDS)
+async def test_workspace_reads_deny_inherited_view_only_when_not_shared(
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    url_tmpl: str,
+) -> None:
+    """A sub-agent session has no grants of its own — access is inherited from
+    the parent, so the caller's direct level on the child resolves to ``None``.
+    That must NOT read as authorization: a view-only grant on the parent still
+    cannot read the child's workspace while sharing is off, and the runner is
+    never reached."""
+    resp = await client.get(
+        url_tmpl.format(cid="conv_child"), headers={"X-Forwarded-Email": "viewer@example.com"}
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert runner_client.gets == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url_tmpl", _CONTENT_READ_PATHS, ids=_CONTENT_READ_IDS)
+async def test_workspace_reads_allow_inherited_view_only_when_shared(
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    url_tmpl: str,
+) -> None:
+    """With the child session's share opt-in on, the same inherited view-only
+    grant reaches its workspace read surfaces."""
+    resp = await client.get(
+        url_tmpl.format(cid="conv_child_open"),
+        headers={"X-Forwarded-Email": "viewer@example.com"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert len(runner_client.gets) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url_tmpl", _CONTENT_READ_PATHS, ids=_CONTENT_READ_IDS)
+async def test_workspace_reads_stay_open_to_inherited_edit_collaborators(
+    client: httpx.AsyncClient,
+    runner_client: _RecordingRunnerClient,
+    url_tmpl: str,
+) -> None:
+    """Control: an edit grant on the parent still reaches the child sub-agent's
+    workspace with sharing off — the inherited-access fix cannot pass by
+    closing sub-agent browsing outright."""
+    resp = await client.get(
+        url_tmpl.format(cid="conv_child"), headers={"X-Forwarded-Email": "owner@example.com"}
     )
 
     assert resp.status_code == 200, resp.text

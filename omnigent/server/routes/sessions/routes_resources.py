@@ -649,16 +649,36 @@ def register_resources_routes(
             conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if conv is None:
                 raise _session_not_found()
-        # ``level is None`` means permissions are disabled (single-user); admins
-        # resolve to owner. Edit collaborators keep the workspace unconditionally;
-        # a view-only grant reaches it only once the owner shares its files.
-        if access.level is None or access.level >= LEVEL_EDIT or conv.share_workspace_files:
+        # Permissions disabled (single-user): nothing further to gate on.
+        if permission_store is None:
             return conv
-        raise OmnigentError(
-            f"{user_id!r} needs edit access to browse the workspace of session "
-            f"{session_id!r}, or the owner must enable file sharing",
-            code=ErrorCode.FORBIDDEN,
-        )
+        if conv.share_workspace_files:
+            return conv
+        # Sharing is off: workspace bytes need edit. A direct edit grant (or an
+        # admin, whose display level resolves to owner) is already proven. Any
+        # other caller — notably a sub-agent session, where the grant lives on
+        # the PARENT and the display level here is None — is re-checked at the
+        # edit bar, which walks sub-agent parents, so an inherited view-only
+        # grant cannot slip past the opt-in.
+        if access.level is not None and access.level >= LEVEL_EDIT:
+            return conv
+        try:
+            await _require_access_and_level(
+                user_id,
+                session_id,
+                LEVEL_EDIT,
+                permission_store,
+                conversation_store,
+            )
+        except OmnigentError as err:
+            if err.code != ErrorCode.FORBIDDEN:
+                raise
+            raise OmnigentError(
+                f"{user_id!r} needs edit access to browse the workspace of session "
+                f"{session_id!r}, or the owner must enable file sharing",
+                code=ErrorCode.FORBIDDEN,
+            ) from err
+        return conv
 
     def _resolve_browse_path(request: Request, client_path: str) -> tuple[bool, str]:
         """Resolve a filesystem request path against its declared base.
