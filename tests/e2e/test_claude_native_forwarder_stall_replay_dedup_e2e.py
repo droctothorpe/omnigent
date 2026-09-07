@@ -329,7 +329,7 @@ async def _drive_forwarder_through_a_stall(
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
+                _ = await task
     finally:
         fwd._post_external_conversation_item = real_post
 

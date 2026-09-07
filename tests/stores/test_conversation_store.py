@@ -6237,9 +6237,9 @@ def test_repeated_persisted_twin_batch_leaves_conversation_metadata_alone(
     after it already persisted: every item resolves to the stored row, so
     nothing inserts and the conversation must not look active.
     """
-    import omnigent.stores.conversation_store.sqlalchemy_store as store_mod
-
-    monkeypatch.setattr(store_mod, "now_epoch", lambda: 1000)
+    monkeypatch.setattr(
+        "omnigent.stores.conversation_store.sqlalchemy_store.now_epoch", lambda: 1000
+    )
     conv = conversation_store.create_conversation()
     item = NewConversationItem(
         type="message",
@@ -6249,7 +6249,9 @@ def test_repeated_persisted_twin_batch_leaves_conversation_metadata_alone(
     )
     conversation_store.append(conv.id, [item])
 
-    monkeypatch.setattr(store_mod, "now_epoch", lambda: 2000)
+    monkeypatch.setattr(
+        "omnigent.stores.conversation_store.sqlalchemy_store.now_epoch", lambda: 2000
+    )
     [a, b] = conversation_store.append(conv.id, [item, item])
     assert a.deduplicated is True
     assert b.deduplicated is True

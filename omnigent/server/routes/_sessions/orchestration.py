@@ -15,6 +15,7 @@ import re
 import secrets
 import time
 import uuid
+import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, Literal, cast
 
@@ -2210,7 +2211,41 @@ async def _persist_external_codex_subagent_start(
     )
 
 
+_external_item_persist_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _external_item_persist_lock(session_id: str) -> asyncio.Lock:
+    """Return the lock serializing transcript persistence for one session."""
+    lock = _external_item_persist_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _external_item_persist_locks[session_id] = lock
+    return lock
+
+
 async def _persist_external_conversation_item(
+    session_id: str,
+    conv: Conversation,
+    body: SessionEventInput,
+    conversation_store: ConversationStore,
+    created_by: str | None = None,
+    background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
+) -> str:
+    """Serialize pending-input reconciliation with the corresponding append."""
+    async with _external_item_persist_lock(session_id):
+        return await _persist_external_conversation_item_impl(
+            session_id,
+            conv,
+            body,
+            conversation_store,
+            created_by,
+            background_title_coordinator,
+        )
+
+
+async def _persist_external_conversation_item_impl(
     session_id: str,
     conv: Conversation,
     body: SessionEventInput,

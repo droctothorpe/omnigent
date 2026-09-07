@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -4391,6 +4393,55 @@ async def test_kiro_duplicate_repost_restores_skipped_entries_unpersisted() -> N
         assert [entry["pending_id"] for entry in snapshot] == recorded
     finally:
         pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_external_item_persistence_is_serialized_per_session() -> None:
+    """Concurrent retries cannot interleave pending-input reconciliation."""
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    class _ConcurrentStore(_ConversationStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+            self.guard = threading.Lock()
+
+        def append(self, conversation_id: str, items: list[Any]) -> list[Any]:
+            with self.guard:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.05)
+                return super().append(conversation_id, items)
+            finally:
+                with self.guard:
+                    self.active -= 1
+
+    store = _ConcurrentStore()
+    sid = "823dbd1aab969b5a813fac59bb977a77"
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    body = SessionEventInput(
+        type="external_conversation_item",
+        data={
+            "item_type": "message",
+            "item_data": {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+                "agent": "claude-native-ui",
+            },
+            "response_id": "response-1",
+            "source_id": "response-1:0",
+        },
+    )
+
+    await asyncio.gather(
+        _persist_external_conversation_item(sid, conv, body, store),  # type: ignore[arg-type]
+        _persist_external_conversation_item(sid, conv, body, store),  # type: ignore[arg-type]
+    )
+
+    assert store.max_active == 1
 
 
 @pytest.mark.asyncio

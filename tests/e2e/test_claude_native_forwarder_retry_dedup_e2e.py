@@ -171,7 +171,8 @@ def forwarder_dedup_server() -> Iterator[str]:
                 if resp.status_code == 200:
                     break
             except (httpx.ConnectError, httpx.ReadError):
-                pass
+                # The subprocess may still be starting; retry until the deadline.
+                continue
             time.sleep(0.2)
         else:
             proc.terminate()
