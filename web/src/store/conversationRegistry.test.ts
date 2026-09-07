@@ -292,11 +292,25 @@ describe("ConversationRegistry", () => {
     expect(registry.getActive()?.id).toBe("conv_real"); // active pointer followed
   });
 
-  it("rekey onto an already-live id keeps the existing entry and disposes the old", () => {
+  it("rekey onto an already-live id keeps its state and carries pending messages", () => {
     const temp = registry.acquire("temp:aaaa0001");
+    temp.setState({
+      pendingUserMessages: [
+        {
+          tempId: "pend_1",
+          content: [{ type: "input_text", text: "optimistic first message" }],
+        },
+      ],
+    });
     const existing = registry.acquire("conv_real");
     registry.rekey("temp:aaaa0001", "conv_real");
     expect(registry.peek("conv_real")).toBe(existing);
+    expect(existing.getState().pendingUserMessages).toEqual([
+      {
+        tempId: "pend_1",
+        content: [{ type: "input_text", text: "optimistic first message" }],
+      },
+    ]);
     expect(temp.disposed).toBe(true);
     expect(registry.has("temp:aaaa0001")).toBe(false);
   });

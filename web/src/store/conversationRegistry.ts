@@ -224,13 +224,27 @@ export class ConversationRegistry {
    * client-only conversation (`temp:*`) onto its real id so the optimistic
    * bubble carries over without a remount. `oldId` must be a stream-less local
    * entry (no live SSE pump to transfer). If `newId` is already live, its entry
-   * wins and the old one is disposed. No-op if `oldId` isn't live.
+   * wins but inherits any optimistic pending messages before the old one is
+   * disposed. No-op if `oldId` isn't live.
    */
   rekey(oldId: string, newId: string): void {
     const old = this.entries.get(oldId);
     if (old === undefined) return;
     if (oldId === newId) return;
-    if (this.entries.has(newId)) {
+    const existing = this.entries.get(newId);
+    if (existing !== undefined) {
+      const existingState = existing.getState();
+      const existingPendingIds = new Set(
+        existingState.pendingUserMessages.map((item) => item.tempId),
+      );
+      const missingPending = old
+        .getState()
+        .pendingUserMessages.filter((item) => !existingPendingIds.has(item.tempId));
+      if (missingPending.length > 0) {
+        existing.setState({
+          pendingUserMessages: [...missingPending, ...existingState.pendingUserMessages],
+        });
+      }
       this.release(oldId);
       if (this.activeId === oldId) this.activeId = newId;
       return;
