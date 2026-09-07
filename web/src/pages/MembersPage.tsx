@@ -49,6 +49,7 @@ import {
 import { getCurrentIsAdmin, resolveIdentity } from "@/lib/identity";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isSingleUserMode } from "@/lib/capabilities";
+import { copyText } from "@/lib/clipboard";
 
 export function MembersPage() {
   const info = useServerInfo();
@@ -441,11 +442,11 @@ function CopyableValue({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   const onCopy = async () => {
     try {
-      await navigator.clipboard.writeText(value);
+      await copyText(value);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      // No clipboard permission — the input is still selectable.
+      // Clipboard unavailable — the input is still selectable.
     }
   };
   return (
