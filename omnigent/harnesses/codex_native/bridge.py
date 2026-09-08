@@ -395,6 +395,43 @@ def read_codex_home_config_model(codex_home: Path) -> str | None:
     return model if isinstance(model, str) and model else None
 
 
+def read_codex_config_effort(bridge_dir: Path) -> str | None:
+    """
+    Read the active reasoning effort from this session's Codex ``config.toml``.
+
+    The top-level ``model_reasoning_effort`` key is what an in-TUI ``/model``
+    writes alongside ``model``, so it is the source of truth for the effort the
+    terminal is running at. Same fail-safe contract as
+    :func:`read_codex_config_model`: a missing / unreadable / unparsable file
+    (or a config with no effort key) returns ``None``.
+
+    :param bridge_dir: The session's native-Codex bridge directory.
+    :returns: The top-level ``model_reasoning_effort`` from ``config.toml``
+        (e.g. ``"high"``), or ``None`` when undeterminable.
+    """
+    return read_codex_home_config_effort(codex_home_for_bridge_dir(bridge_dir))
+
+
+def read_codex_home_config_effort(codex_home: Path) -> str | None:
+    """
+    Read the active reasoning effort straight from a session's ``CODEX_HOME``.
+
+    Same value and fail-safe behaviour as :func:`read_codex_config_effort`,
+    for callers that hold the ``CODEX_HOME`` path rather than the bridge
+    directory.
+
+    :param codex_home: The session's private ``CODEX_HOME`` directory.
+    :returns: The top-level ``model_reasoning_effort`` from ``config.toml``
+        (e.g. ``"high"``), or ``None`` when undeterminable.
+    """
+    try:
+        data = tomllib.loads((codex_home / "config.toml").read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    effort = data.get("model_reasoning_effort")
+    return effort if isinstance(effort, str) and effort else None
+
+
 class DeveloperInstructionsReadState(str, Enum):
     """Tri-state result of reading ``developer_instructions`` from ``config.toml``.
 

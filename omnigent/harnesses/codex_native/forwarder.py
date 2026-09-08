@@ -32,6 +32,7 @@ from omnigent.harnesses.codex_native.bridge import (
     pending_mcp_servers,
     read_bridge_state,
     read_codex_config_developer_instructions_state,
+    read_codex_config_effort,
     read_codex_config_model,
     read_mcp_startup,
     settle_pending_mcp_startup,
@@ -337,6 +338,10 @@ class _CodexForwarderState:
     :param posted_effort_known: Whether ``posted_effort`` has been mirrored at
         least once. Without this, the initial ``None`` default would be
         indistinguishable from "not yet posted".
+    :param last_config_effort: The config.toml ``model_reasoning_effort`` as of
+        the last ``_refresh_effort_from_config`` read, so the refresh can tell
+        an unchanged file from a rewritten one (an unchanged file must not roll
+        back a live ``thread/settings/updated`` effort).
     :param collaboration_mode: Latest known Codex collaboration mode kind, e.g.
         ``"plan"`` or ``"default"``.
     :param posted_collaboration_mode: Last collaboration mode kind already
@@ -405,6 +410,9 @@ class _CodexForwarderState:
     effort: str | None = None
     posted_effort: str | None = None
     posted_effort_known: bool = False
+    # The config.toml effort as of the last _refresh_effort_from_config read,
+    # so the refresh can tell an unchanged file from a rewritten one.
+    last_config_effort: str | None = None
     collaboration_mode: str | None = None
     posted_collaboration_mode: str | None = None
     terminal_launch_args: list[str] | None = None
@@ -2277,9 +2285,20 @@ async def _subscribe_until_ready(
             # response's model when config.toml has none.
             _refresh_model_from_config(bridge_dir, forwarder_state)
             _refresh_developer_instructions_from_config(bridge_dir, forwarder_state)
+            _refresh_effort_from_config(bridge_dir, forwarder_state)
             await _sync_model_change(
                 ap_client, session_id=session_id, forwarder_state=forwarder_state
             )
+            # A fresh thread's subscription completes only once its first turn
+            # starts, so that turn's ``turn/started`` is missed: mirror the
+            # config.toml effort here too (an in-TUI ``/model`` effort change
+            # before the first turn would otherwise never reach the composer).
+            # Gated on a seen config effort: without one the unseeded baseline
+            # would mirror a spurious ``None`` on every session.
+            if forwarder_state.last_config_effort is not None:
+                await _sync_reasoning_effort_change(
+                    ap_client, session_id=session_id, forwarder_state=forwarder_state
+                )
             await _sync_codex_approval_mode_change(
                 ap_client, session_id=session_id, forwarder_state=forwarder_state
             )
@@ -2910,6 +2929,34 @@ def _refresh_model_from_config(bridge_dir: Path, forwarder_state: _CodexForwarde
         forwarder_state.model = config_model
 
 
+def _refresh_effort_from_config(bridge_dir: Path, forwarder_state: _CodexForwarderState) -> None:
+    """
+    Update the forwarder's known reasoning effort from ``config.toml``.
+
+    Reads the ``model_reasoning_effort`` key an in-TUI ``/model`` writes (with
+    no accompanying notification) so a following ``_sync_reasoning_effort_change``
+    mirrors it to Omnigent — the event the server persists and echoes to the SPA
+    so the chat composer's effort control tracks the terminal.
+
+    Precedence mirrors ``_refresh_model_from_config``: a config.toml value that
+    CHANGED since the last read wins (the in-TUI ``/model`` is the freshest
+    signal); an unchanged file preserves the prior value, so a live
+    ``thread/settings/updated`` effort is not rolled back by a stale re-read.
+    No-op when config.toml carries no effort.
+
+    :param bridge_dir: The session's native-Codex bridge directory.
+    :param forwarder_state: Mutable forwarder state whose ``effort`` is
+        updated in place.
+    :returns: None.
+    """
+    config_effort = read_codex_config_effort(bridge_dir)
+    if not config_effort:
+        return
+    if config_effort != forwarder_state.last_config_effort:
+        forwarder_state.effort = config_effort
+    forwarder_state.last_config_effort = config_effort
+
+
 def _refresh_developer_instructions_from_config(
     bridge_dir: Path, forwarder_state: _CodexForwarderState
 ) -> None:
@@ -3147,9 +3194,16 @@ async def _maybe_handle_turn_event(
             # on Omnigent before this turn's first tool call reaches the cost gate.
             _refresh_model_from_config(bridge_dir, forwarder_state)
             _refresh_developer_instructions_from_config(bridge_dir, forwarder_state)
+            _refresh_effort_from_config(bridge_dir, forwarder_state)
             await _sync_model_change(
                 client, session_id=session_id, forwarder_state=forwarder_state
             )
+            # Only sync once config.toml has revealed an effort: without one the
+            # unseeded baseline would mirror a spurious ``None`` on every session.
+            if forwarder_state.last_config_effort is not None:
+                await _sync_reasoning_effort_change(
+                    client, session_id=session_id, forwarder_state=forwarder_state
+                )
         return True
     if method in {"turn/completed", "turn/failed"}:
         await _handle_terminal_turn_boundary(

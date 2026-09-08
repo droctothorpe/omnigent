@@ -21,7 +21,9 @@ from omnigent.harnesses.codex_native.bridge import (
     prepare_bridge_dir,
     read_bridge_startup_error,
     read_bridge_state,
+    read_codex_config_effort,
     read_codex_config_model,
+    read_codex_home_config_effort,
     read_codex_home_config_model,
     read_mcp_startup,
     read_policy_hook_config,
@@ -161,6 +163,43 @@ def test_read_codex_config_model_none_when_unparsable(bridge_dir: Path) -> None:
     _write_config(bridge_dir, 'model = "gpt-5.4\n[broken')
 
     assert read_codex_config_model(bridge_dir) is None
+
+
+def test_read_codex_config_effort_returns_top_level_effort(bridge_dir: Path) -> None:
+    """The top-level ``model_reasoning_effort`` key (what /model writes) is returned.
+
+    This is the forwarder's source of truth for the effort the terminal runs
+    at; if it returned the wrong key or ``None``, an in-TUI effort change
+    would never mirror to the chat composer.
+    """
+    _write_config(bridge_dir, 'model = "gpt-5.4"\nmodel_reasoning_effort = "high"\n')
+
+    assert read_codex_config_effort(bridge_dir) == "high"
+
+
+def test_read_codex_home_config_effort_reads_a_codex_home_directly(bridge_dir: Path) -> None:
+    """A ``CODEX_HOME`` path yields the same effort as the bridge-dir reader."""
+    _write_config(bridge_dir, 'model_reasoning_effort = "low"\n')
+
+    assert read_codex_home_config_effort(codex_home_for_bridge_dir(bridge_dir)) == "low"
+
+
+def test_read_codex_config_effort_none_when_missing_or_absent(bridge_dir: Path) -> None:
+    """No file, no key, or a non-string value → ``None`` (no invented effort)."""
+    assert read_codex_config_effort(bridge_dir) is None
+
+    _write_config(bridge_dir, 'model = "gpt-5.4"\n')
+    assert read_codex_config_effort(bridge_dir) is None
+
+    _write_config(bridge_dir, "model_reasoning_effort = 3\n")
+    assert read_codex_config_effort(bridge_dir) is None
+
+
+def test_read_codex_config_effort_none_when_unparsable(bridge_dir: Path) -> None:
+    """Malformed TOML → ``None``, not a crash (guards a partial write)."""
+    _write_config(bridge_dir, 'model_reasoning_effort = "high\n[broken')
+
+    assert read_codex_config_effort(bridge_dir) is None
 
 
 def test_write_codex_config_model_replaces_top_level_key(bridge_dir: Path) -> None:
