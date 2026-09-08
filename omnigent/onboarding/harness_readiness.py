@@ -208,11 +208,10 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
     """
     canonical = _canonical_harness(harness)
     if IS_WINDOWS and canonical in NATIVE_HARNESSES:
-        # Native terminal harnesses require tmux/PTY, which is unavailable on
-        # Windows.  Even when the vendor CLI binary is installed (e.g.
-        # ``claude.exe`` on PATH), every native terminal launch will fail with
-        # ``native_terminal_start_failed``.  Return False so the web picker
-        # renders a warning badge rather than offering the agent silently.
+        # Every NATIVE_HARNESSES member is tmux/PTY-based and the runner refuses
+        # them all on Windows (``native_terminal_start_failed`` in
+        # omnigent/runner/native/orchestration.py), even with the vendor CLI
+        # installed. A member gaining a Windows path must be exempted here.
         return False
     if canonical == "acp":
         # The generic ACP harness has no fixed binary — "configured" means at
@@ -467,9 +466,9 @@ def _cli_family_availability(canonical: str, install_key: str) -> HarnessAvailab
 def _harness_availability(canonical: str) -> HarnessAvailability:
     """Return picker-facing availability for one canonical harness spelling."""
     if IS_WINDOWS and canonical in NATIVE_HARNESSES:
-        # Native terminal harnesses require tmux/PTY, which is unavailable on
-        # Windows.  Short-circuit before any auth/binary probe so the web
-        # picker always renders a warning badge on a Windows host.
+        # Same Windows fail-closed gate as _harness_availability_core: auth-aware
+        # native harnesses route here directly, so short-circuit before any
+        # auth/binary probe (the runner refuses them all; see orchestration.py).
         return False
     if _is_codex_family_harness(canonical):
         from omnigent.harnesses.codex_native.main import _codex_auth_unavailable_reason
