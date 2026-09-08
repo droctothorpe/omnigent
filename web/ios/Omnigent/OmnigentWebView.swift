@@ -518,9 +518,14 @@ struct OmnigentWebView: UIViewRepresentable {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+      // A cross-origin landing means the server bounced us to its IdP.
+      // Servers whose IdP permits embedded user-agents (the Databricks
+      // login chain) keep loading inline; everything else stops and runs
+      // the cli-ticket login instead.
       if let url = webView.url,
         ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-        url.omnigentOrigin != pinnedOrigin
+        url.omnigentOrigin != pinnedOrigin,
+        !WorkspaceURLExpander.usesInWebViewAuth(pinnedOrigin)
       {
         webView.stopLoading()
         startLogin(in: webView)
@@ -618,6 +623,25 @@ struct OmnigentWebView: UIViewRepresentable {
         ["http", "https"].contains(scheme),
         url.omnigentOrigin != pinnedOrigin
       {
+        // In-web-view auth: the pinned server's login chain 302s cross-origin
+        // and back, so it must stay inline — cancelling it in favor of the
+        // cli-ticket flow (which such servers don't mount) leaves the web
+        // view blank. Only a link tap from a pinned-origin page is an
+        // external link; once on the IdP's own pages every navigation
+        // (sign-in buttons, form posts, tenant hops) must stay inline or the
+        // flow ejects mid-login. Safe because the bridge only trusts
+        // pinned-origin frames (see isTrustedBridgeMessage).
+        if WorkspaceURLExpander.usesInWebViewAuth(pinnedOrigin) {
+          if navigationAction.navigationType == .linkActivated,
+            webView.url?.omnigentOrigin == pinnedOrigin
+          {
+            openExternal(url)
+            decisionHandler(.cancel)
+            return
+          }
+          decisionHandler(.allow)
+          return
+        }
         if navigationAction.navigationType == .linkActivated {
           openExternal(url)
         } else {

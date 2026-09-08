@@ -30,7 +30,8 @@ from omnigent.server.auth import (
     _RESERVED_USERS,
     UnifiedAuthProvider,
 )
-from omnigent.server.device_grant_store import DeviceGrantStore
+from omnigent.server.cli_ticket_store import CliTicketStore
+from omnigent.server.device_grant_store import DeviceGrantStore, hash_secret
 from omnigent.server.oidc import (
     _GITHUB_EMAILS_ENDPOINT,
     derive_code_challenge,
@@ -59,26 +60,20 @@ if TYPE_CHECKING:
 
 @dataclass
 class _CliTicket:
-    """A pending CLI login ticket.
+    """A pending CLI login ticket (process-local fallback).
 
     Created by ``POST /auth/cli-login``, fulfilled by the browser
-    callback, polled by ``GET /auth/cli-poll``.
+    callback, polled by ``GET /auth/cli-poll``. Only the identity is
+    recorded at fulfillment — the session token and refresh grant are
+    minted by the poll at redemption, matching the DB-backed store.
 
     :param created_at: Unix timestamp when the ticket was created.
-    :param token: The session JWT, set when the browser callback
-        fulfills the ticket. ``None`` while pending.
     :param user_id: The authenticated user's email, set when
         fulfilled. ``None`` while pending.
-    :param refresh_token: Login-issued refresh grant material, set at
-        fulfillment when a grant store is wired. ``None`` while pending
-        or when grants are unavailable. Handed to the CLI exactly once
-        by the poll response.
     """
 
     created_at: float = field(default_factory=time.time)
-    token: str | None = None
     user_id: str | None = None
-    refresh_token: str | None = None
 
 
 def create_auth_router(
@@ -88,6 +83,7 @@ def create_auth_router(
     account_store: SqlAlchemyAccountStore | None = None,
     allowed_domains: frozenset[str] | None = None,
     device_grant_store: DeviceGrantStore | None = None,
+    cli_ticket_store: CliTicketStore | None = None,
 ) -> APIRouter:
     """Create an :class:`APIRouter` with OIDC login/callback/logout routes.
 
@@ -114,6 +110,13 @@ def create_auth_router(
         so hosts and CLIs can renew without a human re-running
         ``omnigent login``. ``None`` keeps the legacy
         session-JWT-only response.
+    :param cli_ticket_store: DB-backed CLI login tickets. Required for
+        replicated deployments: a load balancer with no session affinity
+        routes the browser callback and the client's cookieless
+        ``/auth/cli-poll`` to arbitrary replicas, so a process-local
+        ticket is fulfilled where nobody polls it and looks expired (410)
+        everywhere else. ``None`` falls back to a process-local dict
+        (single-process deployments and bare test apps).
     :returns: A FastAPI router with ``/login``, ``/callback``,
         ``/logout`` (and ``/invite`` when invites are enabled).
     """
@@ -145,9 +148,35 @@ def create_auth_router(
     _session_cookie = config.session_cookie_name
     _state_cookie = _AUTH_STATE_COOKIE_SECURE if _secure else _AUTH_STATE_COOKIE_PLAIN
 
-    # In-memory store for CLI login tickets. Tickets are short-lived
-    # (5 min) and single-use. Keyed by ticket ID.
+    # Process-local fallback for CLI login tickets when no DB-backed
+    # store is wired. Tickets are short-lived (5 min) and single-use.
+    # Keyed by ticket ID.
     _cli_tickets: dict[str, _CliTicket] = {}
+
+    def _ticket_key(ticket_id: str) -> str:
+        """HMAC digest of a ticket id — the only form that touches the DB."""
+        return hash_secret(ticket_id, config.cookie_secret)
+
+    def _fulfill_cli_ticket(ticket_id: str, email: str) -> bool:
+        """Bind the just-authenticated identity to a live pending ticket.
+
+        Records only the identity; the session token and refresh grant
+        are minted by ``/cli-poll`` at redemption, so nothing usable is
+        ever persisted.
+
+        :returns: True when the ticket existed, was pending, and is
+            still within its TTL.
+        """
+        now = time.time()
+        if cli_ticket_store is not None:
+            return cli_ticket_store.fulfill(
+                _ticket_key(ticket_id), user_id=email, now_epoch_seconds=int(now)
+            )
+        ticket = _cli_tickets.get(ticket_id)
+        if ticket is None or now - ticket.created_at > _CLI_TICKET_TTL_SECONDS:
+            return False
+        ticket.user_id = email
+        return True
 
     @router.get("/login")
     async def login(request: Request) -> Response:
@@ -422,25 +451,11 @@ def create_auth_router(
             provider=config.provider_type,
         )
 
-        # Check if this callback fulfills a CLI login ticket.
+        # Check if this callback fulfills a CLI login ticket. Only the
+        # identity is recorded — the poll mints the token at redemption,
+        # so fulfillment works from any replica.
         ticket_id = state_payload.get("ticket")
-        if ticket_id and ticket_id in _cli_tickets:
-            ticket = _cli_tickets[ticket_id]
-            ticket.token = session_jwt
-            ticket.user_id = email
-            # A CLI login is a long-lived unattended credential holder
-            # (hosts especially) — issue a refresh grant so it can renew
-            # instead of dying at session-JWT expiry. Best-effort: a
-            # grant-store failure must not break login itself.
-            if device_grant_store is not None:
-                try:
-                    ticket.refresh_token = issue_login_grant(
-                        device_grant_store,
-                        user_id=email,
-                        cookie_secret=config.cookie_secret,
-                    )
-                except Exception:
-                    _logger.exception("cli-login: refresh grant issuance failed")
+        if ticket_id and _fulfill_cli_ticket(str(ticket_id), email):
             # Return a simple HTML page — the CLI is polling
             # /auth/cli-poll and will pick up the token.
             import html as _html
@@ -583,11 +598,19 @@ def create_auth_router(
 
         :returns: ``{"ticket": "<id>", "login_url": "/auth/login?ticket=<id>"}``.
         """
-        # Evict expired tickets to prevent unbounded growth.
-        _evict_expired_tickets(_cli_tickets)
-
         ticket_id = secrets.token_urlsafe(32)
-        _cli_tickets[ticket_id] = _CliTicket()
+        if cli_ticket_store is not None:
+            now = int(time.time())
+            # Evict expired tickets to prevent unbounded growth.
+            cli_ticket_store.purge_expired(now_epoch_seconds=now)
+            cli_ticket_store.create_ticket(
+                _ticket_key(ticket_id),
+                created_at=now,
+                expires_at=now + _CLI_TICKET_TTL_SECONDS,
+            )
+        else:
+            _evict_expired_tickets(_cli_tickets)
+            _cli_tickets[ticket_id] = _CliTicket()
         return {
             "ticket": ticket_id,
             "login_url": f"/auth/login?ticket={ticket_id}",
@@ -608,43 +631,69 @@ def create_auth_router(
         from fastapi.responses import JSONResponse
 
         ticket_id = request.query_params.get("ticket")
-        if not ticket_id or ticket_id not in _cli_tickets:
+        if not ticket_id:
             return JSONResponse(
                 status_code=410,
                 content={"error": "Ticket not found or expired"},
             )
 
-        ticket = _cli_tickets[ticket_id]
-
-        # Check expiry.
-        if time.time() - ticket.created_at > _CLI_TICKET_TTL_SECONDS:
-            del _cli_tickets[ticket_id]
-            return JSONResponse(
-                status_code=410,
-                content={"error": "Ticket expired"},
+        now = time.time()
+        if cli_ticket_store is not None:
+            outcome, user_id = cli_ticket_store.poll(
+                _ticket_key(ticket_id), now_epoch_seconds=int(now)
             )
+        else:
+            ticket = _cli_tickets.get(ticket_id)
+            if ticket is None:
+                outcome, user_id = "not_found", None
+            elif now - ticket.created_at > _CLI_TICKET_TTL_SECONDS:
+                del _cli_tickets[ticket_id]
+                outcome, user_id = "not_found", None
+            elif ticket.user_id is None:
+                outcome, user_id = "pending", None
+            else:
+                del _cli_tickets[ticket_id]
+                outcome, user_id = "claimed", ticket.user_id
 
         # Still pending — browser hasn't completed the flow yet.
-        if ticket.token is None:
+        if outcome == "pending":
             return JSONResponse(
                 status_code=202,
                 content={"status": "pending"},
             )
+        if outcome != "claimed" or user_id is None:
+            return JSONResponse(
+                status_code=410,
+                content={"error": "Ticket not found or expired"},
+            )
 
-        # Fulfilled — return the token and clean up.
-        token = ticket.token
-        user_id = ticket.user_id
-        refresh_token = ticket.refresh_token
-        del _cli_tickets[ticket_id]
+        # Redeemed — mint the session token here rather than at
+        # fulfillment, so no usable credential is ever persisted and any
+        # replica can answer the poll.
         content: dict[str, object] = {
-            "token": token,
+            "token": mint_session_cookie(
+                user_id=user_id,
+                cookie_secret=config.cookie_secret,
+                ttl_hours=config.session_ttl_hours,
+                provider=config.provider_type,
+            ),
             "user_id": user_id,
             "expires_in": config.session_ttl_hours * 3600,
         }
-        # Only present when a grant store is wired — old CLIs ignore the
-        # extra key, new CLIs against old servers see it absent.
-        if refresh_token is not None:
-            content["refresh_token"] = refresh_token
+        # A CLI login is a long-lived unattended credential holder (hosts
+        # especially) — issue a refresh grant so it can renew instead of
+        # dying at session-JWT expiry. Best-effort: a grant-store failure
+        # must not break login itself. Only present when a grant store is
+        # wired — old CLIs ignore the extra key.
+        if device_grant_store is not None:
+            try:
+                content["refresh_token"] = issue_login_grant(
+                    device_grant_store,
+                    user_id=user_id,
+                    cookie_secret=config.cookie_secret,
+                )
+            except Exception:
+                _logger.exception("cli-login: refresh grant issuance failed")
         return JSONResponse(status_code=200, content=content)
 
     # ── Admin: read-only user list ────────────────────────────────

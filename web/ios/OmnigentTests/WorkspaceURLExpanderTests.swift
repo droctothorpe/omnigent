@@ -183,3 +183,39 @@ final class WorkspaceMountURLTests: XCTestCase {
     XCTAssertNil(mount("file:///tmp"))
   }
 }
+
+/// Which pinned servers authenticate inside the web view, mirroring Android's
+/// `OriginsInWebViewAuthTest`. Gates the navigation policy in
+/// `OmnigentWebView`: a whitelisted origin's cross-origin IdP chain loads
+/// inline instead of being cancelled into the cli-ticket flow — cancelling it
+/// left the web view blank on Databricks Apps servers, which don't mount the
+/// cli-ticket routes at all.
+final class InWebViewAuthTests: XCTestCase {
+  func testMatchesTheBareDomainAndItsSubdomains() {
+    XCTAssertTrue(WorkspaceURLExpander.usesInWebViewAuth("https://databricks.com"))
+    XCTAssertTrue(WorkspaceURLExpander.usesInWebViewAuth("https://foo.cloud.databricks.com"))
+    XCTAssertTrue(WorkspaceURLExpander.usesInWebViewAuth("https://adb-123.azuredatabricks.net"))
+    XCTAssertTrue(WorkspaceURLExpander.usesInWebViewAuth("https://myapp.databricksapps.com"))
+    XCTAssertTrue(
+      WorkspaceURLExpander.usesInWebViewAuth("https://my-app-123.aws.databricksapps.com"))
+  }
+
+  func testMatchesRegardlessOfHostCasing() {
+    XCTAssertTrue(WorkspaceURLExpander.usesInWebViewAuth("https://Foo.Databricks.COM"))
+  }
+
+  func testDoesNotMatchALookalikeParentDomain() {
+    // The dot boundary is the whole point: a host that merely *contains* the
+    // domain must not authenticate in the web view.
+    XCTAssertFalse(WorkspaceURLExpander.usesInWebViewAuth("https://databricks.com.example.org"))
+    XCTAssertFalse(WorkspaceURLExpander.usesInWebViewAuth("https://notdatabricks.com"))
+    XCTAssertFalse(WorkspaceURLExpander.usesInWebViewAuth("https://azuredatabricks.net.evil.tld"))
+    XCTAssertFalse(WorkspaceURLExpander.usesInWebViewAuth("https://databricksapps.com.evil.tld"))
+  }
+
+  func testDoesNotMatchUnrelatedOrUnusableOrigins() {
+    XCTAssertFalse(WorkspaceURLExpander.usesInWebViewAuth("https://example.com"))
+    XCTAssertFalse(WorkspaceURLExpander.usesInWebViewAuth(nil))
+    XCTAssertFalse(WorkspaceURLExpander.usesInWebViewAuth("about:blank"))
+  }
+}

@@ -173,7 +173,7 @@ def _resolve_extension_state(
     # Distribution metadata is an external installation boundary. Preserve the
     # rest of the server if global discovery itself fails before per-plugin
     # failure isolation can apply.
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _logger.warning("could not discover installed extensions (%s)", exc, exc_info=True)
         return ExtensionPluginState(manifests=(), load_errors={"registry": str(exc)})
 
@@ -192,7 +192,7 @@ def _resolve_extension_assets(
                 ", ".join(sorted(overrides)),
             )
         return build_asset_index(state, overrides=overrides)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _logger.warning("could not build extension asset index (%s)", exc, exc_info=True)
         return {}, {"registry": str(exc)}
 
@@ -912,7 +912,7 @@ def _ensure_default_acp_agents(
 
         configured = list(acp_agents())
         shadowed: frozenset[str] = shadowed_builtin_acp_rows(configured)
-    except Exception:  # noqa: BLE001 — a malformed acp: block must never break startup
+    except Exception:
         _logger.debug("acp agent seeding skipped (config unreadable)", exc_info=True)
         configured = []
         shadowed = frozenset()
@@ -3216,6 +3216,16 @@ def create_app(
 
                 oidc_account_store = SqlAlchemyAccountStore(permission_store.storage_location)
 
+            # CLI login tickets must be replica-visible: a managed
+            # deployment runs several replicas behind a connectionless LB,
+            # and the shell's cookieless /auth/cli-poll lands on any of
+            # them, so back the tickets with the shared DB when one exists.
+            cli_ticket_store = None
+            if permission_store is not None:
+                from omnigent.server.cli_ticket_store import CliTicketStore
+
+                cli_ticket_store = CliTicketStore(permission_store.storage_location)
+
             app.include_router(
                 create_auth_router(
                     auth_provider,
@@ -3224,6 +3234,7 @@ def create_app(
                     oidc_account_store,
                     allowed_domains=frozenset(allowed_domains or ()) or None,
                     device_grant_store=device_grant_store,
+                    cli_ticket_store=cli_ticket_store,
                 ),
                 prefix="/auth",
                 tags=["auth"],

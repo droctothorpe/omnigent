@@ -17,6 +17,22 @@ enum WorkspaceURLExpander {
   /// these hosts.
   static let databricksAppsHostSuffix = "databricksapps.com"
 
+  /// Server domains whose IdP permits embedded user-agents. Their login
+  /// redirect chain runs inside the WKWebView and the server sets the session
+  /// cookie on its own domain, so no cli-ticket / system-browser hop is
+  /// needed. Matches Android's `Origins.IN_WEBVIEW_AUTH_DOMAINS`.
+  private static let inWebViewAuthDomains = [
+    "databricks.com", "azuredatabricks.net", "databricksapps.com",
+  ]
+
+  /// True when `origin`'s host is, or sits under, a domain that authenticates
+  /// in the web view. Matched on a dot boundary so a lookalike host like
+  /// `databricks.com.example.org` does not qualify.
+  static func usesInWebViewAuth(_ origin: String?) -> Bool {
+    guard let origin, let host = URL(string: origin)?.host?.lowercased() else { return false }
+    return inWebViewAuthDomains.contains { host == $0 || host.hasSuffix(".\($0)") }
+  }
+
   static func expandIfNeeded(
     _ url: URL,
     session: URLSession = SameOriginRedirectHandler.session

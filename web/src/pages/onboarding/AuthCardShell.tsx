@@ -5,6 +5,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import { AnimatedOmnigentPanel } from "@/components/onboarding/AnimatedOmnigentPanel";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
+import { AuthServerEscape } from "@/pages/onboarding/AuthServerEscape";
 import omnigentLogo from "@/assets/omnigent-starfish-icon.png";
 
 const DEFAULT_PANEL_HEIGHT = 220;
@@ -36,6 +37,7 @@ export function AuthCardShell({
             aria-hidden="true"
           />
           {children}
+          <AuthServerEscape />
         </div>
       </div>
     );
@@ -57,7 +59,10 @@ export function AuthCardShell({
         autoHeight
         centeredLogo
       >
-        <div className="flex flex-col px-2 pb-2 pt-3">{children}</div>
+        <div className="flex flex-col px-2 pb-2 pt-3">
+          {children}
+          <AuthServerEscape />
+        </div>
       </AnimatedOmnigentPanel>
     </div>
   );

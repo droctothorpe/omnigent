@@ -21,6 +21,7 @@ import pytest
 
 from omnigent.server.admin_list import AdminList
 from omnigent.server.auth import UnifiedAuthProvider
+from omnigent.server.cli_ticket_store import CliTicketStore
 from omnigent.server.oidc import OIDCConfig
 from omnigent.server.routes.auth import (
     _CLI_TICKET_TTL_SECONDS,
@@ -56,8 +57,12 @@ def _make_oidc_config() -> OIDCConfig:
     )
 
 
-def _build_oidc_app() -> httpx.ASGITransport:
-    """Build a minimal FastAPI app with only the OIDC auth router."""
+def _build_oidc_app(cli_ticket_store: CliTicketStore | None = None) -> httpx.ASGITransport:
+    """Build a minimal FastAPI app with only the OIDC auth router.
+
+    :param cli_ticket_store: DB-backed CLI tickets; ``None`` keeps the
+        process-local fallback the single-app tests exercise.
+    """
     from fastapi import FastAPI
 
     config = _make_oidc_config()
@@ -68,6 +73,7 @@ def _build_oidc_app() -> httpx.ASGITransport:
         auth_provider=auth_provider,
         permission_store=None,
         admin_list=admin_list,
+        cli_ticket_store=cli_ticket_store,
     )
 
     app = FastAPI()
@@ -356,3 +362,84 @@ async def test_evict_expired_tickets_noop_when_all_fresh() -> None:
     _evict_expired_tickets(tickets)
 
     assert len(tickets) == 2
+
+
+# ── 7. CLI ticket fulfillment → poll handoff ────────────────────────────────
+
+
+async def _complete_ticket_callback(client: httpx.AsyncClient, ticket_id: str) -> None:
+    """Drive /auth/callback (mocked IdP) fulfilling ``ticket_id``."""
+    state = "ticket-state"
+    resp = await client.get(
+        "/auth/callback",
+        params={"code": "auth-code-123", "state": state},
+        cookies={"ap_auth_state": _mint_state_cookie(state, ticket=ticket_id)},
+    )
+    assert resp.status_code == 200
+    assert "Login successful" in resp.text
+
+
+async def test_cli_poll_returns_token_after_callback_fulfillment() -> None:
+    """The callback fulfills the ticket; the poll mints and returns the token.
+
+    Single-use: a second poll gets 410.
+    """
+    transport = _build_oidc_app()
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        ticket_id = (await client.post("/auth/cli-login")).json()["ticket"]
+        with patch(
+            "omnigent.server.routes.auth.httpx.AsyncClient",
+            return_value=_mock_httpx_client_for_github(),
+        ):
+            await _complete_ticket_callback(client, ticket_id)
+
+        poll = await client.get(f"/auth/cli-poll?ticket={ticket_id}")
+        assert poll.status_code == 200
+        body = poll.json()
+        assert body["user_id"] == "alice@example.com"
+        claims = jwt.decode(body["token"], _TEST_SECRET, algorithms=["HS256"])
+        assert claims["sub"] == "alice@example.com"
+
+        replay = await client.get(f"/auth/cli-poll?ticket={ticket_id}")
+        assert replay.status_code == 410
+
+
+async def test_cli_ticket_handoff_crosses_replicas_with_shared_store(tmp_path: Path) -> None:
+    """The ticket handoff survives every leg landing on a different replica.
+
+    Two auth routers with separate DB-backed ticket stores on one shared
+    database stand in for two replicas behind a connectionless LB: the
+    ticket is minted on A, polls pending on B, is fulfilled by the browser
+    callback on B, and is redeemed — exactly once — by the poll on A. With
+    process-local tickets every cross-replica leg 410'd and the client gave
+    up while the browser sign-in appeared to succeed.
+    """
+    db_uri = f"sqlite:///{tmp_path}/shared-tickets.db"
+    transport_a = _build_oidc_app(cli_ticket_store=CliTicketStore(db_uri))
+    transport_b = _build_oidc_app(cli_ticket_store=CliTicketStore(db_uri))
+
+    async with (
+        httpx.AsyncClient(transport=transport_a, base_url="http://test") as replica_a,
+        httpx.AsyncClient(transport=transport_b, base_url="http://test") as replica_b,
+    ):
+        ticket_id = (await replica_a.post("/auth/cli-login")).json()["ticket"]
+
+        # The other replica sees the pending ticket instead of 410-ing.
+        pending = await replica_b.get(f"/auth/cli-poll?ticket={ticket_id}")
+        assert pending.status_code == 202
+
+        # The browser callback lands on the other replica and fulfills it.
+        with patch(
+            "omnigent.server.routes.auth.httpx.AsyncClient",
+            return_value=_mock_httpx_client_for_github(),
+        ):
+            await _complete_ticket_callback(replica_b, ticket_id)
+
+        # The minting replica's poll now redeems the identity.
+        poll = await replica_a.get(f"/auth/cli-poll?ticket={ticket_id}")
+        assert poll.status_code == 200
+        claims = jwt.decode(poll.json()["token"], _TEST_SECRET, algorithms=["HS256"])
+        assert claims["sub"] == "alice@example.com"
+
+        # Single-use across replicas too.
+        assert (await replica_b.get(f"/auth/cli-poll?ticket={ticket_id}")).status_code == 410

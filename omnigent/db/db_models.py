@@ -599,6 +599,51 @@ class SqlDeviceGrant(OmnigentBase):
     )
 
 
+class SqlCliLoginTicket(OmnigentBase):
+    """
+    SQLAlchemy model for the ``cli_login_tickets`` table.
+
+    Backs the ticket-based login handoff (``POST /auth/cli-login`` →
+    system browser → ``GET /auth/cli-poll``) used by ``omnigent login``
+    and the native shells. Persisted (rather than process-local) so a
+    replicated deployment behind a load balancer can fulfill and redeem
+    a ticket on any replica, not only the one that minted it.
+
+    Nothing recoverable is stored: the row is keyed by the HMAC-SHA256
+    digest of the secret ticket id, and fulfillment records only the
+    authenticated ``user_id`` — the session token and refresh grant are
+    minted at redemption time by whichever replica answers the poll.
+
+    :param ticket_hash: HMAC-SHA256 hex digest of the secret ticket id
+        the client polls with. Never store the raw ticket.
+    :param user_id: The authenticated identity, set when the browser
+        callback fulfills the ticket. ``NULL`` while pending.
+    :param created_at: Unix epoch seconds when the ticket was minted.
+    :param expires_at: Unix epoch seconds after which the ticket can no
+        longer be fulfilled or redeemed.
+    """
+
+    __tablename__ = "cli_login_tickets"
+
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    ticket_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        # The purge path scans by expiry; keep it an index range scan.
+        Index("ix_cli_login_tickets_expires_at", "workspace_id", "expires_at"),
+    )
+
+
 class SqlSessionPermission(OmnigentBase):
     """
     SQLAlchemy model for the ``session_permissions`` table.
