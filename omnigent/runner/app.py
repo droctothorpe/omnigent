@@ -3735,6 +3735,9 @@ def create_runner_app(
 
         spec: AgentSpec | None = None
         spec_entry: _SpecEntry | None = None
+        # Captured before the resolver await so a reset landing during init
+        # fences the memoizing write below.
+        spec_cache_generation = _session_cache_generation(session_id)
         if spec_resolver is not None:
             try:
                 spec_entry = await spec_resolver(agent_id, session_id)
@@ -3813,7 +3816,11 @@ def create_runner_app(
                     server_client=server_client,
                     optional_labels=init_context.labels,
                 )
-            _session_spec_cache[session_id] = spec_entry
+            # An agent-cache reset acknowledged while init awaited retired
+            # this entry; skip the memoization so the reset wins. Init still
+            # runs on what it resolved — the next spec read re-resolves.
+            if _session_cache_generation_is_current(session_id, spec_cache_generation):
+                _session_spec_cache[session_id] = spec_entry
         else:
             if spec_resolver is not None:
                 # spec_resolver was configured but returned no spec for this
