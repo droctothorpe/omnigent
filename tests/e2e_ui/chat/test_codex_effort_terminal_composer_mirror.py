@@ -258,3 +258,174 @@ def test_codex_terminal_effort_change_reaches_composer(
         "test setup: the terminal effort change must move off the composer's "
         f"baseline effort ({baseline_composer_effort!r}) to prove the mirror"
     )
+
+
+def _run_mock_turn(page: Page, mock_llm_server_url: str, turn: int) -> None:
+    """Complete one mock-LLM chat turn from the Chat view.
+
+    Each turn drives the forwarder's ``turn/started`` (the config re-read
+    point under test) and completes against the mock backend so the next
+    composer inspection sees a settled session.
+
+    :param page: The Playwright page.
+    :param mock_llm_server_url: Session-scoped mock LLM server base URL.
+    :param turn: Turn ordinal (unique prompt markers per turn).
+    """
+    nonce = uuid.uuid4().hex[:8]
+    user_marker = f"usr-effort-{turn}-{nonce}"
+    assistant_token = f"ast-effort-{turn}-{nonce}"
+    reset_mock_llm(mock_llm_server_url)
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": assistant_token}],
+        key=user_marker,
+        match=user_marker,
+    )
+    set_fallback_mock_llm(mock_llm_server_url, _CODEX_MOCK_MODEL, "")
+    _ensure_chat_view(page)
+    _send(page, _turn_prompt(turn, user_marker, assistant_token))
+    expect(page.locator(_ASSISTANT, has_text=assistant_token).first).to_be_visible(
+        timeout=_MOCK_TURN_TIMEOUT_MS
+    )
+    expect(page.locator(_WORKING)).to_have_count(0, timeout=_MOCK_TURN_TIMEOUT_MS)
+
+
+def _wait_for_config_effort(session_id: str, expected: str, *, timeout_s: float = 30.0) -> None:
+    """Wait until ``config.toml``'s effort equals *expected*.
+
+    A timeout means the executor's ``write_codex_config_effort`` mirror never
+    landed the composer-picked effort in the terminal's source of truth — the
+    exact gap that lets a forwarder reconnect revert the pick.
+
+    :param session_id: The session id (codex-native bridge id).
+    :param expected: The composer-picked effort the file must adopt.
+    :param timeout_s: Max seconds to wait.
+    :raises AssertionError: When the file never adopts *expected*.
+    """
+    deadline = time.monotonic() + timeout_s
+    latest: str | None = None
+    while time.monotonic() < deadline:
+        latest = _read_config_effort(session_id)
+        if latest == expected:
+            return
+        time.sleep(0.5)
+    raise AssertionError(
+        f"config.toml never adopted the composer-picked effort {expected!r} "
+        f"(still {latest!r}): the executor did not mirror the "
+        "thread/settings/update effort into the terminal's config, so a "
+        "forwarder reconnect would revert the composer's pick"
+    )
+
+
+def _open_config_modal(page: Page) -> None:
+    """Open the composer configuration gear modal (idempotent per call).
+
+    :param page: The Playwright page, on the Chat view.
+    """
+    gear = page.locator(_CONFIG_GEAR)
+    expect(gear).to_be_visible(timeout=30_000)
+    gear.click()
+    expect(page.locator(_CONFIG_MODAL)).to_be_visible(timeout=15_000)
+
+
+@pytest.mark.nightly
+@pytest.mark.timeout(480)
+def test_composer_effort_pick_survives_terminal_turns(
+    page: Page,
+    native_codex_mock_session: tuple[str, str],
+    mock_llm_server_url: str,
+) -> None:
+    """A composer-gear effort pick applies and is not reverted by later turns.
+
+    The counterpart journey to
+    :func:`test_codex_terminal_effort_change_reaches_composer`, in the other
+    direction: the user picks a reasoning effort in the chat composer's
+    configuration gear, and subsequent terminal turns must not roll it back.
+
+    Why this can regress: a composer pick is applied to the live thread via
+    ``thread/settings/update`` — which does NOT touch the session's
+    ``config.toml``, the file the forwarder's effort mirror treats as source of
+    truth. The executor therefore mirrors the applied effort into
+    ``config.toml`` (``write_codex_config_effort``), exactly as it does for a
+    web model pick. Without that write, ``config.toml`` keeps the stale
+    pre-pick effort and a fresh forwarder state (thread resume / reconnect)
+    re-reads and re-posts it, silently reverting the composer while the live
+    thread still runs the picked effort.
+
+    Journey:
+
+    1. Change the effort in the embedded terminal first (same driving as the
+       mirror journey) and run a turn — this lands the session on a known
+       terminal effort and makes the composer's effort row render.
+    2. Pick a DIFFERENT effort in the composer gear and Save; the gear must
+       show the pick (the "works" half of the requirement).
+    3. Run a turn so the executor applies the pick; the terminal's
+       ``config.toml`` must adopt it (fails while the mirror write is absent).
+    4. Run one more turn (another ``turn/started`` config re-read) and verify
+       the composer still shows the pick — not the pre-pick effort.
+    """
+    base_url, session_id = native_codex_mock_session
+    _log.info("native-codex mock session ready: base_url=%s session_id=%s", base_url, session_id)
+
+    page.goto(f"{base_url}/c/{session_id}")
+    _open_terminal_view(page)
+    _wait_terminal_connected(page)
+
+    # --- 1. Land the session on a terminal-set effort (renders the row). -----
+    baseline_config_effort = _read_config_effort(session_id)
+    _change_effort_in_tui(page)
+    terminal_effort = _wait_for_config_effort_change(session_id, baseline_config_effort)
+    _log.info("terminal effort landed in config.toml: %r", terminal_effort)
+    _run_mock_turn(page, mock_llm_server_url, 1)
+
+    # The composer mirrors the terminal effort (the already-guarded direction).
+    _open_config_modal(page)
+    effort_control = page.locator(_EFFORT_GEAR)
+    expect(effort_control).to_be_visible(timeout=15_000)
+    expect(effort_control).to_contain_text(terminal_effort, timeout=30_000)
+
+    # --- 2. Pick a DIFFERENT effort in the composer gear and Save. -----------
+    effort_control.click()
+    options = page.locator('[role="option"][data-effort-level]')
+    expect(options.first).to_be_visible(timeout=15_000)
+    picked = ""
+    for i in range(options.count()):
+        level = options.nth(i).get_attribute("data-effort-level") or ""
+        # Skip substring-related rungs ("high" ⊂ "xhigh") so the final
+        # contain_text assertions cannot false-positive on the old value.
+        if (
+            level
+            and level != terminal_effort
+            and level not in terminal_effort
+            and terminal_effort not in level
+        ):
+            picked = level
+            break
+    assert picked, (
+        f"no selectable composer effort differs from the terminal's {terminal_effort!r}; "
+        "cannot exercise a composer-initiated change"
+    )
+    _log.info("picking composer effort: %r (was %r)", picked, terminal_effort)
+    page.locator(f'[role="option"][data-effort-level="{picked}"]').click()
+    page.get_by_test_id("composer-config-save").click()
+    expect(page.locator(_CONFIG_MODAL)).to_be_hidden(timeout=15_000)
+
+    # The pick works: reopening the gear shows the composer-picked effort.
+    _open_config_modal(page)
+    expect(page.locator(_EFFORT_GEAR)).to_contain_text(picked, timeout=30_000)
+    page.keyboard.press("Escape")
+    expect(page.locator(_CONFIG_MODAL)).to_be_hidden(timeout=15_000)
+
+    # --- 3. A turn applies the pick; config.toml must adopt it. --------------
+    _run_mock_turn(page, mock_llm_server_url, 2)
+    _wait_for_config_effort(session_id, picked)
+    _log.info("composer-picked effort mirrored into config.toml: %r", picked)
+
+    # --- 4. Another terminal turn must not revert the composer's pick. -------
+    _run_mock_turn(page, mock_llm_server_url, 3)
+    _open_config_modal(page)
+    effort_control = page.locator(_EFFORT_GEAR)
+    expect(effort_control).to_be_visible(timeout=15_000)
+    expect(effort_control).to_contain_text(picked, timeout=30_000)
+    # And the terminal's own source of truth still agrees with the composer.
+    assert _read_config_effort(session_id) == picked

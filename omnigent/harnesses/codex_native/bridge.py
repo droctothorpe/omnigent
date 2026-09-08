@@ -617,6 +617,53 @@ def write_codex_config_model(bridge_dir: Path, model: str) -> bool:
     return True
 
 
+def write_codex_config_effort(bridge_dir: Path, effort: str) -> bool:
+    """
+    Upsert the top-level ``model_reasoning_effort`` key in this session's
+    Codex ``config.toml``.
+
+    Companion writer to :func:`read_codex_config_effort` and the effort
+    counterpart of :func:`write_codex_config_model`, used when Omnigent itself
+    changes the running thread's reasoning effort (web composer gear via
+    ``thread/settings/update``). That RPC changes the live thread but does NOT
+    touch ``config.toml`` — while the forwarder's effort mirror treats
+    ``config.toml`` as the source of truth. Without this write, a fresh
+    forwarder state (thread resume / reconnect) re-reads the stale launch
+    effort and mirrors it back as an ``external_reasoning_effort_change``,
+    silently reverting the composer's pick. Writing the same top-level key an
+    in-TUI ``/model`` writes keeps every reader consistent; a later in-TUI
+    change simply overwrites it (last-wins, as for user switches).
+
+    Best-effort: an unreadable/unwritable file returns ``False`` — the live
+    thread already runs the new effort, so failing the turn over a mirror
+    file would be worse than a temporarily stale mirror.
+
+    :param bridge_dir: The session's native-Codex bridge directory.
+    :param effort: Reasoning effort to record, e.g. ``"high"``.
+    :returns: ``True`` when the file was updated.
+    """
+    config_path = codex_home_for_bridge_dir(bridge_dir) / "config.toml"
+    pin_line = f"model_reasoning_effort = {json.dumps(effort)}"
+    try:
+        existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+        lines = existing.splitlines()
+        replaced = False
+        for i, line in enumerate(lines):
+            # Only the top-level table: stop at the first [section] header.
+            if line.startswith("["):
+                break
+            if re.match(r"^model_reasoning_effort\s*=", line):
+                lines[i] = pin_line
+                replaced = True
+        if not replaced:
+            lines.insert(0, pin_line)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 @contextlib.contextmanager
 def _bridge_state_lock(bridge_dir: Path) -> Iterator[None]:
     """

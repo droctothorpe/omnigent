@@ -32,6 +32,7 @@ from omnigent.harnesses.codex_native.bridge import (
     update_mcp_server_startup,
     write_bridge_startup_error,
     write_bridge_state,
+    write_codex_config_effort,
     write_codex_config_model,
     write_policy_hook_config,
 )
@@ -236,6 +237,44 @@ def test_write_codex_config_model_creates_missing_file(bridge_dir: Path) -> None
     """No codex-home/config.toml yet → the writer creates it (best-effort)."""
     assert write_codex_config_model(bridge_dir, "gpt-5.6-luna") is True
     assert read_codex_config_model(bridge_dir) == "gpt-5.6-luna"
+
+
+def test_write_codex_config_effort_replaces_top_level_key(bridge_dir: Path) -> None:
+    """The existing top-level ``model_reasoning_effort`` line is replaced.
+
+    An Omnigent-initiated effort change (web composer gear) must land on the
+    same key an in-TUI ``/model`` writes, or a fresh forwarder state (thread
+    resume / reconnect) re-reads the stale launch effort and mirrors it back,
+    silently reverting the composer's pick.
+    """
+    _write_config(
+        bridge_dir,
+        'model = "gpt-5.5"\n'
+        'model_reasoning_effort = "medium"\n'
+        "[model_providers.databricks]\n"
+        'model_reasoning_effort = "section-effort-not-touched"\n',
+    )
+
+    assert write_codex_config_effort(bridge_dir, "high") is True
+    assert read_codex_config_effort(bridge_dir) == "high"
+    body = (codex_home_for_bridge_dir(bridge_dir) / "config.toml").read_text()
+    assert 'model_reasoning_effort = "section-effort-not-touched"' in body
+    assert 'model = "gpt-5.5"' in body
+
+
+def test_write_codex_config_effort_inserts_when_absent(bridge_dir: Path) -> None:
+    """A config with no top-level effort key gains one at the top."""
+    _write_config(bridge_dir, 'model = "gpt-5.5"\n')
+
+    assert write_codex_config_effort(bridge_dir, "low") is True
+    assert read_codex_config_effort(bridge_dir) == "low"
+    assert read_codex_config_model(bridge_dir) == "gpt-5.5"
+
+
+def test_write_codex_config_effort_creates_missing_file(bridge_dir: Path) -> None:
+    """No codex-home/config.toml yet → the writer creates it (best-effort)."""
+    assert write_codex_config_effort(bridge_dir, "high") is True
+    assert read_codex_config_effort(bridge_dir) == "high"
 
 
 def test_policy_hook_config_round_trips(bridge_dir: Path) -> None:

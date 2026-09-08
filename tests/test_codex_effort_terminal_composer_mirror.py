@@ -52,7 +52,10 @@ from pathlib import Path
 import httpx
 
 from omnigent.harnesses.codex_native import forwarder as fwd
-from omnigent.harnesses.codex_native.bridge import codex_home_for_bridge_dir
+from omnigent.harnesses.codex_native.bridge import (
+    codex_home_for_bridge_dir,
+    write_codex_config_effort,
+)
 
 
 class _RecordingClient:
@@ -252,3 +255,59 @@ def test_turn_started_does_not_re_mirror_unchanged_terminal_effort(tmp_path: Pat
     )
 
     assert _effort_mirror_posts(client.posts) == []
+
+
+def test_reconnect_does_not_revert_composer_set_effort(tmp_path: Path) -> None:
+    """
+    A composer-picked effort must survive a forwarder reconnect / resume.
+
+    A web-composer effort pick is applied to the live thread via
+    ``thread/settings/update`` and — like a model pick — mirrored into
+    ``config.toml`` by the executor (``write_codex_config_effort``), keeping the
+    file the effort mirror treats as source of truth consistent. On a thread
+    resume / reconnect the forwarder builds a FRESH ``_CodexForwarderState``
+    (``effort=None``, ``last_config_effort=None``): its first config re-read
+    must find the composer's effort, not the stale launch effort.
+
+    Without the config write, the fresh state's first read would adopt the
+    stale launch value (``medium``) and POST it as an
+    ``external_reasoning_effort_change``, silently reverting the composer's
+    ``high`` while the live thread still runs ``high`` — exactly the
+    composer-vs-terminal divergence this fix exists to eliminate.
+    """
+    session_id = "conv_effort_reconnect"
+    # Launch config: effort medium.
+    _write_codex_config(
+        tmp_path,
+        'model = "gpt-5.5"\nmodel_reasoning_effort = "medium"\n',
+    )
+    # The user picks "high" in the web composer: the executor applies it via
+    # thread/settings/update AND mirrors it into config.toml (the same write
+    # _start_codex_turn performs for an applied effort override).
+    assert write_codex_config_effort(tmp_path, "high") is True
+
+    # Reconnect/resume: the supervisor builds a fresh forwarder state; nothing
+    # from the previous lifetime (posted efforts, baselines) survives.
+    state = fwd._CodexForwarderState()
+    state.model = "gpt-5.5"
+    state.posted_model = "gpt-5.5"
+    state.last_config_model = "gpt-5.5"
+
+    client = _RecordingClient()
+    asyncio.run(
+        _drive_turn_started(
+            client,
+            session_id=session_id,
+            bridge_dir=tmp_path,
+            state=state,
+        )
+    )
+
+    mirrored = [body["data"]["reasoning_effort"] for body in _effort_mirror_posts(client.posts)]
+    assert "medium" not in mirrored, (
+        "reconnect reverted the composer-picked effort back to the stale "
+        f"launch value: mirrored={mirrored!r}"
+    )
+    # The fresh state re-mirrors the composer's effort (idempotent server-side).
+    assert state.effort == "high"
+    assert mirrored == ["high"]

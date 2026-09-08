@@ -2294,7 +2294,10 @@ async def _subscribe_until_ready(
             # config.toml effort here too (an in-TUI ``/model`` effort change
             # before the first turn would otherwise never reach the composer).
             # Gated on a seen config effort: without one the unseeded baseline
-            # would mirror a spurious ``None`` on every session.
+            # would mirror a spurious ``None`` on every session. On a fresh
+            # session this first sync posts the launch effort itself — a
+            # redundant-but-harmless mirror of the value Omnigent launched
+            # with, not a terminal change.
             if forwarder_state.last_config_effort is not None:
                 await _sync_reasoning_effort_change(
                     ap_client, session_id=session_id, forwarder_state=forwarder_state
@@ -2944,6 +2947,15 @@ def _refresh_effort_from_config(bridge_dir: Path, forwarder_state: _CodexForward
     ``thread/settings/updated`` effort is not rolled back by a stale re-read.
     No-op when config.toml carries no effort.
 
+    The unchanged-file guard only protects a pushed effort within this
+    ``forwarder_state``'s lifetime: a thread resume / reconnect builds a fresh
+    state whose first read adopts whatever config.toml says. That is safe
+    because config.toml is kept consistent for BOTH change sources — an in-TUI
+    ``/model`` rewrites it natively, and an Omnigent-initiated (web composer)
+    effort change mirrors into it via ``write_codex_config_effort`` on the
+    ``thread/settings/update`` path — exactly as ``write_codex_config_model``
+    does for the model.
+
     :param bridge_dir: The session's native-Codex bridge directory.
     :param forwarder_state: Mutable forwarder state whose ``effort`` is
         updated in place.
@@ -3200,6 +3212,9 @@ async def _maybe_handle_turn_event(
             )
             # Only sync once config.toml has revealed an effort: without one the
             # unseeded baseline would mirror a spurious ``None`` on every session.
+            # A fresh session's first turn/started posts the launch effort itself
+            # (baseline ``None`` → changed) — redundant but harmless, not the
+            # terminal-change path.
             if forwarder_state.last_config_effort is not None:
                 await _sync_reasoning_effort_change(
                     client, session_id=session_id, forwarder_state=forwarder_state
