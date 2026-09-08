@@ -9,6 +9,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { authenticatedFetch } from "@/lib/identity";
+import { isProvisionalConversationId } from "@/lib/provisionalConversationId";
 
 export interface McpServerSummary {
   name: string;
@@ -160,10 +161,13 @@ async function fetchSessionAgent(sessionId: string): Promise<Agent> {
  * sessions-derived agent list. Only fires when `sessionId` is non-null.
  */
 export function useSessionAgent(sessionId: string | null) {
+  // A registered provisional id (navigate-first new-chat window) has no server session —
+  // never fetch its agent.
+  const serverId = isProvisionalConversationId(sessionId) ? null : sessionId;
   return useQuery({
-    queryKey: ["session-agent", sessionId],
-    queryFn: () => fetchSessionAgent(sessionId!),
-    enabled: sessionId !== null,
+    queryKey: ["session-agent", serverId],
+    queryFn: () => fetchSessionAgent(serverId!),
+    enabled: serverId !== null,
     staleTime: Infinity,
   });
 }

@@ -619,30 +619,21 @@ async def _drive_permission_mode(base_url: str, session_id: str) -> None:
             await browser.close()
 
 
-def test_start_session_send_shows_busy_spinner(seeded_session: tuple[str, str]) -> None:
-    """Send shows a busy spinner while the create is in flight, then navigates.
-
-    The create awaits the backend (session bootstrap + git worktree setup)
-    before navigating, so the landing screen lingers for the whole round-trip.
-    Without feedback the Send button just goes inert and the typed message sits
-    in the composer, so the click reads as "frozen". This holds the create POST
-    open with a gate so that in-flight window is observable, and asserts the
-    Send button flips to a busy/spinning state (disabled + ``aria-busy`` +
-    "Starting session" label) before the response lands and navigation happens.
-    """
+def test_start_session_opens_immediately_with_proposed_id(
+    seeded_session: tuple[str, str],
+) -> None:
+    """Send opens a provisional chat before the create response arrives."""
     base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_send_busy_spinner(base_url, session_id))
+    _run_in_fresh_loop(_drive_open_immediately(base_url, session_id))
 
 
-async def _drive_send_busy_spinner(base_url: str, session_id: str) -> None:
+async def _drive_open_immediately(base_url: str, session_id: str) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
         page = await browser.new_page()
         try:
             create_bodies: list[dict[str, Any]] = []
-            # A gate the create handler awaits before responding, so the POST
-            # stays pending long enough to observe the button's busy state. The
-            # test opens it after asserting the spinner, letting navigation run.
+            # Hold the response so immediate client-side navigation is observable.
             release_create = asyncio.Event()
 
             async def handle_hosts(route: Route) -> None:
@@ -706,170 +697,23 @@ async def _drive_send_busy_spinner(base_url: str, session_id: str) -> None:
 
             submit = page.get_by_test_id("new-chat-landing-submit")
             await page.get_by_test_id("new-chat-landing-input").fill("set up the project")
-            # Idle with a message typed: enabled, not busy (arrow, no spin).
+            # Idle with a message typed: enabled, not busy.
             await expect(submit).to_be_enabled()
             await expect(submit).to_have_attribute("aria-busy", "false")
 
             await submit.click()
 
-            # The POST reached the server (proving we're truly in flight, not
-            # blocked by a disabled button) and the button shows the busy state.
+            # The POST includes the same client-selected id used by the URL.
             await _wait_until(lambda: len(create_bodies) == 1)
-            await expect(submit).to_be_disabled()
-            await expect(submit).to_have_attribute("aria-busy", "true")
-            await expect(submit).to_have_attribute("aria-label", "Starting session")
-            # Still on the landing screen — the "frozen"-looking window.
-            await expect(page.get_by_test_id("new-chat-landing-input")).to_be_visible()
-
-            # Release the create: the flow completes and navigates to the
-            # session, so the landing composer unmounts.
-            release_create.set()
-            await expect(page.get_by_test_id("new-chat-landing-input")).to_have_count(
-                0, timeout=30_000
-            )
-        finally:
-            await browser.close()
-
-
-def test_start_session_opens_before_the_create_responds(seeded_session: tuple[str, str]) -> None:
-    """Send opens the session on the stream's announcement, not the response.
-
-    ``POST /v1/sessions`` doesn't answer until the host has finished spawning a
-    runner — a process boot, seconds of it — and the landing screen used to sit
-    on that whole wait before routing anywhere. But the server writes the
-    session row and announces it on ``WS /v1/sessions/updates`` almost
-    immediately, so the id is available long before the response is. This holds
-    the create POST open for the entire test and announces the session over the
-    stream: the chat page must open anyway.
-
-    A regression that goes back to awaiting the response would never leave the
-    landing screen here, since the create never answers.
-
-    The announcement is injected through a mocked updates socket rather than a
-    real create, because this suite has no host daemon for a host-bound create
-    to actually succeed against. The row carries the stubbed agent/host the
-    composer just asked for — that pairing is what the screen matches on to
-    tell its own new session apart from every other session the stream
-    announces to this user.
-    """
-    base_url, session_id = seeded_session
-    _run_in_fresh_loop(_drive_open_before_create_responds(base_url, session_id))
-
-
-async def _drive_open_before_create_responds(base_url: str, session_id: str) -> None:
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch()
-        page = await browser.new_page()
-        try:
-            create_seen = asyncio.Event()
-            # Released only at teardown, so the create is pending for every
-            # assertion below.
-            release_create = asyncio.Event()
-            sockets: list[Any] = []
-
-            def handle_updates(ws: Any) -> None:
-                # Mocked (never connected to the server), so this test owns
-                # exactly what the page receives on the stream.
-                sockets.append(ws)
-
-            await page.route_web_socket(re.compile(r"/v1/sessions/updates"), handle_updates)
-
-            async def handle_hosts(route: Route) -> None:
-                await route.fulfill(
-                    status=200, content_type="application/json", body=_hosts_body()
-                )
-
-            async def handle_agents(route: Route) -> None:
-                await route.fulfill(
-                    status=200, content_type="application/json", body=_agents_body()
-                )
-
-            async def handle_events(route: Route) -> None:
-                await route.fulfill(
-                    status=200,
-                    content_type="application/json",
-                    body=json.dumps({"queued": True, "item_id": "ci_e2e"}),
-                )
-
-            async def handle_sessions(route: Route) -> None:
-                if route.request.method == "POST":
-                    create_seen.set()
-                    await release_create.wait()
-                    await route.fulfill(
-                        status=200,
-                        content_type="application/json",
-                        body=json.dumps({"id": session_id}),
-                    )
-                else:
-                    await route.continue_()
-
-            await page.route("**/v1/hosts", handle_hosts)
-            await page.route("**/v1/agents", handle_agents)
-            await page.route("**/v1/sessions/*/events", handle_events)
-            await page.route(_SESSIONS_RE, handle_sessions)
-
-            async def handle_agent_scan(route: Route) -> None:
-                await route.fulfill(
-                    status=200,
-                    content_type="application/json",
-                    body=json.dumps({"data": []}),
-                )
-
-            await page.route(re.compile(r"/v1/sessions\?.*kind=any"), handle_agent_scan)
-
-            await page.add_init_script(
-                f"""window.localStorage.setItem(
-                    "omnigent:recent-workspaces",
-                    JSON.stringify({{ {_HOST_ID}: ["/work/repo"] }})
-                );"""
-            )
-
-            await page.goto(f"{base_url}/")
-            await page.get_by_test_id("new-chat-landing-input").wait_for(
-                state="visible", timeout=30_000
-            )
-            await _wait_until(lambda: len(sockets) == 1)
-
-            await page.get_by_test_id("new-chat-landing-input").fill("set up the project")
-            await page.get_by_test_id("new-chat-landing-submit").click()
-            # The create is in flight and will stay that way.
-            await _wait_until(create_seen.is_set)
-
-            # A brand-new session the page has never seen, on the agent and
-            # host the composer just asked for: the server's announcement of
-            # the row it wrote before starting the runner.
-            announced_id = "conv_announced_e2e"
-            sockets[0].send(
-                json.dumps(
-                    {
-                        "type": "changed",
-                        "items": [
-                            {
-                                "id": announced_id,
-                                "object": "conversation",
-                                "agent_id": "ag_claude_e2e",
-                                "host_id": _HOST_ID,
-                                "parent_session_id": None,
-                                "title": None,
-                                "created_at": 1_800_000_000,
-                                "updated_at": 1_800_000_000,
-                                "labels": {},
-                                "archived": False,
-                            }
-                        ],
-                    }
-                )
-            )
-
-            # KEY ASSERTION: routed to the announced session while the create
-            # is still pending — the landing composer is gone and the URL is
-            # the announced id, not the one the (unanswered) create would
-            # eventually return.
-            await expect(page).to_have_url(f"{base_url}/c/{announced_id}", timeout=20_000)
+            proposed_id = create_bodies[0]["id"]
+            assert re.fullmatch(r"[0-9a-f]{32}", proposed_id)
+            await expect(page).to_have_url(f"{base_url}/c/{proposed_id}")
             await expect(page.get_by_test_id("new-chat-landing-input")).to_have_count(0)
-            assert not release_create.is_set(), "the create must still be unanswered here"
-        finally:
+
+            # This stub emulates an old backend returning a different authoritative id.
             release_create.set()
+            await expect(page).to_have_url(f"{base_url}/c/{session_id}", timeout=30_000)
+        finally:
             await browser.close()
 
 

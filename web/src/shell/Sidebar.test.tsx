@@ -366,6 +366,28 @@ describe("Sidebar session list", () => {
     expect(screen.queryByText("Claude Code")).not.toBeInTheDocument();
   });
 
+  it("renders a provisional row as a bare navigable link with no mutating actions", () => {
+    // A provisional row has no server session, so its per-row mutations
+    // (kebab: rename/delete/archive/move/share) must be suppressed — invoking
+    // them would POST to /v1/sessions/<provisional> (Polly B-3).
+    mockConversations([
+      conv("0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d", "Claude Code", {
+        title: "new chat",
+        provisional: true,
+      }),
+    ]);
+    renderSidebar();
+
+    // Navigable: the row is still a link into the (soon-to-exist) conversation.
+    const link = screen.getByRole("link", { name: /new chat/ });
+    expect(link).toHaveAttribute(
+      "href",
+      expect.stringContaining("/c/0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d"),
+    );
+    // But no action affordances until it's rekeyed to the real id.
+    expect(screen.queryByRole("button", { name: "Conversation actions" })).not.toBeInTheDocument();
+  });
+
   it("uses the interface text token for session-list errors", () => {
     conversationsRef.current = [];
     useConvMock.mockReturnValue({

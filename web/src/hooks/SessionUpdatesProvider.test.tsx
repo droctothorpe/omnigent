@@ -12,6 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Conversation, ConversationsPage } from "@/hooks/useConversations";
 import type { ConversationsInfiniteData } from "@/lib/sessionListCache";
+import {
+  clearProvisionalConversationIds,
+  registerProvisionalConversationId,
+} from "@/lib/provisionalConversationId";
 
 // Mock the socket transport so setWatched is observable and start/stop are
 // inert. subscribe/subscribeStatus return no-op unsubscribers.
@@ -91,6 +95,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  clearProvisionalConversationIds();
 });
 
 describe("SessionUpdatesProvider watch-set", () => {
@@ -116,6 +121,14 @@ describe("SessionUpdatesProvider watch-set", () => {
     seedConversations(client, ["conv_open", "conv_b"]);
     renderProvider(client, ["/c/conv_open"]);
     expect(lastWatched()).toEqual(["conv_b", "conv_open"]);
+  });
+
+  it("does not send provisional ids in the watch-set", () => {
+    registerProvisionalConversationId("12345678123456781234567812345678");
+    const client = new QueryClient();
+    seedConversations(client, ["conv_real", "12345678123456781234567812345678"]);
+    renderProvider(client, ["/c/12345678123456781234567812345678"]);
+    expect(lastWatched()).toEqual(["conv_real"]);
   });
 
   it("re-pushes the watch-set with the new open id on navigation", () => {

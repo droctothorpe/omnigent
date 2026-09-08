@@ -13,6 +13,7 @@ import {
   listPermissions,
   revokePermission,
 } from "@/lib/permissionsApi";
+import { isProvisionalConversationId } from "@/lib/provisionalConversationId";
 import { useConversations } from "./useConversations";
 import { useSession } from "./useSession";
 
@@ -25,7 +26,9 @@ function sessionOwnerKey(sessionId: string) {
 }
 
 /** Fetch all permission grants for a session. */
-export function usePermissions(sessionId: string | null) {
+export function usePermissions(rawSessionId: string | null) {
+  // A registered provisional id (navigate-first new-chat window) has no server session.
+  const sessionId = isProvisionalConversationId(rawSessionId) ? null : rawSessionId;
   return useQuery({
     queryKey: permissionsKey(sessionId ?? ""),
     queryFn: () => listPermissions(sessionId!),

@@ -101,7 +101,13 @@ import {
   rankedSlashCommandNames,
   SlashCommandMenu,
 } from "@/components/SlashCommandMenu";
-import { setPendingInitialPrompt } from "@/store/chatStore";
+import {
+  beginProvisionalConversation,
+  resolveProvisionalConversation,
+  removeProvisionalConversation,
+  setPendingInitialPrompt,
+} from "@/store/chatStore";
+import { proposeConversationId } from "@/lib/provisionalConversationId";
 import { markSessionCreated } from "@/store/interactionTelemetry";
 import { appendPromptHistoryEntry } from "@/hooks/usePromptHistory";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
@@ -2195,12 +2201,18 @@ interface LandingDraft {
 }
 
 let landingDraft: LandingDraft | null = null;
+let landingDraftRevision = 0;
+
+function writeLandingDraft(draft: LandingDraft | null): void {
+  landingDraft = draft;
+  landingDraftRevision += 1;
+}
 
 // Test-only: clears the preserved landing draft so each case starts from a
 // clean module state (the draft is module-scoped and survives unmount by
 // design, which would otherwise leak between tests).
 export function resetLandingDraft(): void {
-  landingDraft = null;
+  writeLandingDraft(null);
 }
 
 export function NewChatLandingScreen() {
@@ -2685,6 +2697,7 @@ export function NewChatLandingScreen() {
   // `submittedRef` is flipped once the draft is sent to a create, so the
   // snapshot is dropped instead of resurrected.
   const submittedRef = useRef(false);
+  const submittedDraftRevisionRef = useRef<number | null>(null);
   // Whether this composer is still on screen. The create POST can outlive
   // it — the user opens another session while the session bootstraps — and
   // the post-create navigation must not follow them there.
@@ -2722,7 +2735,11 @@ export function NewChatLandingScreen() {
     onScreenRef.current = true;
     return () => {
       onScreenRef.current = false;
-      landingDraft = submittedRef.current ? null : draftRef.current;
+      if (!submittedRef.current) {
+        writeLandingDraft(draftRef.current);
+      } else if (submittedDraftRevisionRef.current === landingDraftRevision) {
+        writeLandingDraft(null);
+      }
     };
   }, []);
 
@@ -4234,7 +4251,8 @@ export function NewChatLandingScreen() {
   // dropped it on the strength of the submit.
   function returnDraftToUser() {
     submittedRef.current = false;
-    if (!onScreenRef.current) landingDraft = draftRef.current;
+    submittedDraftRevisionRef.current = null;
+    if (!onScreenRef.current) writeLandingDraft(draftRef.current);
   }
 
   async function handleCreate() {
@@ -4259,11 +4277,31 @@ export function NewChatLandingScreen() {
     }
     setCreating(true);
     setCreateError(null);
+    const proposedSessionId =
+      effectiveAgentId !== null && effectiveAgentId !== PENDING_AGENT_ID
+        ? proposeConversationId()
+        : null;
+    let localConv: { proposedConvId: string; pendingMsgTempId: string } | null = null;
+    // Single teardown for EVERY create-failure exit (the `catch` and the
+    // `"error" in created` early return): drop the provisional conversation and,
+    // if the user is still on it, send them back to landing so the restored
+    // draft (and the create error) have somewhere to surface. Without this, a
+    // failure after the navigate-first jump strands a read-only provisional chat.
+    const tearDownLocalConversation = () => {
+      if (localConv === null) return;
+      const stillOnProposedRoute = window.location.pathname.endsWith(
+        `/c/${localConv.proposedConvId}`,
+      );
+      const wasViewing = removeProvisionalConversation(localConv.proposedConvId);
+      // Gated on `wasViewing` (not `onScreenRef` — the landing already unmounted).
+      if (wasViewing && stillOnProposedRoute) navigate("/");
+    };
     // The draft is spent from the moment it is submitted: it belongs to the
     // session now being created, so a detour back to this screen must not
     // hand it back pre-filled. Flipped here rather than on the response
     // because the create outlives an unmount; a create that fails hands the
     // draft back via returnDraftToUser.
+    submittedDraftRevisionRef.current = landingDraftRevision;
     submittedRef.current = true;
     try {
       const trimmedBranch = branchName.trim();
@@ -4316,6 +4354,22 @@ export function NewChatLandingScreen() {
       const initialPrompt =
         buildMentionPreamble(mentionedItems, selectedAgent?.harness ?? null) +
         sanitizeInitialPrompt(message);
+      // Navigate-first: mint a provisional conversation, show the prompt, and
+      // jump into it now; the create runs below and hydrates the provisional id to the
+      // real one (`resolveProvisionalConversation`). Skipped for a pending custom
+      // agent — it has no agent id to POST with until its create binds one, so
+      // that path stays server-first.
+      if (effectiveAgentId !== null && effectiveAgentId !== PENDING_AGENT_ID) {
+        try {
+          const local = beginProvisionalConversation(proposedSessionId!, initialPrompt, files);
+          if (local !== null) {
+            localConv = local;
+            navigate(`/c/${local.proposedConvId}`);
+          }
+        } catch {
+          /* non-fatal: falls through to the server-first path below */
+        }
+      }
 
       // Native terminal agents open terminal-first: `omnigent.ui: terminal`
       // tells the UI to render the terminal wrapper, and `omnigent.wrapper`
@@ -4432,7 +4486,7 @@ export function NewChatLandingScreen() {
         // A sandbox create has no host to match on until the sandbox
         // registers one, so it waits for the response like before.
         const matchOwnCreate =
-          sandboxSelected || !selectedHostId
+          localConv !== null || sandboxSelected || !selectedHostId
             ? null
             : (item: SessionListWireItem) =>
                 !knownSessionIds.has(item.id) &&
@@ -4443,6 +4497,7 @@ export function NewChatLandingScreen() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            id: proposedSessionId,
             // Config-seeded agent on a `project_id` create: omitted so the
             // server default-fills it from the project config.
             ...(agentFromProjectConfig ? {} : { agent_id: effectiveAgentId }),
@@ -4532,12 +4587,10 @@ export function NewChatLandingScreen() {
               smartRoutingHarnessSelected || pinnedNativeRoutes ? initialPrompt : undefined,
           }),
         });
-        // The create doesn't answer until the host has spawned a runner — a
-        // process boot, seconds of it — but the session row exists (and is
-        // announced on the updates stream) almost immediately. Open the chat
-        // on whichever id lands first: the pushed row typically wins by
-        // seconds, and the chat page renders from the id alone, showing its
-        // own starting spinner while the runner comes up.
+        // The server-first fallback can still open from the pushed row before
+        // the create responds. Navigate-first is already showing its provisional chat,
+        // so it waits for the response's authoritative id instead of guessing
+        // which same-agent/host push belongs to this request.
         const abortPush = new AbortController();
         const pushedRow =
           matchOwnCreate === null
@@ -4571,7 +4624,12 @@ export function NewChatLandingScreen() {
         // error the user needed to see on this screen.
         if ("error" in created) {
           returnDraftToUser();
-          setCreateError(created.error);
+          // On the navigate-first path the landing screen is unmounted, so tear
+          // down the provisional chat, return to landing, and surface the error as a
+          // toast (survives the remount); inline error only when still on landing.
+          tearDownLocalConversation();
+          if (localConv !== null) showToast(created.error);
+          else setCreateError(created.error);
           return;
         }
         data = { id: created.id };
@@ -4645,44 +4703,57 @@ export function NewChatLandingScreen() {
       // next time. Recorded only on a successful create, so a harness the user
       // merely browsed past never earns a primary slot.
       if (selectedNativeHarness !== null) addRecentHarness(selectedNativeHarness);
-      // Fire-and-forget: don't block navigation on the sidebar list refresh.
-      // The background refetch (or the WS session_added push) backfills the
-      // new session's row within ~1s of landing in the chat; the chat itself
-      // loads from the session id and never reads the sidebar cache.
-      void queryClient.refetchQueries({ queryKey: ["conversations"] });
-      void queryClient.invalidateQueries({ queryKey: ["directory-sessions"] });
-      // A first message matching one of the agent's bundled skills is
-      // handed off as a structured invocation so ChatPage auto-sends it
-      // as a `slash_command` event (server resolves the skill) instead
-      // of plain text the agent would see as a literal "/name". Native
-      // terminal agents keep plain text — their CLI owns slash commands.
-      setPendingInitialPrompt(data.id, {
-        text: initialPrompt,
-        skill: isNativeTerminalAgent
-          ? null
-          : matchSkillInvocation(initialPrompt, agent?.skills ?? []),
-        files,
-      });
-      // Label the new row with the prompt until the server's seed title lands.
-      recordOptimisticTitle(data.id, initialPrompt);
+      // A first message matching one of the agent's bundled skills is sent as a
+      // structured `slash_command` (server resolves the skill) rather than the
+      // literal "/name". Native terminal agents keep plain text — their CLI owns
+      // slash commands.
+      const skill = isNativeTerminalAgent
+        ? null
+        : matchSkillInvocation(initialPrompt, agent?.skills ?? []);
       // Scope the recall entry to the new session id so ArrowUp surfaces it in
-      // the freshly-opened chat (whose composer reads the same per-conversation
-      // key). Sanitized text so recall reproduces exactly what was sent.
+      // the freshly-opened chat. Sanitized text so recall reproduces what was sent.
       appendPromptHistoryEntry(initialPrompt, data.id);
       // The session was created — drop any draft a detour back to this
       // screen stashed, so the next visit starts clean.
-      landingDraft = null;
-      // Only follow the create while the user is still on the landing
-      // screen. A create that outlived it means they moved on to another
-      // session; jumping them into this one now would hijack that. The
-      // session is created either way and its first message stays held
-      // for whenever they open it.
-      if (onScreenRef.current && window.location.href === createLocation) {
-        navigate(`/c/${data.id}`);
+      if (submittedDraftRevisionRef.current === landingDraftRevision) {
+        writeLandingDraft(null);
+      }
+      void queryClient.invalidateQueries({ queryKey: ["directory-sessions"] });
+
+      // `localConv` is set only when a real agent id was resolved up front, so
+      // it's safe to POST the first message with it.
+      if (localConv !== null && effectiveAgentId !== null) {
+        const proposedRouteSuffix = `/c/${localConv.proposedConvId}`;
+        // Confirm the proposed id or adopt the authoritative id and POST the first message.
+        resolveProvisionalConversation(
+          localConv.proposedConvId,
+          data.id,
+          effectiveAgentId,
+          initialPrompt,
+          files,
+          localConv.pendingMsgTempId,
+          skill,
+          navigate,
+          () => window.location.pathname.endsWith(proposedRouteSuffix),
+        );
+        void queryClient.refetchQueries({ queryKey: ["conversations"] });
+      } else {
+        // Server-first: a pending custom agent (or no client cache in tests).
+        // Label the row, stash the first message for ChatPage to send, navigate.
+        recordOptimisticTitle(data.id, initialPrompt);
+        void queryClient.refetchQueries({ queryKey: ["conversations"] });
+        setPendingInitialPrompt(data.id, { text: initialPrompt, skill, files });
+        if (onScreenRef.current && window.location.href === createLocation) {
+          navigate(`/c/${data.id}`);
+        }
       }
     } catch {
+      const msg = "Couldn't reach the server. Check your connection and try again.";
+      tearDownLocalConversation();
       returnDraftToUser();
-      setCreateError("Couldn't reach the server. Check your connection and try again.");
+      // Toast when the landing screen is gone (navigate-first); inline otherwise.
+      if (localConv !== null) showToast(msg);
+      else setCreateError(msg);
     } finally {
       setCreating(false);
     }

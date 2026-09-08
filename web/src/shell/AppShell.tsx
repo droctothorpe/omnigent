@@ -83,6 +83,7 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isSingleUserMode } from "@/lib/capabilities";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
 import { useChatStore } from "@/store/chatStore";
+import { isProvisionalConversationId } from "@/lib/provisionalConversationId";
 import {
   STARTING_GRACE_S,
   livenessRowFromSession,
@@ -222,6 +223,13 @@ export function AppShell() {
     conversationId: string;
     extensionId: string;
   }>();
+  // A provisional id shown while `createSession` is in flight
+  // has no server session behind it. Feed every server-scoped hook this instead
+  // of the raw route id so none of them fetch `/v1/sessions/<provisional>` during the
+  // create window (or on a stale temp reload, before ChatPage redirects).
+  const serverConversationId = isProvisionalConversationId(conversationId)
+    ? undefined
+    : conversationId;
   const [fileViewerCommentsOpen, setFileViewerCommentsOpen] = useState(false);
   const [rightRailTab, setRightRailTab] = useState<RightRailTab>(() =>
     conversationId ? (readSessionWorkspaceState(conversationId).rightRailTab ?? "files") : "files",
@@ -412,7 +420,7 @@ export function AppShell() {
   // terminal. The hook is react-query-backed and dedup'd with the rail.
   // reconcileWhilePending: self-heals if the live resource.created SSE was
   // missed (see UseTerminalsOptions for the why).
-  const { terminals } = useTerminals(conversationId ?? null, {
+  const { terminals } = useTerminals(serverConversationId ?? null, {
     reconcileWhilePending: terminalPending,
   });
   const agentTerminal = useMemo(() => findAgentTerminal(terminals), [terminals]);
@@ -435,16 +443,17 @@ export function AppShell() {
   );
   useSeedReadState(allConversations);
   const activeConv = useMemo(() => {
-    if (!conversationId) return null;
+    if (!serverConversationId) return null;
     return (
-      conversationsData?.pages.flatMap((p) => p.data).find((c) => c.id === conversationId) ?? null
+      conversationsData?.pages.flatMap((p) => p.data).find((c) => c.id === serverConversationId) ??
+      null
     );
-  }, [conversationId, conversationsData]);
+  }, [serverConversationId, conversationsData]);
   // Single-conversation snapshot (shared cache with chatStore.bindStream).
   // For sub-agent (child) sessions the sidebar list omits the row, so this
   // is the only path through which the UI learns the user's permission
   // level. ``derivePermissionLevel`` prefers this over ``activeConv``.
-  const { session: activeSession, isLoading: sessionLoading } = useSession(conversationId);
+  const { session: activeSession, isLoading: sessionLoading } = useSession(serverConversationId);
   // Same liveness the chat surface switches on (see ChatPage / useSessionLiveness).
   // AppShell reads it only to drive the Terminal pill's "loading" state: a session
   // in `starting` (a relaunch the moment a message is sent — `turnActive`) is
@@ -465,7 +474,7 @@ export function AppShell() {
   });
   // Full agent object (mcp_servers + policies) for the header info icon.
   // react-query-cached, so this shares the fetch ChatPage's picker makes.
-  const { data: boundAgent } = useSessionAgent(conversationId ?? null);
+  const { data: boundAgent } = useSessionAgent(serverConversationId ?? null);
   const permissionLevel = derivePermissionLevel(
     activeSession,
     sessionLoading,
@@ -606,7 +615,7 @@ export function AppShell() {
     (isKnownTopLevel || isChildSession) &&
     (permissionLevel === null || permissionLevel >= 1);
   // Agent tools/policies exist to show.
-  const hasAgentInfo = !!conversationId && agentHasInfo(boundAgent, conversationId);
+  const hasAgentInfo = !!serverConversationId && agentHasInfo(boundAgent, serverConversationId);
   // Whether the mobile three-dot menu has any entry to offer.
   const hasHeaderMenu = canShare || hasAgentInfo;
   // The live snapshot is authoritative; the sidebar row is only a fallback
@@ -683,12 +692,15 @@ export function AppShell() {
   // resolution lands (a no-op transition once it does).
   const stickyRootRef = useRef<string | null>(null);
   const queryClient = useQueryClient();
-  const walkedRoot = useRootSessionId(conversationId ?? null, activeSession?.parentSessionId);
+  // Derive the root from `serverConversationId` (undefined for a provisional id) so the
+  // fallback below never yields the provisional id — otherwise `useChildSessions` would
+  // fetch `GET /v1/sessions/<provisional>/child_sessions` during the create window.
+  const walkedRoot = useRootSessionId(serverConversationId ?? null, activeSession?.parentSessionId);
   const { rootSessionId, rootSessionResolved } = useMemo(() => {
-    if (!conversationId) return { rootSessionId: null, rootSessionResolved: false };
+    if (!serverConversationId) return { rootSessionId: null, rootSessionResolved: false };
     // Snapshot resolved for a top-level session → it is its own root.
     if (activeSession && activeSession.parentSessionId == null) {
-      return { rootSessionId: conversationId, rootSessionResolved: true };
+      return { rootSessionId: serverConversationId, rootSessionResolved: true };
     }
     // Snapshot resolved for a descendant + walk complete → authoritative.
     if (activeSession && walkedRoot) {
@@ -699,18 +711,18 @@ export function AppShell() {
     const sticky = stickyRootRef.current;
     if (
       sticky !== null &&
-      (sticky === conversationId ||
-        cachedTreeContains(queryClient, sticky, conversationId, MAX_TREE_DEPTH))
+      (sticky === serverConversationId ||
+        cachedTreeContains(queryClient, sticky, serverConversationId, MAX_TREE_DEPTH))
     ) {
       return { rootSessionId: sticky, rootSessionResolved: true };
     }
     // No sticky context (e.g. a deep link straight into a sub-agent):
     // fall back one hop until the walk resolves the true root.
     return {
-      rootSessionId: activeSession?.parentSessionId ?? conversationId,
+      rootSessionId: activeSession?.parentSessionId ?? serverConversationId,
       rootSessionResolved: false,
     };
-  }, [conversationId, activeSession, walkedRoot, queryClient]);
+  }, [serverConversationId, activeSession, walkedRoot, queryClient]);
   // One-shot fetch (no polling) for the Subagents tab's count badge.
   // SubagentsPanel mounts its own polling usage of the hook against
   // the same rootSessionId, so the cache is shared.
@@ -752,7 +764,7 @@ export function AppShell() {
   // resource instead of the root filesystem listing: it is enough to prove
   // availability without paying for directory contents. The probe is disabled
   // for a non-browsing viewer so it never fires a request the server refuses.
-  const environmentQuery = useWorkspaceEnvironment(conversationId, {
+  const environmentQuery = useWorkspaceEnvironment(serverConversationId, {
     enabled: canBrowseWorkspace,
   });
   const showFilesPanel = canBrowseWorkspace && environmentQuery.data?.available !== false;
@@ -763,7 +775,7 @@ export function AppShell() {
   // gate. While the info is still loading the tab stays, matching the Files
   // gate's no-flash default. Shares ChatPage's status-line query cache, so no
   // extra fetch.
-  const githubInfoQuery = useGithubInfo(conversationId);
+  const githubInfoQuery = useGithubInfo(serverConversationId);
   const showGithubTab = showFilesPanel && githubInfoQuery.data?.reason !== "not_a_git_repo";
   // Per-tab availability for the right workspace rail — the single source
   // of truth shared by the tab-fallback effect below, the rail's mount
@@ -933,7 +945,7 @@ export function AppShell() {
   // because it contains full relative paths like `web/src/shell/Foo.tsx`.
   // Disabled for a viewer who may not browse the workspace: the server refuses
   // the read, so the fetch would only 403.
-  const changedFilesQuery = useWorkspaceChangedFiles(conversationId, {
+  const changedFilesQuery = useWorkspaceChangedFiles(serverConversationId, {
     enabled: canBrowseWorkspace,
   });
   const changedFilePaths = useMemo(
@@ -1999,6 +2011,7 @@ export function AppShell() {
                     projectIcon={headerProjectIcon}
                     titleLinkTo={headerTitleLinkTo}
                     boundAgent={boundAgent}
+                    agentInfoSessionId={serverConversationId}
                     wrapperLabel={wrapperLabel}
                     canShare={canShare}
                     shareDisabled={shareDisabled}
@@ -2050,10 +2063,10 @@ export function AppShell() {
               push panel is open (the panel itself becomes the focus). Only
               rendered in debug mode so the column doesn't occupy space in
               normal use. */}
-                {conversationId && debugMode && !panelOpen && !executionLogsOpen && (
+                {serverConversationId && debugMode && !panelOpen && !executionLogsOpen && (
                   <div className="hidden md:flex md:flex-col md:w-56 md:shrink-0 md:border-l md:border-border md:overflow-y-auto md:px-2 md:pb-2 md:pt-12 md:gap-2">
                     <SessionRail
-                      conversationId={conversationId}
+                      conversationId={serverConversationId}
                       onExpandExecutionLogs={openExecutionLogsPanel}
                       suppressed={false}
                     />
@@ -2246,7 +2259,7 @@ export function AppShell() {
                     Tools and policies configured for the active agent.
                   </DialogDescription>
                 </DialogHeader>
-                <AgentInfoContent agent={boundAgent} sessionId={conversationId} />
+                <AgentInfoContent agent={boundAgent} sessionId={serverConversationId} />
               </DialogContent>
             </Dialog>
           )}

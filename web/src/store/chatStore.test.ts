@@ -55,8 +55,10 @@ import type { TerminalInfo } from "@/hooks/useTerminals";
 import { terminalsQueryKey } from "@/hooks/useTerminals";
 import { type ChildSessionInfo, childSessionsQueryKey } from "@/hooks/useChildSessions";
 import {
+  beginProvisionalConversation,
   consumePendingInitialPrompt,
   handleSessionEvent,
+  resolveProvisionalConversation,
   isStaleCompletedResponse,
   initChatStore,
   pumpStreamEvents,
@@ -69,6 +71,7 @@ import {
   bindConversationForTest,
   releaseConversation,
 } from "./chatStore";
+import { isProvisionalConversationId } from "@/lib/provisionalConversationId";
 import { conversationRegistry } from "./conversationRegistry";
 import { markSessionCreated, resetInteractionTelemetryForTests } from "./interactionTelemetry";
 import {
@@ -2400,6 +2403,315 @@ describe("chatStore — send (first-send ordering)", () => {
   });
 });
 
+describe("chatStore — navigate-first first send (B1/B2 regressions)", () => {
+  // Drives the navigate-first flow directly (NewChatDialog owns createSession;
+  // these exercise the store side): begin a client-only conversation, then
+  // hydrate it onto a real id, which fires the first-message `send` internally.
+  const noopNavigate = () => {};
+
+  // resolveProvisionalConversation fires `void send(...)`; flush enough microtasks +
+  // the timer-based fetch acks for it to settle.
+  async function settle() {
+    await tick();
+    await tick();
+  }
+
+  it("happy path: reuses the bubble (no duplicate), stays streaming, arms the latch", async () => {
+    const proposedId = "11111111111141118111111111111111";
+    seedSession(proposedId);
+    const begun = beginProvisionalConversation(proposedId, "hello there", undefined);
+    expect(begun).not.toBeNull();
+    const { proposedConvId, pendingMsgTempId } = begun!;
+    const provisionalEntry = conversationRegistry.peek(proposedId);
+    const navigate = vi.fn();
+    expect(isProvisionalConversationId(proposedConvId)).toBe(true);
+    // One optimistic bubble is shown under the provisional id, entry pre-streaming.
+    expect(useChatStore.getState().pendingUserMessages).toHaveLength(1);
+
+    resolveProvisionalConversation(
+      proposedConvId,
+      proposedId,
+      "agent_xyz",
+      "hello there",
+      undefined,
+      pendingMsgTempId,
+      null,
+      navigate,
+    );
+    await settle();
+
+    const state = useChatStore.getState();
+    // The bubble was reused, not duplicated.
+    expect(state.pendingUserMessages).toHaveLength(1);
+    expect(state.pendingUserMessages[0]!.tempId).toBe(pendingMsgTempId);
+    // The hydrating send armed the latch, so the stranded-latch watchdog is live.
+    const real = conversationRegistry.peek(proposedId)!.getState();
+    expect(conversationRegistry.peek(proposedId)).toBe(provisionalEntry);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(real.sendLatchedAt).not.toBeNull();
+    // Exactly one POST /events for the real session (reuse ⇒ no second bubble/POST).
+    const posts = fetchMock.mock.calls.filter(
+      ([u, init]) =>
+        String(u) === `/v1/sessions/${proposedId}/events` &&
+        (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(posts).toHaveLength(1);
+  });
+
+  it("confirms the matching sidebar row in place before a list refetch", () => {
+    const proposedId = "33333333333343338333333333333333";
+    seedSession(proposedId);
+    client.setQueryData<InfiniteData<ConversationsPage>>(["conversations", "", false], {
+      pages: [{ data: [], first_id: null, last_id: null, has_more: false }],
+      pageParams: [undefined],
+    });
+    const { pendingMsgTempId } = beginProvisionalConversation(proposedId, "hello", undefined)!;
+
+    resolveProvisionalConversation(
+      proposedId,
+      proposedId,
+      "agent_xyz",
+      "hello",
+      undefined,
+      pendingMsgTempId,
+      null,
+      noopNavigate,
+    );
+
+    const data = client.getQueryData<InfiniteData<ConversationsPage>>(["conversations", "", false]);
+    expect(data?.pages[0]?.data.find((row) => row.id === proposedId)?.provisional).toBe(false);
+  });
+
+  it("reuses the matching provisional bubble for a skill-first send", async () => {
+    const proposedId = "44444444444444448444444444444444";
+    seedSession(proposedId);
+    const { pendingMsgTempId } = beginProvisionalConversation(
+      proposedId,
+      "/review-pr 123",
+      undefined,
+    )!;
+
+    resolveProvisionalConversation(
+      proposedId,
+      proposedId,
+      "agent_xyz",
+      "/review-pr 123",
+      undefined,
+      pendingMsgTempId,
+      { name: "review-pr", args: "123" },
+      noopNavigate,
+    );
+    await settle();
+
+    const pending = conversationRegistry.peek(proposedId)!.getState().pendingUserMessages;
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.tempId).toBe(pendingMsgTempId);
+  });
+
+  it("adopts an older backend's authoritative id and sends exactly once", async () => {
+    seedSession("conv_real");
+    const proposedId = "22222222222242228222222222222222";
+    const { pendingMsgTempId } = beginProvisionalConversation(proposedId, "hello", undefined)!;
+    const navigate = vi.fn();
+
+    resolveProvisionalConversation(
+      proposedId,
+      "conv_real",
+      "agent_xyz",
+      "hello",
+      undefined,
+      pendingMsgTempId,
+      null,
+      navigate,
+    );
+    await settle();
+
+    expect(conversationRegistry.has(proposedId)).toBe(false);
+    expect(isProvisionalConversationId(proposedId)).toBe(false);
+    expect(navigate).toHaveBeenCalledWith("/c/conv_real", { replace: true });
+    const posts = fetchMock.mock.calls.filter(
+      ([url, init]) =>
+        String(url) === "/v1/sessions/conv_real/events" &&
+        (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(posts).toHaveLength(1);
+  });
+
+  it("B1: a failed first message settles to idle (not stuck streaming)", async () => {
+    seedSession("conv_real");
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/v1/sessions/conv_real/events") {
+        return mockResponse(
+          { error: { code: "internal_error", message: "boom" } },
+          {
+            ok: false,
+            status: 500,
+          },
+        );
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    const { proposedConvId, pendingMsgTempId } = beginProvisionalConversation(
+      "11111111111141118111111111111111",
+      "hi",
+      undefined,
+    )!;
+    resolveProvisionalConversation(
+      proposedConvId,
+      "conv_real",
+      "agent_xyz",
+      "hi",
+      undefined,
+      pendingMsgTempId,
+      null,
+      noopNavigate,
+    );
+    await settle();
+
+    const real = conversationRegistry.peek("conv_real")!.getState();
+    // Without the fix the entry stays "streaming" forever with no latch; the
+    // fix arms the latch on the hydrating send and runs the failure-settle.
+    expect(real.status).toBe("idle");
+    expect(real.pendingUserMessages).toEqual([]);
+    // The failure is surfaced, not swallowed.
+    expect(real.blocks.filter((b) => b.type === "error")).toHaveLength(1);
+  });
+
+  it("B1: a policy-denied first message settles to idle", async () => {
+    seedSession("conv_real");
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url === "/v1/sessions/conv_real/events") {
+        return mockResponse({ queued: false, denied: true });
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    const { proposedConvId, pendingMsgTempId } = beginProvisionalConversation(
+      "11111111111141118111111111111111",
+      "blocked",
+      undefined,
+    )!;
+    resolveProvisionalConversation(
+      proposedConvId,
+      "conv_real",
+      "agent_xyz",
+      "blocked",
+      undefined,
+      pendingMsgTempId,
+      null,
+      noopNavigate,
+    );
+    await settle();
+
+    const real = conversationRegistry.peek("conv_real")!.getState();
+    expect(real.status).toBe("idle");
+    expect(real.sessionStatus).toBe("idle");
+    expect(real.pendingUserMessages).toEqual([]);
+  });
+
+  it("B2: a bind failure after navigate-away settles the real session, not the visible one", async () => {
+    // The real session's snapshot fails, so ensureBoundSession rethrows the
+    // load error BEFORE postedSessionId is assigned — the catch's B2 path.
+    seedSession("conv_visible");
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      const path = url.split("?")[0];
+      if (path === "/v1/sessions/conv_real" && (init?.method ?? "GET") === "GET") {
+        return mockResponse({}, { ok: false, status: 500 });
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    const { proposedConvId, pendingMsgTempId } = beginProvisionalConversation(
+      "11111111111141118111111111111111",
+      "hi",
+      undefined,
+    )!;
+    // User navigates to another chat before the create resolves.
+    useChatStore.setState({
+      conversationId: "conv_visible",
+      abortController: new AbortController(),
+      status: "idle",
+      blocks: [],
+      pendingUserMessages: [],
+    });
+    conversationRegistry.setActive("conv_visible");
+
+    resolveProvisionalConversation(
+      proposedConvId,
+      "conv_real",
+      "agent_xyz",
+      "hi",
+      undefined,
+      pendingMsgTempId,
+      null,
+      noopNavigate,
+    );
+    await settle();
+
+    const visible = useChatStore.getState();
+    // The visible conversation is untouched — no stray error block or status flip.
+    expect(visible.conversationId).toBe("conv_visible");
+    expect(visible.blocks.filter((b) => b.type === "error")).toHaveLength(0);
+    expect(visible.status).toBe("idle");
+    // The real (background) session carried the failure and settled to idle.
+    const real = conversationRegistry.peek("conv_real")!.getState();
+    expect(real.status).toBe("idle");
+    expect(real.pendingUserMessages).toEqual([]);
+    expect(real.blocks.filter((b) => b.type === "error")).toHaveLength(1);
+  });
+
+  it("does not promote the visible store when the route already left the provisional chat", () => {
+    seedSession("conv_real");
+    const { proposedConvId, pendingMsgTempId } = beginProvisionalConversation(
+      "11111111111141118111111111111111",
+      "hi",
+      undefined,
+    )!;
+    const navigate = vi.fn();
+
+    resolveProvisionalConversation(
+      proposedConvId,
+      "conv_real",
+      "agent_xyz",
+      "hi",
+      undefined,
+      pendingMsgTempId,
+      null,
+      navigate,
+      () => false,
+    );
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useChatStore.getState().conversationId).toBe(proposedConvId);
+  });
+
+  it("a pinned background send does not consume the visible conversation's retry id", async () => {
+    seedSession("conv_target");
+    seedSession("conv_visible");
+    await useChatStore.getState().switchTo("conv_target");
+    await useChatStore.getState().switchTo("conv_visible");
+    useChatStore.setState({ pendingRetryStableId: "retry_visible" });
+
+    await useChatStore.getState().send("background first message", "agent_xyz", undefined, {
+      pinnedConversationId: "conv_target",
+    });
+
+    expect(useChatStore.getState().pendingRetryStableId).toBe("retry_visible");
+    const post = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url) === "/v1/sessions/conv_target/events" &&
+        (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(post).toBeDefined();
+    const body = JSON.parse((post![1] as RequestInit).body as string);
+    expect(body.data.stable_id).not.toBe("retry_visible");
+  });
+});
+
 describe("chatStore — sendSlashCommand", () => {
   /** Parse the JSON body of the single POST /events call. */
   function lastEventBody(): { type: string; data: Record<string, unknown> } {
@@ -3586,7 +3898,7 @@ describe("chatStore — send (file attachments)", () => {
 
   it("keeps the optimistic bubble's stable key on the native path (no pending_id adoption)", async () => {
     // The native POST returns a pending_id, but the optimistic bubble
-    // must KEEP its client temp id as its React key — swapping to the
+    // must KEEP its pending message key as its React key — swapping to the
     // server id mid-send remounts the bubble (a visible flink). The
     // image (real upload id) stays on the entry regardless.
     useChatStore.setState({
@@ -3613,7 +3925,7 @@ describe("chatStore — send (file attachments)", () => {
     const file = new File(["bytes"], "diagram.png", { type: "image/png" });
     await useChatStore.getState().send("draw this", "agent_xyz", [file]);
 
-    // The bubble keeps its client temp id (stable key) — NOT the server
+    // The bubble keeps its pending message key (stable key) — NOT the server
     // pending id — and carries the real-id image.
     const afterSend = useChatStore.getState();
     expect(afterSend.pendingUserMessages).toHaveLength(1);
@@ -5122,7 +5434,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       expect(promoted.type).toBe("user_message");
       expect(promoted.ctx.itemId).toBe("msg_persisted_first");
       expect(promoted.content).toEqual([{ type: "input_text", text: "first" }]);
-      // stableKey carries the popped optimistic temp id so the rendered
+      // stableKey carries the popped optimistic pending message key so the rendered
       // bubble keeps its React key (`user:pend_1`) across the
       // optimistic→committed swap — without it the key would change to
       // `user:msg_persisted_first`, remounting the node (the flink).
@@ -5279,7 +5591,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
 
       const promoted = useChatStore.getState().blocks[0] as UserMessageBlock;
       expect(promoted.ctx.createdBy).toBe("alice@example.com");
-      // stableKey still carries the optimistic temp id (no remount on swap).
+      // stableKey still carries the optimistic pending message key (no remount on swap).
       expect(promoted.stableKey).toBe("pend_1");
     });
 

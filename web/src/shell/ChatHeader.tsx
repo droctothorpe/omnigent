@@ -136,6 +136,8 @@ interface ChatHeaderProps {
   titleLinkTo?: string;
   /** The bound agent (mcp_servers + policies) for the info popover. */
   boundAgent: Agent | undefined;
+  /** Server-confirmed session id for agent-info queries. */
+  agentInfoSessionId?: string;
   /**
    * The session's ``omnigent.wrapper`` label, or ``null``. Names the vendor
    * in the sub-agent breadcrumb: a native sub-agent child reuses its
@@ -208,6 +210,7 @@ export function ChatHeader({
   projectIcon,
   titleLinkTo,
   boundAgent,
+  agentInfoSessionId,
   wrapperLabel,
   canShare,
   shareDisabled = false,
@@ -506,7 +509,9 @@ export function ChatHeader({
             "Fork from here" action on assistant bubbles (ChatPage). */}
         {/* Agent info: tools & policies for the bound agent. Desktop-only
             popover; self-hides when the agent has neither configured. */}
-        {conversationId && <AgentInfoButton agent={boundAgent} sessionId={conversationId} />}
+        {agentInfoSessionId && (
+          <AgentInfoButton agent={boundAgent} sessionId={agentInfoSessionId} />
+        )}
         {/* Chat/Terminal switcher for terminal-first sessions — self-gates to
             null otherwise. Renders on every shell, iOS included. */}
         {conversationId && <ViewModeToggle />}

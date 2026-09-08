@@ -27,6 +27,9 @@ import { writeDefaultBaseBranch } from "@/lib/baseBranchPreferences";
 // layers are stubbed so the test isolates that wiring.
 const navigateMock = vi.fn();
 const setPendingInitialPromptMock = vi.fn();
+const beginProvisionalConversationMock = vi.fn();
+const resolveProvisionalConversationMock = vi.fn();
+const removeProvisionalConversationMock = vi.fn();
 
 const RECENT_KEY = "omnigent:recent-workspaces";
 // Prompt history is scoped per conversation; the landing composer writes under
@@ -50,6 +53,10 @@ vi.mock("@/lib/routing", () => ({
 // The screen hands the first message to ChatPage through the chatStore
 // (keyed by conversation id), not router state — assert on that call.
 vi.mock("@/store/chatStore", () => ({
+  beginProvisionalConversation: (...args: unknown[]) => beginProvisionalConversationMock(...args),
+  resolveProvisionalConversation: (...args: unknown[]) =>
+    resolveProvisionalConversationMock(...args),
+  removeProvisionalConversation: (...args: unknown[]) => removeProvisionalConversationMock(...args),
   setPendingInitialPrompt: (...args: unknown[]) => setPendingInitialPromptMock(...args),
 }));
 
@@ -262,6 +269,11 @@ function saveConfig(): void {
 beforeEach(() => {
   navigateMock.mockReset();
   setPendingInitialPromptMock.mockReset();
+  beginProvisionalConversationMock.mockReset();
+  beginProvisionalConversationMock.mockReturnValue(null);
+  resolveProvisionalConversationMock.mockReset();
+  removeProvisionalConversationMock.mockReset();
+  removeProvisionalConversationMock.mockReturnValue(false);
   pushMatchers.length = 0;
   announcePushedSession = null;
   vi.mocked(authenticatedFetch).mockReset();
@@ -316,11 +328,127 @@ describe("NewChatLandingScreen create flow", () => {
       host_id: "host_1",
       workspace: SEEDED_WORKSPACE,
     });
+    expect(body.id).toMatch(/^[0-9a-f]{32}$/);
     // A plain YAML agent carries no terminal-wrapper labels.
     expect(body.labels).toBeUndefined();
 
     // On success the screen routes to the freshly created session.
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/c/conv_new"));
+  });
+
+  it("uses the response id for a navigate-first create instead of matching a pushed row", async () => {
+    let resolveCreate!: (response: Response) => void;
+    vi.mocked(authenticatedFetch).mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        resolveCreate = resolve;
+      }) as ReturnType<typeof authenticatedFetch>,
+    );
+    beginProvisionalConversationMock.mockImplementation((proposedConvId: string) => ({
+      proposedConvId,
+      pendingMsgTempId: "pend_1",
+    }));
+
+    renderLanding();
+    await waitForWorkspaceSeed();
+    typeMessage("inspect the repo");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+
+    await waitFor(() => expect(beginProvisionalConversationMock).toHaveBeenCalled());
+    const proposedId = beginProvisionalConversationMock.mock.calls[0]![0] as string;
+    expect(proposedId).toMatch(/^[0-9a-f]{32}$/);
+    expect(navigateMock).toHaveBeenCalledWith(`/c/${proposedId}`);
+    const [, init] = vi.mocked(authenticatedFetch).mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).id).toBe(proposedId);
+    expect(pushMatchers).toHaveLength(0);
+
+    resolveCreate({
+      ok: true,
+      json: async () => ({ id: "conv_authoritative" }),
+    } as unknown as Response);
+    await waitFor(() =>
+      expect(resolveProvisionalConversationMock).toHaveBeenCalledWith(
+        proposedId,
+        "conv_authoritative",
+        "ag_hello",
+        "inspect the repo",
+        [],
+        "pend_1",
+        null,
+        navigateMock,
+        expect.any(Function),
+      ),
+    );
+  });
+
+  it("keeps a failed create's restored draft when a newer create succeeds", async () => {
+    let resolveFirst!: (response: Response) => void;
+    let resolveSecond!: (response: Response) => void;
+    vi.mocked(authenticatedFetch)
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        }) as ReturnType<typeof authenticatedFetch>,
+      )
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveSecond = resolve;
+        }) as ReturnType<typeof authenticatedFetch>,
+      );
+    beginProvisionalConversationMock
+      .mockReturnValueOnce({
+        proposedConvId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        pendingMsgTempId: "pend_a",
+      })
+      .mockReturnValueOnce({
+        proposedConvId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        pendingMsgTempId: "pend_b",
+      });
+
+    renderLanding();
+    await waitForWorkspaceSeed();
+    typeMessage("restore this draft");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
+    cleanup();
+
+    renderLanding();
+    await waitForWorkspaceSeed();
+    typeMessage("newer successful create");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(2));
+    cleanup();
+
+    resolveFirst({
+      ok: false,
+      status: 500,
+      json: async () => ({ detail: "first create failed" }),
+    } as unknown as Response);
+    await waitFor(() =>
+      expect(removeProvisionalConversationMock).toHaveBeenCalledWith(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      ),
+    );
+
+    resolveSecond({
+      ok: true,
+      json: async () => ({ id: "conv_second" }),
+    } as unknown as Response);
+    await waitFor(() =>
+      expect(resolveProvisionalConversationMock).toHaveBeenCalledWith(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "conv_second",
+        "ag_hello",
+        "newer successful create",
+        [],
+        "pend_b",
+        null,
+        navigateMock,
+        expect.any(Function),
+      ),
+    );
+
+    renderLanding();
+    expect(screen.getByTestId("new-chat-landing-input")).toHaveValue("restore this draft");
   });
 
   it("records the launched workspace under its host without corrupting other recents", async () => {

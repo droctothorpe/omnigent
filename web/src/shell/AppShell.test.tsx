@@ -20,6 +20,10 @@ import type { ServerInfo } from "@/lib/capabilities";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { writeWorkspacePanelDefault } from "@/lib/workspacePanelPreferences";
+import {
+  clearProvisionalConversationIds,
+  registerProvisionalConversationId,
+} from "@/lib/provisionalConversationId";
 
 const runnerHealthState = vi.hoisted(() => ({
   runnerOnline: undefined as boolean | undefined,
@@ -462,6 +466,7 @@ function mockConversations(
     runner_id?: string | null;
     workspace?: string | null;
     created_at?: number;
+    provisional?: boolean;
   }[],
 ) {
   useConvMock.mockReturnValue({
@@ -479,6 +484,7 @@ function mockConversations(
             host_id: c.host_id ?? null,
             runner_id: c.runner_id ?? null,
             workspace: c.workspace ?? null,
+            provisional: c.provisional,
           })),
           first_id: null,
           last_id: null,
@@ -561,13 +567,70 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  clearProvisionalConversationIds();
+});
 
 describe("AppShell header", () => {
   it("renders the sidebar toggle on all pages", () => {
     mockConversations([]);
     renderShell("/");
     expect(screen.getByRole("button", { name: /sidebar/i })).toBeInTheDocument();
+  });
+
+  it("does not fetch child sessions for a provisional id in debug mode", () => {
+    registerProvisionalConversationId("12345678123456781234567812345678");
+    mockConversations([]);
+    renderShell("/c/12345678123456781234567812345678?debug=1");
+
+    expect(useChildSessionsMock).not.toHaveBeenCalledWith("12345678123456781234567812345678");
+    expect(screen.queryByTestId("execution-logs-card")).toBeNull();
+  });
+
+  it("does not expose conversation actions for a provisional row", () => {
+    registerProvisionalConversationId("12345678123456781234567812345678");
+    mockConversations([
+      { id: "12345678123456781234567812345678", permission_level: null, provisional: true },
+    ]);
+    renderShell("/c/12345678123456781234567812345678");
+
+    expect(screen.queryByRole("button", { name: "Conversation actions" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Share" })).toBeNull();
+    expect(screen.getByTestId("fork-probe")).toHaveAttribute("data-can-fork", "false");
+  });
+
+  it("does not expose or query agent info for a provisional session", async () => {
+    const provisionalId = "55555555555545558555555555555555";
+    registerProvisionalConversationId(provisionalId);
+    mockConversations([{ id: provisionalId, permission_level: null, provisional: true }]);
+    useSessionAgentMock.mockReturnValue({
+      data: {
+        id: "ag_info",
+        name: "hello_world",
+        mcp_servers: [{ name: "files", command: "files" }],
+      },
+    } as ReturnType<typeof useSessionAgent>);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockReturnValue(new Promise<Response>(() => {}));
+
+    try {
+      renderShell(`/c/${provisionalId}`);
+      const trigger = screen.queryByTestId("agent-info-trigger");
+      if (trigger) {
+        fireEvent.pointerEnter(trigger);
+        fireEvent.click(trigger);
+      }
+      await Promise.resolve();
+
+      expect(trigger).toBeNull();
+      expect(
+        fetchSpy.mock.calls.filter(([input]) =>
+          String(input).includes(`/v1/sessions/${provisionalId}`),
+        ),
+      ).toEqual([]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("shows owner actions for a top-level session omitted from conversation pages", () => {

@@ -94,7 +94,21 @@ import { clearSseLog, pushSseEvent } from "@/lib/sseEventLog";
 import { childSessionsQueryKey, type ChildSessionInfo } from "@/hooks/useChildSessions";
 import { sessionItemsQueryKey } from "@/hooks/useSessionItems";
 import type { Conversation, ConversationsPage } from "@/hooks/useConversations";
-import { overlayTitleIntoCaches, type ConversationsInfiniteData } from "@/lib/sessionListCache";
+import {
+  filtersFromConversationQueryKey,
+  insertNewRowsIntoPages,
+  markRecentlyCreated,
+  mergeItemsIntoPages,
+  overlayTitleIntoCaches,
+  removeIdsFromPages,
+  type ConversationsInfiniteData,
+} from "@/lib/sessionListCache";
+import { recordOptimisticTitle } from "@/lib/optimisticTitles";
+import {
+  isProvisionalConversationId,
+  registerProvisionalConversationId,
+  removeProvisionalConversationId,
+} from "@/lib/provisionalConversationId";
 import { useTerminalActivityStore } from "./terminalActivity";
 import { terminalInfoFromResource, terminalsQueryKey, type TerminalInfo } from "@/lib/terminals";
 import type {
@@ -145,6 +159,198 @@ export interface SendOptions {
    * dedup recognises the retry and does not re-dispatch to the runner.
    */
   stableId?: string;
+  /**
+   * Reuse the optimistic bubble already on the target entry (pushed by
+   * `beginProvisionalConversation`) instead of pushing a fresh one, so the navigate-
+   * first flow's POST doesn't duplicate the message the user already sees. Its
+   * `content` is already set; `session.input.consumed` pops it FIFO as usual.
+   */
+  reusePendingTempId?: string;
+  /**
+   * Target session id, overriding the active `conversationId` — so the navigate-
+   * first background POST lands on the created session even after the user moves
+   * to another chat. Defaults to the active conversation.
+   */
+  pinnedConversationId?: string;
+}
+
+/**
+ * A title-less conversation row for the sidebar cache (renders like a fresh
+ * session). `provisional` marks the row so the sidebar disables per-row
+ * mutations until create confirms it.
+ */
+function makeConvRow(id: string, provisional = false): Conversation {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    id,
+    object: "conversation",
+    title: null,
+    created_at: now,
+    updated_at: now,
+    labels: {},
+    permission_level: null,
+    provisional,
+  };
+}
+
+/** Upsert one row into every `["conversations", ...]` cache variant. */
+function upsertConvRow(row: Conversation, removeId?: string): void {
+  if (queryClient === null) return;
+  const rowMap = new Map([[row.id, row]]);
+  const removeSet = removeId ? new Set([removeId]) : null;
+  for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
+    queryKey: ["conversations"],
+  })) {
+    if (!data) continue;
+    const base = removeSet ? (removeIdsFromPages(data, removeSet).data ?? data) : data;
+    const filters = filtersFromConversationQueryKey(key);
+    const merged = mergeItemsIntoPages(base, rowMap, filters, undefined);
+    const missing = new Map([...rowMap].filter(([id]) => !merged.found.has(id)));
+    const { data: next } = insertNewRowsIntoPages(merged.data, missing, filters);
+    if (next !== data) queryClient.setQueryData(key, next);
+  }
+}
+
+/** Drop the sidebar row for a provisional id (on create failure). */
+function removeConvRow(id: string): void {
+  if (queryClient === null) return;
+  const ids = new Set([id]);
+  for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
+    queryKey: ["conversations"],
+  })) {
+    const { data: next } = removeIdsFromPages(data, ids);
+    if (next !== data) queryClient.setQueryData(key, next);
+  }
+}
+
+/**
+ * Start a provisional conversation synchronously before `createSession` runs:
+ * one proposed id shared by the sidebar row, registry entry, URL, and request;
+ * the optimistic first message is pushed into the entry and made active so the
+ * caller can `navigate('/c/<proposedConvId>')` at once. `switchTo` paints it and
+ * skips binding for a provisional id; ChatPage suppresses server-scoped fetches for it.
+ *
+ * Returns the provisional id + the bubble's `pendingMsgTempId` for
+ * `resolveProvisionalConversation`, or `null` with no query cache (tests).
+ */
+export function beginProvisionalConversation(
+  proposedConvId: string,
+  text: string,
+  files: File[] | undefined,
+): { proposedConvId: string; pendingMsgTempId: string } | null {
+  if (queryClient === null) return null;
+  registerProvisionalConversationId(proposedConvId);
+  pendingSeq += 1;
+  const pendingMsgTempId = `pend_${pendingSeq}`;
+
+  // Sidebar row under the same id the URL shows.
+  recordOptimisticTitle(proposedConvId, text);
+  upsertConvRow(makeConvRow(proposedConvId, true));
+
+  const fileBlocks: MessageContentBlock[] = (files ?? []).map((file) => {
+    const filename = file.name || "image.png";
+    const fileId = `pending:${attachmentKey(file)}`;
+    return file.type.startsWith("image/")
+      ? { type: "input_image" as const, file_id: fileId, filename }
+      : { type: "input_file" as const, file_id: fileId, filename };
+  });
+  const content: MessageContentBlock[] = [
+    ...fileBlocks,
+    ...(text.trim() ? [{ type: "input_text" as const, text }] : []),
+  ];
+  const selfAuthor = getCurrentAuthorId();
+  const bubble: PendingUserMessage = {
+    tempId: pendingMsgTempId,
+    content,
+    createdAtS: Math.floor(Date.now() / 1000),
+    ...(selfAuthor !== null ? { author: selfAuthor } : {}),
+  };
+
+  const entry = conversationRegistry.acquire(proposedConvId);
+  entry.setState({
+    pendingUserMessages: [bubble],
+    loadingConversation: false,
+    status: "streaming",
+  });
+  useChatStore.setState({ conversationId: proposedConvId });
+  conversationRegistry.setActive(proposedConvId);
+  mirrorActiveEntry();
+  return { proposedConvId, pendingMsgTempId };
+}
+
+/**
+ * Confirm the proposed id in place, or fall back to the server's authoritative
+ * id when an older backend ignored it. The first message is always pinned to
+ * the authoritative id, even if the user navigated away while create ran.
+ */
+export function resolveProvisionalConversation(
+  proposedConvId: string,
+  realId: string,
+  agentId: string,
+  text: string,
+  files: File[] | undefined,
+  pendingMsgTempId: string,
+  skill: { name: string; args: string } | null,
+  navigate: (to: string, opts?: { replace?: boolean }) => void,
+  isStillViewing: () => boolean = () => true,
+): void {
+  const stillViewing =
+    useChatStore.getState().conversationId === proposedConvId && isStillViewing();
+  const idMatches = proposedConvId === realId;
+  removeProvisionalConversationId(proposedConvId);
+
+  const confirmed = makeConvRow(realId);
+  recordOptimisticTitle(realId, text);
+  markRecentlyCreated(confirmed);
+  if (idMatches) {
+    upsertConvRow(confirmed);
+  } else {
+    removeConvRow(proposedConvId);
+    conversationRegistry.release(proposedConvId);
+    conversationRegistry.acquire(realId);
+    if (stillViewing) {
+      useChatStore.setState({ conversationId: realId });
+      conversationRegistry.setActive(realId);
+      mirrorActiveEntry();
+      navigate(`/c/${realId}`, { replace: true });
+    }
+    upsertConvRow(confirmed);
+  }
+
+  const store = useChatStore.getState();
+  if (skill !== null) {
+    // Let `sendSlashCommand` arm its own latch and reuse the matching create-window bubble.
+    setterFor(realId)({ status: "idle", sendLatchedAt: null });
+    void store.sendSlashCommand(skill.name, skill.args, agentId, {
+      pinnedConversationId: realId,
+      ...(idMatches ? { reusePendingTempId: pendingMsgTempId } : {}),
+    });
+    return;
+  }
+  // Plain message: reuse the bubble when the backend accepted the proposed id.
+  // `send` binds the authoritative session before posting.
+  void store.send(text, agentId, files, {
+    pinnedConversationId: realId,
+    ...(idMatches ? { reusePendingTempId: pendingMsgTempId } : {}),
+  });
+}
+
+/**
+ * Discard a client-only conversation (create failed): drop the sidebar row and
+ * the registry entry. Returns whether the discarded conversation was still the
+ * one on screen, so the caller can navigate back to the landing route.
+ */
+export function removeProvisionalConversation(proposedConvId: string): boolean {
+  const wasViewing = useChatStore.getState().conversationId === proposedConvId;
+  removeProvisionalConversationId(proposedConvId);
+  removeConvRow(proposedConvId);
+  if (wasViewing) {
+    // Reset the store to the landing state first (switchTo(null) does the full
+    // mirrored-field reset), THEN release the entry.
+    void useChatStore.getState().switchTo(null);
+  }
+  conversationRegistry.release(proposedConvId);
+  return wasViewing;
 }
 
 /**
@@ -1624,20 +1830,40 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     if (!agentId) {
       throw new Error("chatStore.send: no agentId");
     }
-    const retryId = get().pendingRetryStableId;
-    if (retryId !== null) setActive({ pendingRetryStableId: null });
+    // Target session: an explicit pin (navigate-first background POST) overrides
+    // the visible conversation, so a send whose session was created while the
+    // user moved to another chat still lands on the right one, not the one on
+    // screen. `pinnedSetter` routes every write for this send there.
+    const pinnedId = opts?.pinnedConversationId ?? null;
+    const pinnedSetter: typeof setActive = pinnedId === null ? setActive : setterFor(pinnedId);
+    const retryId =
+      pinnedId === null
+        ? get().pendingRetryStableId
+        : (setterForState(pinnedId)?.pendingRetryStableId ?? null);
+    if (retryId !== null) pinnedSetter({ pendingRetryStableId: null });
     const stableId = opts?.stableId ?? retryId ?? randomUUID().replace(/-/g, "");
     // Sending while a response is already streaming is allowed — the
     // session API queues item-typed events and the server delivers them
     // into the running task's inbox. Keep `activeResponse` untouched in
     // that case so the in-flight bubble keeps its "streaming" lifecycle
     // until its own `response.completed` arrives.
-    const alreadyStreaming = get().status === "streaming";
+    //
+    // `reusePendingTempId` is the navigate-first first turn: the entry was
+    // pre-set to "streaming" by `beginProvisionalConversation` (for the create-window
+    // shimmer) but has no `sendLatchedAt`. Treat it as NOT-already-streaming so
+    // this send arms the latch and owns the failure-settle — otherwise a failed
+    // first turn would strand the conversation in "streaming" with no watchdog.
+    const alreadyStreaming =
+      opts?.reusePendingTempId != null
+        ? false
+        : pinnedId === null
+          ? get().status === "streaming"
+          : setterForState(pinnedId)?.status === "streaming";
     if (!alreadyStreaming) {
       // Latch on the SAME entry as `status`, in one patch, so they can't
       // diverge — a new chat buffers both on root and `adoptPreSessionState`
       // moves them onto the entry together.
-      setActive({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() });
+      pinnedSetter({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() });
     }
 
     // Push to `pendingUserMessages` BEFORE the POST so the bubble
@@ -1646,8 +1872,16 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // response (separate TCP connections; either can resolve first).
     // FIFO promotion in the consumed handler matches this pending
     // entry to the eventual server item id.
-    pendingSeq += 1;
-    const tempId = `pend_${pendingSeq}`;
+    // Reuse a bubble already on the entry (navigate-first flow) rather than
+    // mint a new one, so the message the user has already seen isn't duplicated.
+    const reuseTempId = opts?.reusePendingTempId ?? null;
+    let tempId: string;
+    if (reuseTempId !== null) {
+      tempId = reuseTempId;
+    } else {
+      pendingSeq += 1;
+      tempId = `pend_${pendingSeq}`;
+    }
     const pendingFileBlocks: MessageContentBlock[] = (files ?? []).map((file) => {
       const filename = file.name || "image.png";
       // Key the placeholder id on the File's stable identity, not its name:
@@ -1665,30 +1899,33 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       ...(text.trim() ? [{ type: "input_text" as const, text }] : []),
     ];
     const selfAuthor = getCurrentAuthorId();
-    setActive((s) => ({
-      pendingUserMessages: [
-        ...s.pendingUserMessages,
-        {
-          tempId,
-          content,
-          createdAtS: Math.floor(Date.now() / 1000),
-          ...(selfAuthor !== null ? { author: selfAuthor } : {}),
-        },
-      ],
-      // A new turn does NOT supersede the background-shell tally: shells
-      // launched in an earlier turn keep running across the turn boundary, so
-      // the composer pill must stay lit alongside the "Working…" shimmer rather
-      // than blink off the moment the user sends. The count is sticky (see the
-      // `session_status` handler) and the next Stop hook re-reports it
-      // authoritatively. Only the parked-dialog reason clears — a fresh send is
-      // not parked on a dialog.
-      blockedOn: null,
-    }));
+    if (reuseTempId === null) {
+      pinnedSetter((s) => ({
+        pendingUserMessages: [
+          ...s.pendingUserMessages,
+          {
+            tempId,
+            content,
+            createdAtS: Math.floor(Date.now() / 1000),
+            ...(selfAuthor !== null ? { author: selfAuthor } : {}),
+          },
+        ],
+        // A new turn does NOT supersede the background-shell tally: shells
+        // launched in an earlier turn keep running across the turn boundary, so
+        // the composer pill must stay lit alongside the "Working…" shimmer rather
+        // than blink off the moment the user sends. The count is sticky (see the
+        // `session_status` handler) and the next Stop hook re-reports it
+        // authoritatively. Only the parked-dialog reason clears — a fresh send is
+        // not parked on a dialog.
+        blockedOn: null,
+      }));
+    }
 
     // Pin the destination before joining the send chain: a stalled prior
     // send can delay this POST past a session switch, and resolving the
     // target afterward would leak the message into the now-active session.
-    const submitConversationId = get().conversationId;
+    // An explicit pin (navigate-first background POST) wins over the visible id.
+    const submitConversationId = pinnedId ?? get().conversationId;
 
     // Take our place in THIS conversation's send chain: wait for its prior
     // send's network work, then hand off to the next via `releaseSend` in the
@@ -1780,7 +2017,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         }));
       }
       // Note: native-terminal messages return a `pending_id`, but the
-      // optimistic bubble deliberately keeps its client temp id as its
+      // optimistic bubble deliberately keeps its pending message key as its
       // stable React key — swapping it to the server id mid-send forces
       // a bubble remount (a visible flink). The eventual
       // `session.input.consumed` clears this bubble by FIFO order (its
@@ -1806,12 +2043,16 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       }
       // Settle the conversation this send targeted, wherever the user is now:
       // its bubble must roll back and its status must not stay "streaming"
-      // forever. When the throw came from session setup itself
-      // (`postedSessionId` never resolved) there is no target conversation, so
-      // it belongs to the active one — the landing composer's own failure.
-      const failSet = postedSessionId === null ? setActive : setterFor(postedSessionId);
+      // forever. Target `postedSessionId ?? submitConversationId` (mirroring the
+      // draft restore above): a bind failure throws before `postedSessionId` is
+      // assigned, but the pin/submit id already names the session — so a failed
+      // navigate-first first turn settles the REAL new session, not whatever
+      // chat the user has since switched to. Null id (the landing composer's own
+      // failure) falls back to the active conversation.
+      const failTarget = postedSessionId ?? submitConversationId;
+      const failSet = failTarget === null ? setActive : setterFor(failTarget);
       const failGet = (): ChatState =>
-        postedSessionId === null ? get() : (setterForState(postedSessionId) ?? get());
+        failTarget === null ? get() : (setterForState(failTarget) ?? get());
       // Roll back the optimistic bubble — no server idle will fire.
       failSet((s) => ({
         pendingUserMessages: s.pendingUserMessages.filter((p) => p.tempId !== tempId),
@@ -1854,12 +2095,19 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     if (!agentId) {
       throw new Error("chatStore.sendSlashCommand: no agentId");
     }
+    // See `send`: an explicit pin (navigate-first background dispatch) targets
+    // the just-created session even after the user moved to another chat.
+    const pinnedId = opts?.pinnedConversationId ?? null;
+    const pinnedSetter: typeof setActive = pinnedId === null ? setActive : setterFor(pinnedId);
     // Mirror `send`'s lifecycle scaffolding (streaming flag + send-chain
     // serialization) so a skill invocation behaves like any other turn.
-    const alreadyStreaming = get().status === "streaming";
+    const alreadyStreaming =
+      pinnedId === null
+        ? get().status === "streaming"
+        : setterForState(pinnedId)?.status === "streaming";
     if (!alreadyStreaming) {
       // See `send`: latch and status on one entry, in one patch.
-      setActive({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() });
+      pinnedSetter({ status: "streaming", activeResponse: null, sendLatchedAt: Date.now() });
     }
     // Optimistic echo of the typed command, mirroring `send`. Without it
     // the chat shows nothing until the server's `slash_command` receipt
@@ -1869,25 +2117,28 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // pump's `slash_command` case pops this FIFO entry the moment the
     // receipt (and its synthesized `${id}:user` echo block) lands, so the
     // optimistic bubble swaps for the committed one in the same flush.
-    pendingSeq += 1;
-    const tempId = `pend_${pendingSeq}`;
+    const reuseTempId = opts?.reusePendingTempId ?? null;
+    if (reuseTempId === null) pendingSeq += 1;
+    const tempId = reuseTempId ?? `pend_${pendingSeq}`;
     const commandText = args ? `/${name} ${args}` : `/${name}`;
     const selfAuthor = getCurrentAuthorId();
-    setActive((s) => ({
-      pendingUserMessages: [
-        ...s.pendingUserMessages,
-        {
-          tempId,
-          content: [{ type: "input_text" as const, text: commandText }],
-          createdAtS: Math.floor(Date.now() / 1000),
-          ...(selfAuthor !== null ? { author: selfAuthor } : {}),
-        },
-      ],
-    }));
+    if (reuseTempId === null) {
+      pinnedSetter((s) => ({
+        pendingUserMessages: [
+          ...s.pendingUserMessages,
+          {
+            tempId,
+            content: [{ type: "input_text" as const, text: commandText }],
+            createdAtS: Math.floor(Date.now() / 1000),
+            ...(selfAuthor !== null ? { author: selfAuthor } : {}),
+          },
+        ],
+      }));
+    }
 
     // Pin the destination at submit time — see `send` above for why a late
     // resolve mis-routes to the session the user has since switched to.
-    const submitConversationId = get().conversationId;
+    const submitConversationId = pinnedId ?? get().conversationId;
 
     const { waitForPrior, rekey, releaseSend } = enterSendChain(submitConversationId);
 
@@ -1942,10 +2193,12 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       const message = err instanceof Error ? err.message : String(err);
       // Settle the conversation this command targeted, wherever the user is
       // now: its echo must roll back and its status must not stay "streaming"
-      // forever. A throw from session setup itself (`postedSessionId` never
-      // resolved) has no target conversation, so it belongs to the active one —
-      // the landing composer's own failure. Mirrors `send`'s catch.
-      const failSet = postedSessionId === null ? setActive : setterFor(postedSessionId);
+      // forever. Target `postedSessionId ?? submitConversationId` (mirrors
+      // `send`'s catch): a bind failure throws before `postedSessionId` is set,
+      // but the pin/submit id already names the session, so a failed pinned
+      // command settles the real session, not the visible one. Null → active.
+      const failTarget = postedSessionId ?? submitConversationId;
+      const failSet = failTarget === null ? setActive : setterFor(failTarget);
       // Roll back the optimistic echo — no receipt will reconcile it.
       failSet((s) => ({
         pendingUserMessages: s.pendingUserMessages.filter((p) => p.tempId !== tempId),
@@ -2043,6 +2296,21 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // Landing route: nothing to project, so reset the mirrored fields to a
       // clean slate rather than leaving the last conversation painted.
       rootSetState(createInitialConversationState() as Parameters<typeof rootSetState>[0]);
+      return;
+    }
+
+    // A provisional conversation shown while `createSession` is in flight has
+    // no server session to bind. Its registry entry already holds the optimistic
+    // first-message bubble, so paint it without issuing a request.
+    if (isProvisionalConversationId(conversationId)) {
+      if (conversationRegistry.peek(conversationId) === undefined) {
+        conversationRegistry.setActive(null);
+        rootSetState({ conversationId: null } as Parameters<typeof rootSetState>[0]);
+        rootSetState(createInitialConversationState() as Parameters<typeof rootSetState>[0]);
+        return;
+      }
+      conversationRegistry.acquire(conversationId);
+      mirrorActiveEntry();
       return;
     }
 
@@ -5061,7 +5329,7 @@ function committedContentFor(
  *
  * @param itemId - Server-assigned conversation item id (for dedup + nav).
  * @param content - The committed message content.
- * @param stableKey - The optimistic bubble's temp id when this block is
+ * @param stableKey - The optimistic bubble's pending message key when this block is
  *   promoted from one, so the rendered bubble keeps the same React key
  *   across the swap (no remount/flink). Omit for foreign/TUI messages
  *   that had no optimistic predecessor — they mount fresh.
@@ -5819,7 +6087,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
                 ...s.pendingUserMessages.slice(0, idx),
                 ...s.pendingUserMessages.slice(idx + 1),
               ],
-              // stableKey = the optimistic bubble's temp id → the
+              // stableKey = the optimistic bubble's pending message key → the
               // promoted bubble keeps the same React key (no remount).
               blocks: [
                 ...s.blocks,
@@ -5853,7 +6121,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
           if (content === null) return {};
           return {
             pendingUserMessages: s.pendingUserMessages.slice(1),
-            // stableKey = the popped optimistic bubble's temp id so the
+            // stableKey = the popped optimistic bubble's pending message key so the
             // promoted bubble keeps the same React key (no remount/flink).
             blocks: [
               ...s.blocks,

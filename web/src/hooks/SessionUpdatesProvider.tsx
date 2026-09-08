@@ -34,6 +34,7 @@ import {
 } from "@/lib/sessionListCache";
 import { isModalHostResolved, resolveModalHost } from "@/lib/sessionHost";
 import { type SessionUpdatesFrame, sessionUpdatesSocket } from "@/lib/sessionUpdatesSocket";
+import { isProvisionalConversationId } from "@/lib/provisionalConversationId";
 
 // Coalesce bursts of structural changes / watch-set recomputes into one
 // action. 250 ms is short enough to feel live, long enough to batch the
@@ -218,7 +219,7 @@ export function SessionUpdatesProvider({ children }: { children: ReactNode }) {
         }
       }
     }
-    sessionUpdatesSocket.setWatched(ids);
+    sessionUpdatesSocket.setWatched(ids.filter((id) => !isProvisionalConversationId(id)));
   }, [queryClient]);
 
   // Navigating to an off-sidebar child changes the open session without

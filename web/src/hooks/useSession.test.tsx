@@ -11,6 +11,10 @@ vi.mock("@/lib/sessionsApi", async (importOriginal) => ({
 }));
 
 import { getSessionSlim } from "@/lib/sessionsApi";
+import {
+  clearProvisionalConversationIds,
+  registerProvisionalConversationId,
+} from "@/lib/provisionalConversationId";
 import type { Session } from "@/lib/types";
 import { useSession } from "./useSession";
 
@@ -52,6 +56,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  clearProvisionalConversationIds();
   vi.useRealTimers();
 });
 
@@ -62,6 +67,16 @@ describe("useSession — refresh_state", () => {
     await flush();
     expect(getSessionSlimMock).toHaveBeenCalledTimes(1);
     expect(refreshFlags()).toEqual([true]);
+  });
+
+  it("never fetches for a provisional id (no /v1/sessions/<provisional>)", async () => {
+    registerProvisionalConversationId("0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d");
+    const { Wrapper } = harness();
+    renderHook(() => useSession("0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d"), { wrapper: Wrapper });
+    await flush();
+    // The navigate-first invariant: a provisional id has no server session, so the
+    // query is disabled by construction — no request is issued.
+    expect(getSessionSlimMock).not.toHaveBeenCalled();
   });
 
   // Switching the session's agent invalidates this query. The refetch has to
