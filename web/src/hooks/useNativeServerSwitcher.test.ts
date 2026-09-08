@@ -1,6 +1,11 @@
+import { renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isSurfaceFrontmost, serverSwitcherHiddenForSurface } from "./useNativeServerSwitcher";
+import {
+  isSurfaceFrontmost,
+  serverSwitcherHiddenForSurface,
+  useNativeServerSwitcherForMainSurface,
+} from "./useNativeServerSwitcher";
 
 // The native Liquid Glass Chat/Terminal bar floats over the web view, so DOM
 // stacking can't hide it — its visibility rides on `isSurfaceFrontmost`. A
@@ -136,5 +141,69 @@ describe("serverSwitcherHiddenForSurface", () => {
     setIOSBridge(false);
     expect(serverSwitcherHiddenForSurface(true)).toBe(false);
     expect(serverSwitcherHiddenForSurface(false)).toBe(true);
+  });
+});
+
+// The Android shell floats the same kind of native pill as iOS (its top-center
+// server switcher, shell-default-visible), so the main-surface hook must drive
+// it too — the old iOS-only gate left Android's pill floating over the chat
+// header's Chat/Terminal toggle, with no hide push ever sent.
+describe("useNativeServerSwitcherForMainSurface", () => {
+  function installBridge(kind: "ios" | "android" | "electron"): boolean[] {
+    const pushes: boolean[] = [];
+    (window as unknown as Record<string, unknown>).omnigentNative = {
+      kind,
+      setBadgeCount: () => {},
+      notify: () => Promise.resolve(false),
+      setServerSwitcherHidden: (hidden: boolean) => pushes.push(hidden),
+      getServerPicker: () => Promise.resolve(null),
+      switchServer: () => Promise.resolve(),
+      openServerSetup: () => {},
+    };
+    return pushes;
+  }
+
+  function stubAnimationFrame(): void {
+    // jsdom's rAF timing is irrelevant here — run the frontmost probe inline.
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  }
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).omnigentNative;
+  });
+
+  it("asks the Android shell to keep its pill hidden over the main surface", () => {
+    stubAnimationFrame();
+    const pushes = installBridge("android");
+
+    const { unmount } = renderHook(() => useNativeServerSwitcherForMainSurface(null, true));
+    expect(pushes.length).toBeGreaterThan(0);
+    expect(pushes.every(Boolean)).toBe(true);
+
+    unmount();
+    expect(pushes.at(-1)).toBe(true);
+  });
+
+  it("still drives the iOS shell's pill the same way", () => {
+    stubAnimationFrame();
+    const pushes = installBridge("ios");
+
+    const { unmount } = renderHook(() => useNativeServerSwitcherForMainSurface(null, true));
+    unmount();
+    expect(pushes.length).toBeGreaterThan(0);
+    expect(pushes.every(Boolean)).toBe(true);
+  });
+
+  it("never drives a shell without a floating pill", () => {
+    stubAnimationFrame();
+    const pushes = installBridge("electron");
+
+    const { unmount } = renderHook(() => useNativeServerSwitcherForMainSurface(null, true));
+    unmount();
+    expect(pushes).toEqual([]);
   });
 });

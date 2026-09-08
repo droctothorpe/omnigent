@@ -760,13 +760,20 @@ aside[aria-label="Workspace"][data-maximized] {
     scroll-margin-top: calc(88px + var(--omnigent-inset-top));
   }
 
-  /* Android: the floating server-switcher pill sits at the top. Start the
-     fade at the pill bottom (safe-top + margin + height) so content scrolls
-     smoothly into view below it. */
+  /* Android: while the floating server-switcher pill is visible
+     (--omnigent-top-bar-visible: 1), start the fade at the pill bottom
+     (safe-top + margin + height) so content scrolls smoothly into view below
+     it. Once the web asks the shell to hide the pill (0 — shells hosting the
+     sidebar server picker), fade under the chat header instead — the iOS
+     geometry above. */
   [data-android-native] .chat-scroll-fade {
     --fade-start: calc(
-      var(--omnigent-safe-top) + var(--omnigent-android-switcher-margin) +
-        var(--omnigent-android-switcher-height)
+      var(--omnigent-top-bar-visible) *
+        (
+          var(--omnigent-safe-top) + var(--omnigent-android-switcher-margin) +
+            var(--omnigent-android-switcher-height)
+        ) +
+        (1 - var(--omnigent-top-bar-visible)) * (48px + var(--omnigent-inset-top))
     );
     mask-image: linear-gradient(
       to bottom,

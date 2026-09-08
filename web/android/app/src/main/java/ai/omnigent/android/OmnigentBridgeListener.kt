@@ -23,6 +23,14 @@ import org.json.JSONObject
 class OmnigentBridgeListener(
     private val notifications: NativeNotificationManager,
     private val blobSaver: BlobSaver,
+    /** Drive the floating server-switcher pill's visibility from the web. */
+    private val onSetServerSwitcherHidden: (hidden: Boolean) -> Unit = {},
+    /** Answer a getServerPicker() request with an emit of the picker payload. */
+    private val onRequestServerPicker: () -> Unit = {},
+    /** Switch to a picker-offered server URL. */
+    private val onSwitchServer: (url: String) -> Unit = {},
+    /** Return to the shell's "connect to server" setup screen. */
+    private val onOpenServerSetup: () -> Unit = {},
 ) : WebViewCompat.WebMessageListener {
     override fun onPostMessage(
         view: WebView,
@@ -93,6 +101,24 @@ class OmnigentBridgeListener(
                     mimeType = json.optString("mimeType").ifEmpty { "application/octet-stream" },
                     suggestedName = json.optString("name"),
                 )
+            }
+
+            "setServerSwitcherHidden" -> {
+                // A malformed/missing flag hides rather than shows (as on iOS),
+                // so a bad message can't float the pill over the web's chrome.
+                onSetServerSwitcherHidden(json.optBoolean("hidden", true))
+            }
+
+            "requestServerPicker" -> {
+                onRequestServerPicker()
+            }
+
+            "switchServer" -> {
+                onSwitchServer(json.optString("url").ifEmpty { return })
+            }
+
+            "openServerSetup" -> {
+                onOpenServerSetup()
             }
         }
     }

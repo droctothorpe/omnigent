@@ -36,6 +36,8 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * The single WebView host. Mirrors the iOS `WebShellView` + `OmnigentWebView`:
@@ -68,9 +70,12 @@ class MainActivity : AppCompatActivity() {
     private var rendererCrashes = 0
     private var lastRendererCrashAt = 0L
 
-    // Floating server switcher — mirrors the iOS `ServerSwitcher`. Always
-    // visible so it's always available as a recovery path (backward compatible
-    // with older web builds). Theme-aware via brand colors (light/dark XML).
+    // Floating server switcher — mirrors the iOS `ServerSwitcher`. Visible by
+    // default so it stays available as a recovery path (and with older web
+    // builds that never drive it); a web build hosting the sidebar server
+    // picker asks it hidden over the main surface via the bridge's
+    // setServerSwitcherHidden, so it can't float over the chat header's
+    // controls. Theme-aware via brand colors (light/dark XML).
     private lateinit var switchButton: View
 
     // WebChromeClient affordances that need Activity-scoped result launchers.
@@ -341,6 +346,9 @@ class MainActivity : AppCompatActivity() {
         // A rebuilt view may miss the first inset dispatch; request one so the
         // IME resize margin isn't stale if the keyboard was up at death.
         ViewCompat.requestApplyInsets(webView)
+        // The dead page's hide request must not outlive it: the pill is the
+        // recovery affordance, so it comes back until the fresh page decides.
+        switchButton.visibility = View.VISIBLE
 
         if (loopExhausted) {
             // Offline page (no network) so it can't re-trigger the crash.
@@ -429,6 +437,10 @@ class MainActivity : AppCompatActivity() {
                 OmnigentBridgeListener(
                     notifications = notifications,
                     blobSaver = blobSaver,
+                    onSetServerSwitcherHidden = ::setServerSwitcherHidden,
+                    onRequestServerPicker = ::pushServerPicker,
+                    onSwitchServer = ::switchServerFromWeb,
+                    onOpenServerSetup = ::openServerSetup,
                 ),
             )
         } catch (_: IllegalArgumentException) {
@@ -484,6 +496,10 @@ class MainActivity : AppCompatActivity() {
         // launches a flow, so re-entrant redirects can't burn the retry budget
         // without ever relaunching and suppress a legitimate later retry.
         if (!loginManager.start(this, origin, ::onSessionToken)) return
+        // The WebView is leaving the SPA (which may have hidden the pill); keep
+        // the switcher reachable while parked on login/error pages. A completed
+        // login reloads the SPA, which re-asserts its own visibility.
+        switchButton.visibility = View.VISIBLE
         loginAttempts++
         // A re-login (session expired mid-use) bounces through the IdP again,
         // leaving a stopped off-origin entry + stale pre-expiry pages on the back
@@ -651,6 +667,9 @@ class MainActivity : AppCompatActivity() {
         historyCleared = false
         loginAttempts = 0
         (switchButton as? TextView)?.text = hostLabelOf(serverUrl)
+        // Shell-default-visible per document: the new server's web build may be
+        // too old to drive the pill, so it shows until that build asks otherwise.
+        switchButton.visibility = View.VISIBLE
         installBridge()
         webView.loadUrl(serverUrl)
     }
@@ -667,6 +686,57 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
             // Not registered (feature unsupported, or already removed) — no-op.
         }
+    }
+
+    /**
+     * Drive the floating pill's visibility from the web (the bridge's
+     * `setServerSwitcherHidden`). The pill is shell-default-visible; a web
+     * build hosting the sidebar server picker keeps it hidden over the main
+     * surface so it can't float over the chat header's Chat/Terminal pill.
+     * Runs on the UI thread (addWebMessageListener's default executor).
+     */
+    internal fun setServerSwitcherHidden(hidden: Boolean) {
+        switchButton.visibility = if (hidden) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * Answer the web's `requestServerPicker` with the payload the SPA renders
+     * as the sidebar server picker — the same shape the iOS shell emits: the
+     * pinned origin, organization presets, and recents the presets don't cover.
+     */
+    internal fun pushServerPicker() {
+        val origin = pinnedOrigin ?: return
+        val store = ServerStore(this)
+        val payload =
+            JSONObject()
+                .put("currentOrigin", origin)
+                .put("managedServers", JSONArray(store.managed.serverUrls))
+                .put(
+                    "recentServers",
+                    JSONArray(store.recentServers().filterNot(store.managed::includes)),
+                )
+        webView.evaluateJavascript(
+            "window.__omnigentNativeEmitServerPicker && " +
+                "window.__omnigentNativeEmitServerPicker($payload);",
+            null,
+        )
+    }
+
+    /**
+     * Switch only to a server the picker itself offered — the same allow-list
+     * gate the iOS and desktop shells apply, so page script can't steer the
+     * shell to an arbitrary origin through the bridge.
+     */
+    internal fun switchServerFromWeb(url: String) {
+        val store = ServerStore(this)
+        if (url !in store.offeredServers()) return
+        store.connect(url)
+        originOf(url)?.let { reloadWithNewServer(url, it) }
+    }
+
+    /** Back the bridge's `openServerSetup` — the picker's "Connect to new server…". */
+    internal fun openServerSetup() {
+        startActivity(Intent(this, ConnectActivity::class.java))
     }
 
     /**

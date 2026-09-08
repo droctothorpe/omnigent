@@ -104,6 +104,28 @@ object NativeBridgeScript {
             },
           });
 
+          // Server-picker request/response, mirroring the iOS bridge: each
+          // getServerPicker() call parks a resolver here and posts a request;
+          // native answers with __omnigentNativeEmitServerPicker, which
+          // resolves (and drains) every waiter with a validated payload.
+          const serverPickerWaiters = new Set();
+          Object.defineProperty(window, "__omnigentNativeEmitServerPicker", {
+            configurable: false, enumerable: false, writable: false,
+            value(payload) {
+              if (!payload || typeof payload !== "object") return;
+              if (typeof payload.currentOrigin !== "string" || !payload.currentOrigin) return;
+              const cleanList = (value) =>
+                Array.isArray(value) ? value.filter((entry) => typeof entry === "string") : [];
+              const info = {
+                currentOrigin: payload.currentOrigin,
+                managedServers: cleanList(payload.managedServers),
+                recentServers: cleanList(payload.recentServers),
+              };
+              for (const resolve of serverPickerWaiters) { try { resolve(info); } catch (_) {} }
+              serverPickerWaiters.clear();
+            },
+          });
+
           const insetCallbacks = new Set();
           // Cache the last footprint so a subscriber that registers AFTER native
           // first emitted (the React app mounts later than document-start) still
@@ -249,6 +271,25 @@ object NativeBridgeScript {
               insetCallbacks.add(callback);
               if (lastInsets) { try { callback(lastInsets); } catch (_) {} }
               return () => insetCallbacks.delete(callback);
+            },
+            setServerSwitcherHidden(hidden) {
+              post({ method: "setServerSwitcherHidden", hidden: hidden === true });
+            },
+            getServerPicker() {
+              // Always fetch fresh rather than caching: the picker re-reads on
+              // every menu open so a managed-config change appears without a
+              // reload. Native answers each request with an emit, resolving
+              // every waiter.
+              const pending = new Promise((resolve) => { serverPickerWaiters.add(resolve); });
+              post({ method: "requestServerPicker" });
+              return pending;
+            },
+            switchServer(url) {
+              if (typeof url === "string") post({ method: "switchServer", url });
+              return Promise.resolve();
+            },
+            openServerSetup() {
+              post({ method: "openServerSetup" });
             },
           });
         })();

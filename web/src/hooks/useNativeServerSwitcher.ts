@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import {
-  isIOSShell,
+  hasNativeServerSwitcher,
   setNativeServerSwitcherHidden,
   supportsNativeServerPicker,
 } from "@/lib/nativeBridge";
@@ -9,7 +9,8 @@ import {
 /**
  * Tracks whether `surface` is the frontmost element at its own centre — i.e.
  * not covered by a drawer / sidebar / sheet. Returns false when inactive,
- * outside the iOS shell, or while obscured. Re-checks on the layout signals a
+ * outside the shells that float a native server switcher (iOS/Android), or
+ * while obscured. Re-checks on the layout signals a
  * drawer transition emits (mutations, transitions, viewport changes). Both the
  * native server switcher and the native Chat/Terminal bar hide off this signal
  * so neither floats over an opened panel.
@@ -17,7 +18,7 @@ import {
 export function useSurfaceFrontmost(surface: HTMLElement | null, active: boolean): boolean {
   const [frontmost, setFrontmost] = useState(false);
   useEffect(() => {
-    if (!isIOSShell() || !active) {
+    if (!hasNativeServerSwitcher() || !active) {
       setFrontmost(false);
       return;
     }
@@ -72,8 +73,8 @@ export function useSurfaceFrontmost(surface: HTMLElement | null, active: boolean
 }
 
 /**
- * Whether the iOS shell's floating server-switcher pill should be hidden given
- * the main surface's frontmost state.
+ * Whether a shell's floating server-switcher pill should be hidden given the
+ * main surface's frontmost state.
  *
  * On shells that host the in-sidebar server picker (the bridge exposes
  * `getServerPicker`), server selection lives in the navigation drawer — the
@@ -86,15 +87,16 @@ export function serverSwitcherHiddenForSurface(frontmost: boolean): boolean {
 }
 
 /**
- * Drive the iOS shell's native server switcher overlay. On shells with the
+ * Drive a native shell's floating server-switcher overlay. On shells with the
  * in-sidebar server picker the overlay stays hidden over the main surface
  * (selection lives in the drawer); on older shells it shows only while
  * `surface` is the frontmost element on screen and `active` is true — hiding
  * whenever the sidebar (or any other overlay) covers the main surface, and
  * whenever the surface is unmounted.
  *
- * No-ops outside the iOS shell. Used by both the in-session main surface
- * (ChatPage) and the new-session landing screen (NewChatDialog).
+ * No-ops outside the shells that float a server switcher (iOS/Android). Used
+ * by both the in-session main surface (ChatPage) and the new-session landing
+ * screen (NewChatDialog).
  */
 export function useNativeServerSwitcherForMainSurface(
   surface: HTMLElement | null,
@@ -102,11 +104,11 @@ export function useNativeServerSwitcherForMainSurface(
 ) {
   const frontmost = useSurfaceFrontmost(surface, active);
   useEffect(() => {
-    if (!isIOSShell()) return;
+    if (!hasNativeServerSwitcher()) return;
     setNativeServerSwitcherHidden(serverSwitcherHiddenForSurface(frontmost));
   }, [frontmost]);
   useEffect(() => {
-    if (!isIOSShell()) return;
+    if (!hasNativeServerSwitcher()) return;
     return () => setNativeServerSwitcherHidden(true);
   }, []);
 }

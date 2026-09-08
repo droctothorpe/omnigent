@@ -4,11 +4,13 @@ import android.content.Context
 import android.content.RestrictionsManager
 import android.content.res.Configuration
 import android.os.Bundle
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.core.app.ApplicationProvider
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
@@ -251,4 +253,92 @@ class MainActivityTest {
             .getDeclaredField("webView")
             .apply { isAccessible = true }
             .get(this) as WebView
+
+    private fun MainActivity.switchButton(): View =
+        MainActivity::class
+            .java
+            .getDeclaredField("switchButton")
+            .apply { isAccessible = true }
+            .get(this) as View
+
+    @Test
+    fun `the web drives the floating server switcher's visibility`() {
+        ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+
+        // Shell-default-visible: available before any web build drives it.
+        assertEquals(View.VISIBLE, activity.switchButton().visibility)
+
+        activity.setServerSwitcherHidden(true)
+        assertEquals(View.GONE, activity.switchButton().visibility)
+
+        activity.setServerSwitcherHidden(false)
+        assertEquals(View.VISIBLE, activity.switchButton().visibility)
+    }
+
+    @Test
+    fun `a bridge switch to an offered server reloads it and restores the pill`() {
+        val store = ServerStore(ApplicationProvider.getApplicationContext<Context>())
+        store.connect("https://a.example.com")
+        store.connect("https://b.example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        activity.setServerSwitcherHidden(true)
+
+        activity.switchServerFromWeb("https://a.example.com")
+
+        assertEquals("https://a.example.com", shadowOf(activity.webView()).lastLoadedUrl)
+        assertEquals("https://a.example.com", store.currentServerUrl())
+        // The new server's web build may be too old to drive the pill — it
+        // must come back as the recovery affordance until that build decides.
+        assertEquals(View.VISIBLE, activity.switchButton().visibility)
+    }
+
+    @Test
+    fun `a bridge switch outside the offered servers is ignored`() {
+        val store = ServerStore(ApplicationProvider.getApplicationContext<Context>())
+        store.connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+
+        activity.switchServerFromWeb("https://evil.example.com")
+
+        assertEquals("https://example.com", shadowOf(activity.webView()).lastLoadedUrl)
+        assertEquals("https://example.com", store.currentServerUrl())
+    }
+
+    @Test
+    fun `renderer recovery restores a hidden pill`() {
+        ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        activity.setServerSwitcherHidden(true)
+        val dead = activity.webView()
+
+        dead.webViewClient.onRenderProcessGone(dead, rendererGone())
+
+        // The dead page asked for the hide; its replacement (possibly the
+        // recovery page) must get the pill back as the recovery affordance.
+        assertEquals(View.VISIBLE, activity.switchButton().visibility)
+    }
+
+    @Test
+    fun `requestServerPicker answers with the origin plus recents`() {
+        val store = ServerStore(ApplicationProvider.getApplicationContext<Context>())
+        store.connect("https://a.example.com")
+        store.connect("https://b.example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+
+        activity.pushServerPicker()
+
+        val js = shadowOf(activity.webView()).lastEvaluatedJavascript
+        assertTrue(js.contains("__omnigentNativeEmitServerPicker"))
+        // Parse the emitted payload out of the guarded call:
+        // `window.__omnigentNativeEmitServerPicker && window.__omnigentNativeEmitServerPicker({...});`
+        val payload = JSONObject(js.substringAfter("(").substringBeforeLast(")"))
+        assertEquals("https://b.example.com", payload.getString("currentOrigin"))
+        assertEquals(0, payload.getJSONArray("managedServers").length())
+        val recents = payload.getJSONArray("recentServers")
+        assertEquals(
+            listOf("https://b.example.com", "https://a.example.com"),
+            (0 until recents.length()).map(recents::getString),
+        )
+    }
 }

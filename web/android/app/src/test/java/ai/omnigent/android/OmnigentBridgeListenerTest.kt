@@ -132,4 +132,66 @@ class OmnigentBridgeListenerTest {
         listener.handle("""{"count":5}""")
         assertEquals(0, shadow.allNotifications.size)
     }
+
+    /** A listener whose server-switcher callbacks record into the given sinks. */
+    private fun serverListener(
+        hiddenCalls: MutableList<Boolean> = mutableListOf(),
+        pickerRequests: MutableList<Unit> = mutableListOf(),
+        switchCalls: MutableList<String> = mutableListOf(),
+        setupCalls: MutableList<Unit> = mutableListOf(),
+    ): OmnigentBridgeListener =
+        OmnigentBridgeListener(
+            notifications = NativeNotificationManager(context),
+            blobSaver = BlobSaver(context),
+            onSetServerSwitcherHidden = { hiddenCalls.add(it) },
+            onRequestServerPicker = { pickerRequests.add(Unit) },
+            onSwitchServer = { switchCalls.add(it) },
+            onOpenServerSetup = { setupCalls.add(Unit) },
+        )
+
+    @Test
+    fun `setServerSwitcherHidden dispatches the parsed flag`() {
+        val hiddenCalls = mutableListOf<Boolean>()
+        val listener = serverListener(hiddenCalls = hiddenCalls)
+
+        listener.handle("""{"method":"setServerSwitcherHidden","hidden":true}""")
+        listener.handle("""{"method":"setServerSwitcherHidden","hidden":false}""")
+
+        assertEquals(listOf(true, false), hiddenCalls)
+    }
+
+    @Test
+    fun `setServerSwitcherHidden defaults a missing or malformed flag to hidden`() {
+        val hiddenCalls = mutableListOf<Boolean>()
+        val listener = serverListener(hiddenCalls = hiddenCalls)
+
+        listener.handle("""{"method":"setServerSwitcherHidden"}""")
+        listener.handle("""{"method":"setServerSwitcherHidden","hidden":"nope"}""")
+
+        assertEquals(listOf(true, true), hiddenCalls)
+    }
+
+    @Test
+    fun `requestServerPicker and openServerSetup dispatch to their callbacks`() {
+        val pickerRequests = mutableListOf<Unit>()
+        val setupCalls = mutableListOf<Unit>()
+        val listener = serverListener(pickerRequests = pickerRequests, setupCalls = setupCalls)
+
+        listener.handle("""{"method":"requestServerPicker"}""")
+        listener.handle("""{"method":"openServerSetup"}""")
+
+        assertEquals(1, pickerRequests.size)
+        assertEquals(1, setupCalls.size)
+    }
+
+    @Test
+    fun `switchServer forwards the url and drops a missing one`() {
+        val switchCalls = mutableListOf<String>()
+        val listener = serverListener(switchCalls = switchCalls)
+
+        listener.handle("""{"method":"switchServer","url":"https://alt.example.test/"}""")
+        listener.handle("""{"method":"switchServer"}""")
+
+        assertEquals(listOf("https://alt.example.test/"), switchCalls)
+    }
 }

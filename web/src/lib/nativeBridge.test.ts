@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getServerPicker,
+  hasNativeServerSwitcher,
   isAndroidShell,
   isElectronShell,
   isIOSShell,
@@ -194,6 +195,31 @@ describe("isNativeShell / isElectronShell", () => {
     expect(isNativeShell()).toBe(false);
     delete (window as unknown as Record<string, unknown>).omnigentDesktop;
     delete (window as unknown as Record<string, unknown>).omnigentNative;
+  });
+});
+
+// Both mobile WebView shells float a native server-switcher pill over the web
+// surface, so both must be driven via setNativeServerSwitcherHidden — gating
+// the pushes to iOS alone is what left Android's pill floating over the chat
+// header's view-mode toggle.
+describe("hasNativeServerSwitcher", () => {
+  it("is false in a plain browser", () => {
+    expect(hasNativeServerSwitcher()).toBe(false);
+  });
+
+  it("is true on the iOS shell", () => {
+    setIOS(true);
+    expect(hasNativeServerSwitcher()).toBe(true);
+  });
+
+  it("is true on the Android shell", () => {
+    setAndroid(true);
+    expect(hasNativeServerSwitcher()).toBe(true);
+  });
+
+  it("is false on Electron, whose picker docks in the sidebar", () => {
+    setElectron(true);
+    expect(hasNativeServerSwitcher()).toBe(false);
   });
 });
 
