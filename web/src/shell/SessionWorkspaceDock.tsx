@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type RefObject } from "react";
 import { useChildSessions } from "@/hooks/useChildSessions";
 import { useConversations } from "@/hooks/useConversations";
+import { useGithubInfo } from "@/hooks/useGithub";
 import { useResizableInlinePanel } from "@/hooks/useResizableInlinePanel";
 import { useRootSessionId, useSession } from "@/hooks/useSession";
 import { terminalTabKey, useDeleteTerminal, useTerminals } from "@/hooks/useTerminals";
@@ -10,7 +11,7 @@ import {
 } from "@/hooks/useWorkspaceChangedFiles";
 import { readFilesPanelPreferences } from "@/lib/filesPanelPreferences";
 import { supportsBrowser } from "@/lib/nativeBridge";
-import { derivePermissionLevel } from "@/lib/permissionsApi";
+import { derivePermissionLevel, isEditorLevel } from "@/lib/permissionsApi";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
 import { CloseShellDialog } from "./CloseShellDialog";
 import type { ChangedSort } from "./FlatFileList";
@@ -67,14 +68,21 @@ export function SessionWorkspaceDock({
     conversationId,
     conversationsData !== undefined,
   );
+  const canBrowseWorkspace =
+    isEditorLevel(permissionLevel) || session?.shareWorkspaceFiles === true;
   const rootSessionId = useRootSessionId(
     conversationId,
     sessionLoading ? undefined : (session?.parentSessionId ?? null),
   );
   const { children: childSessions } = useChildSessions(rootSessionId);
-  const environmentQuery = useWorkspaceEnvironment(conversationId);
+  const environmentQuery = useWorkspaceEnvironment(conversationId, {
+    enabled: canBrowseWorkspace,
+  });
   const changedFilesQuery = useWorkspaceChangedFiles(conversationId);
-  const showFilesPanel = environmentQuery.data?.available !== false;
+  const showFilesPanel = canBrowseWorkspace && environmentQuery.data?.available !== false;
+  const githubInfoQuery = useGithubInfo(conversationId);
+  const showGithubTab = showFilesPanel && githubInfoQuery.data?.reason !== "not_a_git_repo";
+  const showBrowserTab = supportsBrowser();
   const changedCount = changedFilesQuery.data?.data.length ?? 0;
   const subagentsWorking = childSessions.filter((child) => child.busy).length;
   const agentCount = childSessions.length + 1;
@@ -109,10 +117,24 @@ export function SessionWorkspaceDock({
     dockRef.current?.style.setProperty(SESSION_WORKSPACE_BASIS_VAR, `${paneSizePct}%`);
   }, [dockRef, paneSizePct]);
 
+  const railTabsAvailable = useMemo(
+    () => ({
+      files: showFilesPanel,
+      changes: showFilesPanel,
+      github: showGithubTab,
+      subagents: true,
+      browser: showBrowserTab,
+    }),
+    [showBrowserTab, showFilesPanel, showGithubTab],
+  );
+
   useEffect(() => {
-    if (showFilesPanel || (rightRailTab !== "files" && rightRailTab !== "changes")) return;
-    setRightRailTab(supportsBrowser() ? "browser" : "subagents");
-  }, [rightRailTab, showFilesPanel]);
+    if (railTabsAvailable[rightRailTab]) return;
+    const next = (["files", "changes", "github", "subagents", "browser"] as const).find(
+      (tab) => railTabsAvailable[tab],
+    );
+    if (next) setRightRailTab(next);
+  }, [railTabsAvailable, rightRailTab]);
 
   const openFileViewer = useCallback((path: string) => {
     setOpenFiles((current) => (current.includes(path) ? current : [...current, path]));
@@ -197,7 +219,8 @@ export function SessionWorkspaceDock({
         rightRailTab={rightRailTab}
         onRightRailTabChange={changeRailTab}
         showFilesPanel={showFilesPanel}
-        showBrowserTab={supportsBrowser()}
+        showGithubTab={showGithubTab}
+        showBrowserTab={showBrowserTab}
         changedCount={changedCount}
         subagentsWorking={subagentsWorking}
         agentCount={agentCount}

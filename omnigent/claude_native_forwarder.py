@@ -48,6 +48,7 @@ from omnigent.claude_native_bridge import (
 from omnigent.claude_native_message_display_hook import MESSAGE_DELTAS_FILE
 from omnigent.claude_native_status import sync_raw_status_context
 from omnigent.entities.session_resources import terminal_resource_id
+from omnigent.model_metadata import concrete_reported_model
 from omnigent.reasoning_effort import CLAUDE_EFFORTS, EFFORT_CLEAR_VALUES
 
 _FORWARDER_STATE_FILE = "transcript_forwarder.json"
@@ -101,6 +102,15 @@ _FORK_COMMAND_NAMES = frozenset({"/branch", "/fork"})
 _HTTP_POST_MAX_PERMANENT_FAILURES = 3
 _HTTP_POST_RETRY_BASE_DELAY_S = 1.0
 _HTTP_POST_RETRY_MAX_DELAY_S = 30.0
+# Ceiling for the backoff exponent. Transient failures retry with no give-up
+# budget (by design — see _PostRetryTracker), so ``attempts`` is unbounded, and
+# ``min()`` evaluates both operands: without this clamp ``2 ** attempts`` is
+# computed in full before the delay cap can apply, and overflows float once
+# attempts passes ~1025 (OverflowError out of record_failure). Any exponent past
+# the cap is dead weight anyway — with the defaults the cap is already reached at
+# attempt 6 — so 32 leaves the schedule identical while staying far inside float
+# range for any realistic max_delay_s / base_delay_s ratio.
+_HTTP_POST_RETRY_MAX_BACKOFF_EXPONENT = 32
 _HTTP_TRANSIENT_STATUS_CODES = {408, 409, 425, 429}
 # A 503 ``subagent_delivery_not_confirmed`` means the runner could not deliver a
 # terminal sub-agent result to the parent inbox. It is retried (the work entry can
@@ -570,6 +580,19 @@ class _ForwardDedupeState:
     # prevents the limiter from recovering.
     cost_retry_not_before: float = 0.0
     cost_retry_failures: int = 0
+    # The ``PreCompact`` ``seq`` to dismiss when the transcript phase sees a
+    # ``/compact`` refusal (``is_compact_noop``), else ``None``. The dismissal
+    # is DEFERRED until after the hook phase, because the ``PreCompact`` hook
+    # (which raises the spinner via ``in_progress``) is forwarded after
+    # transcript items in the same poll — dismissing first would clear nothing
+    # and then the hook would strand a fresh spinner. Scoped to the specific
+    # seq (not a bare flag) and cleared every poll: the prescan mints the
+    # token before the transcript phase and Claude writes ``PreCompact``
+    # before the refusal stdout, so the refused compaction's token is already
+    # pending when the refusal is seen. Keying to that seq stops a refusal
+    # whose ``PreCompact`` was missed from later hijacking an unrelated
+    # genuine compaction's token.
+    pending_compaction_dismiss_seq: int | None = None
 
 
 @dataclass(frozen=True)
@@ -722,8 +745,9 @@ class _PostRetryTracker:
                 exhausted=True,
                 permanent=permanent,
             )
+        exponent = min(max(0, entry.attempts - 1), _HTTP_POST_RETRY_MAX_BACKOFF_EXPONENT)
         delay_s = min(
-            self._base_delay_s * (2 ** max(0, entry.attempts - 1)),
+            self._base_delay_s * (2**exponent),
             self._max_delay_s,
         )
         entry.next_attempt_at = time.monotonic() + delay_s
@@ -986,6 +1010,23 @@ async def forward_claude_transcript_to_session(
                             # (the user-message reset only fires on the next turn).
                             response_id=state.current_response_id,
                         )
+                        # Deferred ``/compact``-refusal dismissal: runs AFTER
+                        # the hook phase so the ``failed`` post always follows
+                        # the ``PreCompact`` ``in_progress`` that raised the
+                        # spinner, even when both land in this same poll. Scoped
+                        # to the refused compaction's own seq and consumed here
+                        # (one-shot, cleared unconditionally) so a stale arm can
+                        # never dismiss a later genuine compaction's spinner or
+                        # discard its boundary token.
+                        if dedupe.pending_compaction_dismiss_seq is not None:
+                            dismiss_seq = dedupe.pending_compaction_dismiss_seq
+                            dedupe.pending_compaction_dismiss_seq = None
+                            await _maybe_dismiss_stranded_compaction_spinner(
+                                client,
+                                session_id=current_session_id,
+                                bridge_dir=bridge_dir,
+                                seq=dismiss_seq,
+                            )
                         subagent_state = await _forward_available_subagents(
                             client=client,
                             parent_session_id=current_session_id,
@@ -1040,19 +1081,16 @@ async def forward_claude_transcript_to_session(
                 # successful posts, so resuming retries the interrupted step.
                 _logger.warning(
                     "Claude transcript forwarder iteration exceeded %.0fs; "
-                    "cancelled the stalled await and resuming; session=%s "
-                    "bridge_dir=%s",
+                    "cancelled the stalled await and resuming; session=%s",
                     _FORWARD_LOOP_STALL_DEADLINE_S,
                     session_id,
-                    bridge_dir,
                     exc_info=True,
                     extra={"session_id": session_id},
                 )
             except Exception:
                 _logger.exception(
-                    "Claude transcript forwarder loop failed; session=%s bridge_dir=%s",
+                    "Claude transcript forwarder loop failed; session=%s",
                     session_id,
-                    bridge_dir,
                     extra={"session_id": session_id},
                 )
             await asyncio.sleep(poll_interval_s)
@@ -1914,10 +1952,8 @@ async def _forward_session_cost(
                 delay = max(delay, float(raw_retry_after)) if raw_retry_after else delay
         dedupe.cost_retry_not_before = time.monotonic() + delay
         _logger.warning(
-            "Failed to forward Claude session cost; session=%s bridge_dir=%s "
-            "http_status=%s retry_in=%.1fs",
+            "Failed to forward Claude session cost; session=%s http_status=%s retry_in=%.1fs",
             session_id,
-            bridge_dir,
             _http_status_for_log(exc),
             delay,
             exc_info=True,
@@ -2038,10 +2074,8 @@ async def supervise_forwarder(
             # to return normally. Treat any normal return as a crash
             # and restart.
             _logger.warning(
-                "Claude transcript forwarder returned unexpectedly; restarting; "
-                "session=%s bridge_dir=%s",
+                "Claude transcript forwarder returned unexpectedly; restarting; session=%s",
                 session_id,
-                bridge_dir,
                 extra={"session_id": session_id},
             )
         except asyncio.CancelledError:
@@ -2055,11 +2089,9 @@ async def supervise_forwarder(
             # Log AFTER the healthy-uptime reset so the reported delay
             # matches the sleep that actually follows.
             _logger.error(
-                "Claude transcript forwarder crashed; restarting in %.1fs; "
-                "session=%s bridge_dir=%s",
+                "Claude transcript forwarder crashed; restarting in %.1fs; session=%s",
                 backoff_s,
                 session_id,
-                bridge_dir,
                 exc_info=crash_exc,
                 extra={"session_id": session_id},
             )
@@ -2841,11 +2873,10 @@ async def _forward_available_status_events(
                                 if decision.exhausted:
                                     _logger.error(
                                         "Dropping compaction boundary (hook path) after "
-                                        "permanent HTTP failures; session=%s bridge_dir=%s "
-                                        "seq=%s attempts=%s http_status=%s; leaving pending "
+                                        "permanent HTTP failures; session=%s seq=%s "
+                                        "attempts=%s http_status=%s; leaving pending "
                                         "token for a possible transcript-path retry",
                                         session_id,
-                                        bridge_dir,
                                         seq,
                                         decision.attempts,
                                         _http_status_for_log(exc),
@@ -2855,10 +2886,9 @@ async def _forward_available_status_events(
                                 else:
                                     _logger.warning(
                                         "Failed to persist compaction boundary (hook path); "
-                                        "session=%s bridge_dir=%s seq=%s attempt=%s "
+                                        "session=%s seq=%s attempt=%s "
                                         "permanent=%s next_retry_s=%.3f http_status=%s",
                                         session_id,
-                                        bridge_dir,
                                         seq,
                                         decision.attempts,
                                         decision.permanent,
@@ -2975,10 +3005,9 @@ async def _forward_available_status_events(
             if decision.exhausted:
                 _logger.error(
                     "Dropping Claude hook status after permanent HTTP failures; "
-                    "session=%s bridge_dir=%s event_cursor=%s status=%s "
+                    "session=%s event_cursor=%s status=%s "
                     "attempts=%s http_status=%s",
                     session_id,
-                    bridge_dir,
                     record.event_cursor,
                     status,
                     decision.attempts,
@@ -2989,7 +3018,6 @@ async def _forward_available_status_events(
                     await _post_forwarder_failed_status(
                         client,
                         session_id=session_id,
-                        bridge_dir=bridge_dir,
                         reason=f"hook status {status} rejected",
                         response_id=response_id,
                     )
@@ -2997,11 +3025,10 @@ async def _forward_available_status_events(
                 await _write_hook_state_async(bridge_dir, durable)
                 continue
             _logger.warning(
-                "Failed to forward Claude hook status; session=%s bridge_dir=%s "
-                "event_cursor=%s status=%s attempt=%s permanent=%s "
+                "Failed to forward Claude hook status; session=%s event_cursor=%s "
+                "status=%s attempt=%s permanent=%s "
                 "next_retry_s=%.3f http_status=%s",
                 session_id,
-                bridge_dir,
                 record.event_cursor,
                 status,
                 decision.attempts,
@@ -3058,7 +3085,6 @@ async def _ensure_state_for_transcript(
     if state is not None and state.transcript_path == transcript_path:
         validated = _validated_transcript_state(
             state,
-            bridge_dir=bridge_dir,
             session_id=session_id,
         )
         if validated != state:
@@ -3068,7 +3094,6 @@ async def _ensure_state_for_transcript(
     if disk_state is not None and disk_state.transcript_path == transcript_path:
         validated = _validated_transcript_state(
             disk_state,
-            bridge_dir=bridge_dir,
             session_id=session_id,
         )
         if validated != disk_state:
@@ -3223,13 +3248,12 @@ async def _handle_compact_summary_item(
             # NB: the *_process_total counters are module-global, accumulating
             # across ALL sessions in this forwarder process (reset only on a
             # fresh process / the test seam), not per-session. The session=/
-            # bridge_dir= fields scope THIS skip; the total is process-wide.
+            # session= fields scope THIS skip; the total is process-wide.
             _logger.warning(
                 "Skipping isCompactSummary with no pending PreCompact and no "
                 "persisted boundary (likely a missed PreCompact hook); "
-                "session=%s bridge_dir=%s precompact_miss_process_total=%s",
+                "session=%s precompact_miss_process_total=%s",
                 session_id,
-                bridge_dir,
                 _compaction_skip_stats.precompact_miss,
                 extra={"session_id": session_id},
             )
@@ -3237,9 +3261,8 @@ async def _handle_compact_summary_item(
             _compaction_skip_stats.expected_skip += 1
             _logger.debug(
                 "Skipping isCompactSummary with no consumable token (expected "
-                "replay/dedupe); session=%s bridge_dir=%s expected_skip_process_total=%s",
+                "replay/dedupe); session=%s expected_skip_process_total=%s",
                 session_id,
-                bridge_dir,
                 _compaction_skip_stats.expected_skip,
                 extra={"session_id": session_id},
             )
@@ -3411,6 +3434,22 @@ async def _forward_available_items(
             )
             await _write_forward_state_async(bridge_dir, updated)
             continue
+        # ``/compact`` refusal ("Not enough messages to compact."). Claude
+        # fired ``PreCompact`` (raising the spinner) but declined to compact,
+        # so no completion signal follows and the spinner is stranded. Defer
+        # the dismissal (see ``pending_compaction_dismiss_seq``) — the raising
+        # ``PreCompact`` hook can land in the SAME poll and is forwarded AFTER
+        # this transcript phase, so dismissing now would clear nothing and
+        # leave a fresh spinner. Scope it to the refused compaction's OWN
+        # pending seq (already minted by the prescan, since Claude writes
+        # ``PreCompact`` before the refusal stdout) so it can never dismiss a
+        # later genuine compaction. If no token is pending the ``PreCompact``
+        # was missed and no spinner is up — nothing to dismiss. The item still
+        # forwards below as a ``slash_command`` bubble carrying the text.
+        if item.is_compact_noop:
+            refused = _read_compaction_state(bridge_dir).pending
+            if refused is not None:
+                dedupe.pending_compaction_dismiss_seq = refused.seq
         if skip_user_messages and item.item_type == "message" and item.data.get("role") == "user":
             seen_source_ids.append(item.source_id)
             seen.add(item.source_id)
@@ -3429,10 +3468,9 @@ async def _forward_available_items(
             if decision.exhausted:
                 _logger.error(
                     "Dropping Claude transcript item after permanent HTTP failures; "
-                    "session=%s bridge_dir=%s source_id=%s item_type=%s "
+                    "session=%s source_id=%s item_type=%s "
                     "attempts=%s http_status=%s",
                     session_id,
-                    bridge_dir,
                     item.source_id,
                     item.item_type,
                     decision.attempts,
@@ -3459,7 +3497,6 @@ async def _forward_available_items(
                 await _post_forwarder_failed_status(
                     client,
                     session_id=session_id,
-                    bridge_dir=bridge_dir,
                     reason=f"transcript item {item.source_id} rejected",
                     response_id=current_response_id,
                 )
@@ -3485,9 +3522,8 @@ async def _forward_available_items(
                 _logger.warning(
                     "Skipping Claude transcript item after an ambiguous POST failure "
                     "(may already be committed); not retrying to avoid a duplicate; "
-                    "session=%s bridge_dir=%s source_id=%s item_type=%s http_status=%s",
+                    "session=%s source_id=%s item_type=%s http_status=%s",
                     session_id,
-                    bridge_dir,
                     item.source_id,
                     item.item_type,
                     _http_status_for_log(exc),
@@ -3510,11 +3546,10 @@ async def _forward_available_items(
                 await _write_forward_state_async(bridge_dir, updated)
                 continue
             _logger.warning(
-                "Failed to forward Claude transcript item; session=%s bridge_dir=%s "
-                "source_id=%s item_type=%s attempt=%s permanent=%s "
+                "Failed to forward Claude transcript item; session=%s source_id=%s "
+                "item_type=%s attempt=%s permanent=%s "
                 "next_retry_s=%.3f http_status=%s",
                 session_id,
-                bridge_dir,
                 item.source_id,
                 item.item_type,
                 decision.attempts,
@@ -3616,10 +3651,8 @@ async def _forward_available_items(
                 dedupe.recorded_token_usage = record_token_usage
         except httpx.HTTPError as exc:
             _logger.warning(
-                "Failed to forward Claude transcript usage; session=%s bridge_dir=%s "
-                "http_status=%s",
+                "Failed to forward Claude transcript usage; session=%s http_status=%s",
                 session_id,
-                bridge_dir,
                 _http_status_for_log(exc),
                 exc_info=True,
                 extra={"session_id": session_id},
@@ -3741,19 +3774,16 @@ def _validated_hook_state(
     current_fingerprint = _jsonl_cursor_fingerprint(hooks_path, state.byte_offset)
     if current_fingerprint is None:
         _logger.warning(
-            "Claude hook JSONL cursor invalid; resetting cursor; "
-            "session=%s bridge_dir=%s byte_offset=%s",
+            "Claude hook JSONL cursor invalid; resetting cursor; session=%s byte_offset=%s",
             session_id,
-            bridge_dir,
             state.byte_offset,
             extra={"session_id": session_id},
         )
     elif state.cursor_fingerprint is None:
         _logger.warning(
             "Claude hook JSONL cursor missing fingerprint; resetting cursor; "
-            "session=%s bridge_dir=%s byte_offset=%s",
+            "session=%s byte_offset=%s",
             session_id,
-            bridge_dir,
             state.byte_offset,
             extra={"session_id": session_id},
         )
@@ -3762,9 +3792,8 @@ def _validated_hook_state(
     else:
         _logger.warning(
             "Claude hook JSONL cursor fingerprint changed; resetting cursor; "
-            "session=%s bridge_dir=%s byte_offset=%s",
+            "session=%s byte_offset=%s",
             session_id,
-            bridge_dir,
             state.byte_offset,
             extra={"session_id": session_id},
         )
@@ -3811,14 +3840,12 @@ def _read_transcript_items_for_state(
 def _validated_transcript_state(
     state: TranscriptForwardState,
     *,
-    bridge_dir: Path,
     session_id: str,
 ) -> TranscriptForwardState:
     """
     Reset a transcript cursor if its byte-offset fingerprint is stale.
 
     :param state: Transcript cursor loaded from memory or disk.
-    :param bridge_dir: Native Claude bridge directory.
     :param session_id: Omnigent session/conversation id, e.g.
         ``"conv_abc123"``. Used for diagnostics.
     :returns: ``state`` unchanged when its byte cursor still matches
@@ -3836,10 +3863,8 @@ def _validated_transcript_state(
             return state
         _logger.warning(
             "Claude transcript cursor invalid; skipping to end of transcript; "
-            "session=%s bridge_dir=%s transcript=%s byte_offset=%s",
+            "session=%s byte_offset=%s",
             session_id,
-            bridge_dir,
-            state.transcript_path,
             state.byte_offset,
             extra={"session_id": session_id},
         )
@@ -3861,10 +3886,8 @@ def _validated_transcript_state(
             )
         _logger.warning(
             "Claude transcript cursor missing fingerprint; skipping to end of transcript; "
-            "session=%s bridge_dir=%s transcript=%s byte_offset=%s",
+            "session=%s byte_offset=%s",
             session_id,
-            bridge_dir,
-            state.transcript_path,
             state.byte_offset,
             extra={"session_id": session_id},
         )
@@ -3873,10 +3896,8 @@ def _validated_transcript_state(
     else:
         _logger.warning(
             "Claude transcript cursor fingerprint changed; skipping to end of transcript; "
-            "session=%s bridge_dir=%s transcript=%s byte_offset=%s",
+            "session=%s byte_offset=%s",
             session_id,
-            bridge_dir,
-            state.transcript_path,
             state.byte_offset,
             extra={"session_id": session_id},
         )
@@ -4033,6 +4054,11 @@ async def _post_external_conversation_item(
                     "item_type": item.item_type,
                     "item_data": item.data,
                     "response_id": item.response_id,
+                    # Server-side idempotency key: the forwarder retries a
+                    # timed-out POST it cannot know the disposition of, so
+                    # the server derives the item's id from this and treats
+                    # a re-post as a no-op instead of a duplicate.
+                    "source_id": item.source_id,
                 },
             },
         )
@@ -4132,9 +4158,8 @@ async def _forward_available_deltas(
         except httpx.HTTPError as exc:
             _logger.debug(
                 "Dropping Claude streamed delta after HTTP failure; session=%s "
-                "bridge_dir=%s message_id=%s index=%s http_status=%s",
+                "message_id=%s index=%s http_status=%s",
                 session_id,
-                bridge_dir,
                 delta.message_id,
                 delta.index,
                 _http_status_for_log(exc),
@@ -4455,6 +4480,7 @@ async def _post_model_change_if_new(
         fresh observation," and a previously-observed-but-unposted model
         is still reconciled (retried) here.
     """
+    model = concrete_reported_model(model)
     if model is not None:
         dedupe.observed_model = model
     if dedupe.observed_model is None or dedupe.observed_model == dedupe.posted_model:
@@ -4531,15 +4557,16 @@ async def _post_external_compaction_status(
     "Compacting conversation…" spinner while Claude runs the real
     compaction in the terminal. ``"in_progress"`` is sent from the
     ``PreCompact`` hook and ``"completed"`` from the post-compaction
-    ``SessionStart`` (``source == "compact"``) hook. The Omnigent server maps
+    ``SessionStart`` (``source == "compact"``) hook; ``"failed"`` dismisses a
+    stranded spinner when Claude declined to compact. The Omnigent server maps
     these to the ``response.compaction.in_progress`` /
-    ``response.compaction.completed`` SSE events the web client already
-    renders.
+    ``response.compaction.completed`` / ``response.compaction.failed`` SSE
+    events the web client already renders.
 
     :param client: Omnigent HTTP client.
     :param session_id: Omnigent session/conversation id.
-    :param status: Compaction status value, ``"in_progress"`` or
-        ``"completed"``.
+    :param status: Compaction status value, ``"in_progress"``,
+        ``"completed"``, or ``"failed"``.
     :returns: None.
     :raises httpx.HTTPError: If the Omnigent request fails or is rejected.
     """
@@ -4720,7 +4747,6 @@ async def _post_forwarder_failed_status(
     client: httpx.AsyncClient,
     *,
     session_id: str,
-    bridge_dir: Path,
     reason: str,
     response_id: str | None = None,
 ) -> None:
@@ -4729,7 +4755,6 @@ async def _post_forwarder_failed_status(
 
     :param client: Omnigent HTTP client.
     :param session_id: Omnigent session/conversation id.
-    :param bridge_dir: Native Claude bridge directory.
     :param reason: Diagnostic reason for the failure event, e.g.
         ``"transcript item item-1 rejected"``.
     :param response_id: Active turn's response id, so this ``failed``
@@ -4748,10 +4773,8 @@ async def _post_forwarder_failed_status(
         )
     except httpx.HTTPError:
         _logger.warning(
-            "Failed to publish Claude forwarder failure status; "
-            "session=%s bridge_dir=%s reason=%s",
+            "Failed to publish Claude forwarder failure status; session=%s reason=%s",
             session_id,
-            bridge_dir,
             reason,
             exc_info=True,
             extra={"session_id": session_id},
@@ -5196,6 +5219,95 @@ async def _note_transcript_summary_without_token(bridge_dir: Path) -> None:
     await asyncio.to_thread(_mutate)
 
 
+async def _discard_pending_compaction(bridge_dir: Path, seq: int) -> bool:
+    """
+    Drop the in-flight ``PreCompact`` token for ``seq`` that will never complete.
+
+    Called when a ``/compact`` refusal ("Not enough messages to compact.")
+    is observed: Claude fired ``PreCompact`` (raising the spinner) but then
+    aborted, so neither completion signal will ever arrive. Clears the
+    pending token so a later, genuine compaction reconciles cleanly, and
+    closes any completion-ack window.
+
+    Scoped to ``seq``: only the token the refusal belongs to is dropped. A
+    later, genuine compaction (a higher seq) is left untouched, so a stale or
+    mis-paired refusal can never discard a live compaction's boundary token.
+
+    :param bridge_dir: Native Claude bridge directory.
+    :param seq: The refused compaction's ``PreCompact`` seq to drop.
+    :returns: ``True`` when the pending token for ``seq`` was cleared,
+        ``False`` when no such token is pending (so the caller skips the
+        dismissal post).
+    """
+
+    def _mutate() -> bool:
+        state = _read_compaction_state(bridge_dir)
+        if state.pending is None or state.pending.seq != seq:
+            return False
+        _write_compaction_state(
+            bridge_dir,
+            CompactionForwardState(
+                pending=None,
+                last_seq=state.last_seq,
+                persisted_seqs=state.persisted_seqs,
+                last_precompact_cursor=state.last_precompact_cursor,
+                expect_completion_ack=False,
+                expect_completion_ack_seq=0,
+            ),
+        )
+        return True
+
+    return await asyncio.to_thread(_mutate)
+
+
+async def _maybe_dismiss_stranded_compaction_spinner(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    bridge_dir: Path,
+    seq: int,
+) -> None:
+    """
+    Dismiss the "Compacting…" spinner when Claude declines to compact.
+
+    Called after the hook phase for a ``/compact`` refusal
+    (``is_compact_noop``) whose own ``PreCompact`` seq is ``seq``. Claude
+    fired ``PreCompact`` first, so the forwarder already posted
+    ``external_compaction_status: in_progress`` and the web UI is showing
+    the spinner. No ``isCompactSummary`` record or ``SessionStart
+    source=compact`` hook follows a refusal, so without this the spinner is
+    stranded forever. Post ``failed`` (which the web UI maps to
+    ``response.compaction.failed`` → remove the loading block) and drop the
+    dangling ``PreCompact`` token. Best-effort — logged, not raised.
+
+    No-op when ``seq`` is no longer the pending token (the ``PreCompact`` was
+    missed so no spinner is up, or an unrelated compaction has since
+    superseded it) — that's the guard against dismissing a genuine
+    compaction's spinner or discarding its boundary token.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id, e.g. ``"conv_abc123"``.
+    :param bridge_dir: Native Claude bridge directory.
+    :param seq: The refused compaction's own ``PreCompact`` seq.
+    :returns: None.
+    """
+    if not await _discard_pending_compaction(bridge_dir, seq):
+        return
+    try:
+        await _post_external_compaction_status(
+            client,
+            session_id=session_id,
+            status="failed",
+        )
+    except httpx.HTTPError:
+        _logger.warning(
+            "Failed to dismiss stranded compaction spinner after a /compact refusal; session=%s",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+
+
 async def _claim_standalone_completion(bridge_dir: Path) -> int | None:
     """
     Resolve a completion hook that found no pending ``PreCompact`` token.
@@ -5278,11 +5390,9 @@ async def _claim_standalone_completion(bridge_dir: Path) -> int | None:
             # duplicate. Clear the stale window as we go.
             _logger.warning(
                 "Compaction completion-ack armed for seq=%s not in persisted_seqs=%s; "
-                "persisting standalone boundary rather than absorbing (bias-to-safe); "
-                "bridge_dir=%s",
+                "persisting standalone boundary rather than absorbing (bias-to-safe)",
                 ack_seq,
                 state.persisted_seqs,
-                bridge_dir,
             )
         next_seq = state.last_seq + 1
         _write_compaction_state(

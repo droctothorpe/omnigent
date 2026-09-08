@@ -17,6 +17,7 @@ vi.mock("@dnd-kit/core", () => ({
     return children;
   },
   DragOverlay: ({ children }: { children: React.ReactNode }) => children,
+  MeasuringStrategy: { Always: "always" },
   MouseSensor: function MouseSensor() {},
   pointerWithin: () => [],
   TouchSensor: function TouchSensor() {},

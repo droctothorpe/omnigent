@@ -3,12 +3,14 @@ import {
   DragOverlay,
   type DragEndEvent,
   type DragStartEvent,
+  MeasuringStrategy,
   MouseSensor,
   TouchSensor,
   pointerWithin,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
+import { createPortal } from "react-dom";
 import {
   createContext,
   useCallback,
@@ -19,6 +21,7 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "@/lib/routing";
+import { getEmbedRoot } from "@/lib/host";
 import { useWorkspaceLayoutStore, type WorkspaceDropEdge } from "@/store/workspaceLayout";
 import type { SidebarDropTarget } from "./sidebarNav";
 
@@ -144,18 +147,22 @@ export function SessionDragDropProvider({ children }: { children: ReactNode }) {
       <DndContext
         sensors={sensors}
         collisionDetection={pointerWithin}
+        measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         onDragCancel={clearDrag}
       >
         {children}
-        <DragOverlay dropAnimation={null}>
-          {activeDrag ? (
-            <div className="pointer-events-none max-w-[16rem] truncate rounded-md border bg-card-solid px-3 py-2 text-ui shadow-tooltip">
-              {activeDrag.label}
-            </div>
-          ) : null}
-        </DragOverlay>
+        {createPortal(
+          <DragOverlay dropAnimation={null}>
+            {activeDrag ? (
+              <div className="pointer-events-none max-w-[16rem] truncate rounded-md border bg-card-solid px-3 py-2 text-ui shadow-tooltip">
+                {activeDrag.label}
+              </div>
+            ) : null}
+          </DragOverlay>,
+          getEmbedRoot() ?? document.body,
+        )}
       </DndContext>
     </SessionDragDropContext.Provider>
   );

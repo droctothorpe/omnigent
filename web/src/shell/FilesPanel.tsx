@@ -10,7 +10,7 @@ import {
   SlidersHorizontalIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "@/lib/routing";
 import { useSession } from "@/hooks/useSession";
 import { isOwnerLevel } from "@/lib/permissionsApi";
@@ -313,21 +313,28 @@ export function FilesPanel({
   // workspace they can already read.
   const locationParam = relativizeToWorkspace(browseLocation, workspaceRoot);
 
-  function navigateTo(absolutePath: string) {
-    setBrowseError(null);
-    const next = absolutePath === workspaceRoot ? null : absolutePath;
-    if (conversationId) {
-      if (next === null) browseLocationCache.delete(conversationId);
-      else browseLocationCache.set(conversationId, next);
-    }
-    setBrowseLocation(next);
-  }
+  const navigateTo = useCallback(
+    (absolutePath: string) => {
+      setBrowseError(null);
+      const next = absolutePath === workspaceRoot ? null : absolutePath;
+      if (conversationId) {
+        if (next === null) browseLocationCache.delete(conversationId);
+        else browseLocationCache.set(conversationId, next);
+      }
+      setBrowseLocation(next);
+    },
+    [workspaceRoot, conversationId],
+  );
 
+  // Stable so memo(TreeNodeRow) isn't busted on every FilesPanel re-render.
   /** Re-root onto a directory of the current tree (double-click to open). */
-  function navigateToChild(relativePath: string) {
-    if (!workingDir) return;
-    navigateTo(`${workingDir.replace(/\/$/, "")}/${relativePath}`);
-  }
+  const navigateToChild = useCallback(
+    (relativePath: string) => {
+      if (!workingDir) return;
+      navigateTo(`${workingDir.replace(/\/$/, "")}/${relativePath}`);
+    },
+    [workingDir, navigateTo],
+  );
 
   /**
    * Open a file the TREE named. Tree paths are relative to the browsed
@@ -339,9 +346,12 @@ export function FilesPanel({
    * `/tmp` would be looked up by its bare name under the workspace root and
    * 404.
    */
-  function openTreeFile(path: string) {
-    onFileSelect(joinBrowseLocation(locationParam, path));
-  }
+  const openTreeFile = useCallback(
+    (path: string) => {
+      onFileSelect(joinBrowseLocation(locationParam, path));
+    },
+    [onFileSelect, locationParam],
+  );
 
   const allFilesQuery = useWorkspaceAllFiles(conversationId, { enabled: !flatView }, locationParam);
   // A refused location must say so on the bar. Rendering an empty tree instead
@@ -417,7 +427,7 @@ export function FilesPanel({
     >
       {/* Header — single row: [title · workingDir] [eye] [close?] */}
       <div className="flex shrink-0 items-center gap-2 px-3 py-2">
-        <span className="shrink-0 font-medium text-ui">Working folder</span>
+        <h2 className="shrink-0 font-medium text-ui">{flatView ? "Changes" : "Working folder"}</h2>
         {workingDir && workspaceRoot && (
           <BrowseLocationBar
             current={workingDir}
@@ -597,6 +607,7 @@ export function FilesPanel({
             searchError={treeSearchQuery.error instanceof Error ? treeSearchQuery.error : null}
             browseLocation={locationParam}
             onNavigateDir={navigateToChild}
+            scrollParentRef={scrollRef}
           />
         )}
       </section>

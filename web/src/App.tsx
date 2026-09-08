@@ -7,6 +7,7 @@ import { isFeatureEnabled } from "@/lib/capabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { AppShell } from "@/shell/AppShell";
 import { SessionDragDropProvider } from "@/shell/SessionDragDropProvider";
+import { ExtensionPageRoute } from "@/extensions/ExtensionPageRoute";
 
 // Bind a page component to its analytics page-view id. Declaring the id here,
 // beside the component, keeps the route table clean and means no route ships
@@ -118,11 +119,6 @@ function App({ basename }: AppProps = {}) {
   // the original relative route table.
   const prefix = basename ?? "";
   const info = useServerInfo();
-  // While the probe is in flight, render nothing — first paint is
-  // ~30ms after boot anyway, and flashing the chrome we may
-  // immediately tear down once the probe returns is worse than a
-  // tiny blank moment.
-  if (info === "loading") return null;
 
   // First-run: accounts on but no admin claimed yet. Route EVERY path to
   // the Create-admin form so the first visitor lands on it no matter how
@@ -130,7 +126,7 @@ function App({ basename }: AppProps = {}) {
   // /auth/setup is server-gated to the zero-admin state, and needs_setup
   // flips false the instant it succeeds — so this whole branch disappears
   // after the first admin exists.
-  if (info.accounts_enabled && info.needs_setup) {
+  if (info !== "loading" && info.accounts_enabled && info.needs_setup) {
     return (
       <Suspense fallback={null}>
         <Routes>
@@ -143,7 +139,7 @@ function App({ basename }: AppProps = {}) {
   return (
     <Suspense fallback={null}>
       <Routes>
-        {info.accounts_enabled && (
+        {info !== "loading" && info.accounts_enabled && (
           <>
             <Route path={`${prefix}/login`} element={<LoginPage />} />
             <Route path={`${prefix}/register`} element={<RegisterPage />} />
@@ -168,9 +164,13 @@ function App({ basename }: AppProps = {}) {
               sidebar stays put — entering settings only swaps the card's
               content (the section nav) and the main area. The active section
               is carried in the URL (/settings/<section>); bare /settings
-              defaults to Appearance. */}
-          <Route path={`${prefix}/settings`} element={<SettingsPage />} />
+              redirects to the canonical General section. */}
+          <Route
+            path={`${prefix}/settings`}
+            element={<Navigate to={`${prefix}/settings/general`} replace />}
+          />
           <Route path={`${prefix}/settings/:section`} element={<SettingsPage />} />
+          <Route path={`${prefix}/extensions/:extensionId/*`} element={<ExtensionPageRoute />} />
           {/* Members / Policies are now settings sub-categories
               (/settings/members, /settings/policies) so entering them
               keeps the settings sidebar nav instead of dropping back to

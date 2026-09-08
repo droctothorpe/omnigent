@@ -304,6 +304,56 @@ def test_thread_settings_updated_records_effort_and_collaboration_mode() -> None
     assert state.collaboration_mode == "plan"
 
 
+def test_thread_settings_updated_records_approval_preset() -> None:
+    """
+    ``thread/settings/updated`` resolves the live ``/permissions`` preset.
+
+    A TUI approval change arrives here; the forwarder must map the approval
+    fields to a preset value so the sync helper can mirror it to the web
+    read-back label. If this regresses, a TUI-side switch never reaches the UI.
+    """
+    state = fwd._CodexForwarderState()
+
+    state.note_thread_settings_updated(
+        {
+            "threadSettings": {
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "sandboxPolicy": {"type": "dangerFullAccess"},
+                "activePermissionProfile": {"id": ":danger-full-access", "extends": None},
+            }
+        }
+    )
+
+    assert state.approval_preset == "full-access"
+
+
+@pytest.mark.asyncio
+async def test_sync_codex_approval_mode_change_posts_preset_and_dedupes() -> None:
+    """
+    Codex ``/permissions`` changes mirror the runtime preset to Omnigent once.
+
+    The post must carry ``approval_mode`` so the server stamps the read-back
+    label + publishes; a second sync with the same preset must not re-post.
+    """
+    client = _RecordingClient()
+    state = fwd._CodexForwarderState(approval_preset="read-only")
+
+    await fwd._sync_codex_approval_mode_change(client, session_id="conv_x", forwarder_state=state)
+    await fwd._sync_codex_approval_mode_change(client, session_id="conv_x", forwarder_state=state)
+
+    assert client.posts == [
+        (
+            "/v1/sessions/conv_x/events",
+            {
+                "type": "external_codex_approval_mode_change",
+                "data": {"approval_mode": "read-only"},
+            },
+        )
+    ]
+    assert state.posted_approval_preset == "read-only"
+
+
 @pytest.mark.asyncio
 async def test_sync_reasoning_effort_change_posts_and_dedupes() -> None:
     """
@@ -453,7 +503,10 @@ async def test_sync_codex_approval_mode_change_posts_and_dedupes() -> None:
                         'approval_policy="never"',
                         "-c",
                         'approvals_reviewer="auto_review"',
-                    ]
+                    ],
+                    # Same event now also carries the runtime preset (danger sandbox
+                    # → full-access) for the web read-back label.
+                    "approval_mode": "full-access",
                 },
             },
         )
@@ -466,6 +519,7 @@ async def test_sync_codex_approval_mode_change_posts_and_dedupes() -> None:
         "-c",
         'approvals_reviewer="auto_review"',
     ]
+    assert state.posted_approval_preset == "full-access"
 
 
 def test_codex_permission_settings_fall_back_to_legacy_policy_args() -> None:
@@ -1609,8 +1663,42 @@ async def test_reasoning_delta_skips_empty_non_opening_delta() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persist_codex_compaction_item_posts_event() -> None:
-    """Compaction event is posted with last_item_id and Codex summary."""
+async def test_persist_codex_compaction_item_posts_uuid_window_id(tmp_path: Path) -> None:
+    """Codex's UUID window id is posted with the compaction checkpoint."""
+    import json as _json
+
+    codex_home = codex_home_for_bridge_dir(tmp_path)
+    rollout = codex_home / "sessions" / "2026" / "09" / "05" / "rollout-thread_1.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text(
+        _json.dumps(
+            {
+                "type": "compacted",
+                "payload": {
+                    "replacement_history": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "hi"}],
+                        }
+                    ],
+                    "window_id": "01a070e2-2665-7d62-9b74-973decf239b7",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_codex",
+            socket_path="ws://127.0.0.1:9999",
+            thread_id="thread_1",
+            codex_home=str(codex_home),
+            cwd="/tmp/workspace",
+        ),
+    )
     get_resp = MagicMock()
     get_resp.json.return_value = {"data": [{"id": "item_codex"}]}
     get_resp.raise_for_status = MagicMock()
@@ -1622,7 +1710,11 @@ async def test_persist_codex_compaction_item_posts_event() -> None:
     post_resp.raise_for_status = MagicMock()
     client.post = AsyncMock(return_value=post_resp)
 
-    await _persist_codex_compaction_item(client, session_id="conv_codex")
+    await _persist_codex_compaction_item(
+        client,
+        session_id="conv_codex",
+        bridge_dir=tmp_path,
+    )
 
     client.post.assert_called_once()
     _url, kwargs = client.post.call_args
@@ -1630,8 +1722,8 @@ async def test_persist_codex_compaction_item_posts_event() -> None:
     assert body["type"] == "compaction"
     assert body["data"]["last_item_id"] == "item_codex"
     assert "Codex" in body["data"]["summary"]
-    # Codex can't read post-compaction state, so no compacted_messages
-    assert "compacted_messages" not in body["data"]
+    assert body["data"]["window_id"] == "01a070e2-2665-7d62-9b74-973decf239b7"
+    assert body["data"]["compacted_messages"][0]["role"] == "user"
 
 
 @pytest.mark.asyncio
@@ -1657,8 +1749,10 @@ async def test_persist_codex_compaction_item_empty_items_fallback() -> None:
     assert "compacted_messages" not in body["data"]
 
 
+@pytest.mark.parametrize("window_id", [2, "01a070e2-2665-7d62-9b74-973decf239b7"])
 def test_read_compacted_history_extracts_replacement_history_and_window_id(
     tmp_path: Path,
+    window_id: int | str,
 ) -> None:
     """_read_compacted_history returns replacement_history and window_id."""
     import json as _json
@@ -1683,7 +1777,7 @@ def test_read_compacted_history_extracts_replacement_history_and_window_id(
                             "encrypted_content": "gAAAA_test_token",
                         },
                     ],
-                    "window_id": 2,
+                    "window_id": window_id,
                 },
             }
         ),
@@ -1693,7 +1787,7 @@ def test_read_compacted_history_extracts_replacement_history_and_window_id(
     result = fwd._read_compacted_history(rollout)
 
     assert result is not None
-    assert result["window_id"] == 2
+    assert result["window_id"] == window_id
     assert len(result["replacement_history"]) == 2
     assert result["replacement_history"][0]["type"] == "message"
     assert result["replacement_history"][0]["role"] == "user"

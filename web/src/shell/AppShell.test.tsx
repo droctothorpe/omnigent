@@ -57,6 +57,14 @@ vi.mock("@/hooks/useWorkspaceChangedFiles", () => ({
   useWorkspaceChangedFiles: vi.fn(() => ({ data: undefined, isLoading: true })),
 }));
 
+// AppShell reads the GitHub info to gate the rail's GitHub tab; keep it
+// loading here (tab visible, matching the Files gate's no-flash default) so
+// no network-backed query fires. Tab visibility itself is covered in
+// AppShell.githubTabVisibility.test.tsx.
+vi.mock("@/hooks/useGithub", () => ({
+  useGithubInfo: vi.fn(() => ({ data: undefined, isLoading: true })),
+}));
+
 vi.mock("@/hooks/useChildSessions", async (importOriginal) => ({
   // Keep the real module (childSessionsQueryKey, MAX_TREE_DEPTH,
   // cachedTreeContains) — only the hook is replaced.
@@ -374,6 +382,7 @@ function serverInfo(overrides: Partial<ServerInfo> = {}): ServerInfo {
     databricks_features: false,
     managed_sandboxes_enabled: false,
     sandbox_provider: null,
+    enabled_connections: [],
     sharing_mode: "on",
     public_sharing_enabled: true,
     server_version: null,
@@ -433,6 +442,7 @@ function renderShell(path: string, info?: ServerInfo) {
                   </>
                 }
               />
+              <Route path="extensions/:extensionId/*" element={<div>extension page</div>} />
             </Route>
           </Routes>
         </MemoryRouter>
@@ -1090,7 +1100,7 @@ describe("TerminalFirstContext", () => {
     expect(regularProbe).toHaveAttribute("data-is-claude-native", "false");
   });
 
-  it("targets the agent terminal while a user shell remains open in the workspace rail", () => {
+  it("targets the agent terminal while a user shell remains open in the workspace rail", async () => {
     writeSessionWorkspaceState("conv_native", {
       open: true,
       selectedTerminalKey: "terminal:terminal_bash_s1",
@@ -1120,7 +1130,8 @@ describe("TerminalFirstContext", () => {
 
     renderShell("/c/conv_native");
 
-    expect(screen.getByTestId("terminal-view-stub")).toHaveTextContent("terminal_bash_s1");
+    // findByTestId waits for the lazy TerminalView chunk to resolve through its Suspense boundary.
+    expect(await screen.findByTestId("terminal-view-stub")).toHaveTextContent("terminal_bash_s1");
     fireEvent.click(screen.getByTestId("view-mode-terminal"));
     expect(screen.getByTestId("view-probe")).toHaveAttribute(
       "data-terminal-view-key",
@@ -1796,6 +1807,28 @@ describe("Workspace rail maximize", () => {
     expect(screen.getByTestId("sidebar")).toHaveAttribute("data-open", "true");
   });
 
+  it("reflects the docked sidebar's open state on the app shell for CSS to key off", () => {
+    // The maximized rail's traffic-light clearance (index.css) must drop when
+    // the sidebar is reopened over it — the sidebar then covers the window
+    // corner, so there are no lights to clear. That CSS keys off
+    // `data-sidebar-open` on the app shell, so the attribute has to track the
+    // docked open state (absent when closed, "true" when open).
+    mockConversations([{ id: "conv_abc", permission_level: null }]);
+    renderShell("/c/conv_abc");
+
+    const shell = document.querySelector(".app-shell");
+    expect(shell).not.toBeNull();
+    // Collapsed going in (jsdom default): the attribute is absent, so
+    // `:not([data-sidebar-open])` matches and the clearance still applies.
+    expect(screen.getByTestId("sidebar")).toHaveAttribute("data-open", "false");
+    expect(shell?.hasAttribute("data-sidebar-open")).toBe(false);
+
+    // Reopen the sidebar: the attribute appears, dropping the clearance.
+    fireEvent.click(screen.getByRole("button", { name: /open sidebar/i }));
+    expect(screen.getByTestId("sidebar")).toHaveAttribute("data-open", "true");
+    expect(shell).toHaveAttribute("data-sidebar-open", "true");
+  });
+
   it("pins the sidebar open on /settings so the Back row is reachable", () => {
     // The settings nav replaces the session list INSIDE the sidebar, and its
     // Back row is the only way off the page. Collapsed, that row is clipped and
@@ -1816,7 +1849,7 @@ describe("Workspace rail maximize", () => {
     renderShell("/settings");
 
     expect(screen.getByTestId("sidebar")).toHaveAttribute("data-open", "true");
-    fireEvent.keyDown(document, { code: "BracketLeft", metaKey: true, altKey: true });
+    fireEvent.keyDown(document, { code: "BracketLeft", ctrlKey: true, altKey: true });
     expect(screen.getByTestId("sidebar")).toHaveAttribute("data-open", "true");
   });
 
@@ -1855,6 +1888,25 @@ describe("Workspace rail maximize", () => {
     expect(screen.getByTestId("sidebar")).toHaveAttribute("data-peek", "true");
   });
 
+  it("keeps peeking while the pointer rests on the header toggle that armed it", async () => {
+    // During the card's click-through entry window the pointer still hit-tests
+    // to the chat-header toggle beneath it, so a wobble there must count as
+    // "inside the peek surface" — not arm the outside-dismiss timer.
+    mockConversations([{ id: "conv_abc", permission_level: null }]);
+    renderShell("/c/conv_abc");
+
+    const toggle = screen.getByRole("button", { name: /open sidebar/i });
+    fireEvent.pointerEnter(toggle);
+    await waitFor(() => expect(screen.getByTestId("sidebar")).toHaveAttribute("data-peek", "true"));
+
+    fireEvent.pointerMove(toggle);
+    await new Promise((resolve) => {
+      // Past the 200ms dismiss grace, so "still peeking" is a real result.
+      setTimeout(resolve, 350);
+    });
+    expect(screen.getByTestId("sidebar")).toHaveAttribute("data-peek", "true");
+  });
+
   it("keeps the sidebar pinned open for the whole /settings visit", () => {
     // Repeated toggles all resolve to open while on the page: collapsing is what
     // removes the only exit, so the guard refuses that direction throughout.
@@ -1862,8 +1914,8 @@ describe("Workspace rail maximize", () => {
     renderShell("/settings");
 
     expect(screen.getByTestId("sidebar")).toHaveAttribute("data-open", "true");
-    fireEvent.keyDown(document, { code: "BracketLeft", metaKey: true, altKey: true });
-    fireEvent.keyDown(document, { code: "BracketLeft", metaKey: true, altKey: true });
+    fireEvent.keyDown(document, { code: "BracketLeft", ctrlKey: true, altKey: true });
+    fireEvent.keyDown(document, { code: "BracketLeft", ctrlKey: true, altKey: true });
     expect(screen.getByTestId("sidebar")).toHaveAttribute("data-open", "true");
   });
 
@@ -1893,7 +1945,7 @@ describe("Workspace rail maximize", () => {
     mockConversations([{ id: "conv_abc", permission_level: null }]);
     renderShell("/c/conv_abc");
 
-    fireEvent.keyDown(document, { code: "BracketLeft", metaKey: true, altKey: true });
+    fireEvent.keyDown(document, { code: "BracketLeft", ctrlKey: true, altKey: true });
     expect(screen.getByTestId("sidebar")).toHaveAttribute("data-open", "true");
 
     fireEvent.click(screen.getByTestId("nav-settings"));
@@ -2451,6 +2503,71 @@ describe("FilesPanel visibility", () => {
     expect(screen.queryByTestId("files-panel-drawer")).toBeNull();
   });
 
+  it("hides FilesPanel from a view-only collaborator when files aren't shared", () => {
+    // A read (view-only) grant shares the conversation, not the raw
+    // workspace: the server refuses those reads (they'd leak secrets), so
+    // the Files surfaces must not mount even though os_env is available.
+    useEnvironmentMock.mockReturnValue({
+      data: { available: true, root: null },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useWorkspaceEnvironment>);
+    mockConversations([{ id: "conv_abc", permission_level: 1 }]);
+
+    renderShell("/c/conv_abc");
+
+    expect(screen.queryByTestId("files-panel")).toBeNull();
+    expect(screen.queryByTestId("files-panel-drawer")).toBeNull();
+  });
+
+  it("keeps FilesPanel for an edit-level collaborator", () => {
+    // Edit collaborators can already write files and run shell in the shared
+    // workspace, so the browsing surfaces stay available.
+    useEnvironmentMock.mockReturnValue({
+      data: { available: true, root: null },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useWorkspaceEnvironment>);
+    mockConversations([{ id: "conv_abc", permission_level: 2 }]);
+
+    renderShell("/c/conv_abc");
+
+    expect(screen.getByTestId("files-panel")).toBeInTheDocument();
+  });
+
+  it("shows FilesPanel to a view-only collaborator once the owner shares files", () => {
+    // The share opt-in (share_workspace_files on the snapshot) lets a view
+    // grant reach the workspace surfaces.
+    useEnvironmentMock.mockReturnValue({
+      data: { available: true, root: null },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useWorkspaceEnvironment>);
+    mockConversations([{ id: "conv_abc", permission_level: 1 }]);
+    useSessionMock.mockReturnValue({
+      session: {
+        id: "conv_abc",
+        agentId: "ag_owner",
+        agentName: "developer",
+        runnerId: null,
+        status: "idle",
+        createdAt: 1_700_000_000,
+        title: "Shared read-only session",
+        labels: {},
+        items: [],
+        pendingElicitations: [],
+        permissionLevel: 1,
+        shareWorkspaceFiles: true,
+        parentSessionId: null,
+        subAgentName: null,
+        kind: "default",
+      },
+      isLoading: false,
+      error: null,
+    });
+
+    renderShell("/c/conv_abc");
+
+    expect(screen.getByTestId("files-panel")).toBeInTheDocument();
+  });
+
   it("shows hidden files by default, on load and after a session switch", () => {
     useEnvironmentMock.mockReturnValue({
       data: { available: true, root: null },
@@ -2482,6 +2599,31 @@ describe("FilesPanel visibility", () => {
     // dotfiles would disappear the moment the user moves between sessions.
     fireEvent.click(screen.getByTestId("nav-session"));
     expect(screen.getByTestId("files-panel")).toHaveAttribute("data-show-hidden", "true");
+  });
+});
+
+describe("Extension pages own the header", () => {
+  it("shows the header only while the sidebar is collapsed", () => {
+    mockConversations([]);
+    renderShell("/extensions/acme.tool/home");
+
+    expect(screen.getByText("extension page")).toBeInTheDocument();
+    expect(document.querySelector("header.chat-header")).not.toBeNull();
+    expect(screen.getByRole("main")).toHaveAttribute("data-shell-header", "visible");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open sidebar" }));
+
+    expect(document.querySelector("header.chat-header")).toBeNull();
+    expect(screen.getByRole("main")).toHaveAttribute("data-shell-header", "hidden");
+  });
+
+  it("keeps the header on other routes even with the sidebar open", () => {
+    mockConversations([]);
+    renderShell("/");
+    fireEvent.click(screen.getByRole("button", { name: "Open sidebar" }));
+
+    expect(document.querySelector("header.chat-header")).not.toBeNull();
+    expect(screen.getByRole("main")).toHaveAttribute("data-shell-header", "visible");
   });
 });
 
@@ -3566,6 +3708,19 @@ describe("AppShell clone/fork action", () => {
 });
 
 describe("AppShell share action", () => {
+  it("passes the conversation workspace to the Share dialog before the snapshot loads", () => {
+    withWindowOrigin("https://app.example.com", () => {
+      mockConversations([{ id: "conv_home", permission_level: 4, workspace: "/home/alice" }]);
+      renderShell("/c/conv_home", serverInfo({ sharing_mode: "restricted_read_only" }));
+      fireEvent.click(screen.getByRole("button", { name: /share session/i }));
+      expect(
+        screen.getByText(/This session's working directory \(a home or root directory\)/),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/Please be careful when sharing/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^grant$/i })).toBeInTheDocument();
+    });
+  });
+
   it("shows the Share button to an owner of a top-level session", () => {
     // permission_level 4 = owner. Share is owner-only; a top-level session
     // the viewer owns can be shared. (A multi-user owner's list row carries
