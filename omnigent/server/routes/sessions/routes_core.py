@@ -2523,6 +2523,37 @@ def register_core_routes(
                 code=ErrorCode.INVALID_INPUT,
             )
 
+        source_sandbox_provider: str | None = None
+        source_managed_workspace: str | None = None
+        host_store_for_managed = getattr(request.app.state, "host_store", None)
+        if source.host_id is not None and host_store_for_managed is not None:
+            source_host = await asyncio.to_thread(host_store_for_managed.get_host, source.host_id)
+            if source_host is not None and source_host.sandbox_provider is not None:
+                from omnigent.server.managed_hosts import (
+                    MANAGED_REPO_LABEL_KEY,
+                    parse_repo_workspace,
+                )
+
+                source_sandbox_provider = source_host.sandbox_provider
+                source_managed_workspace = source.labels.get(MANAGED_REPO_LABEL_KEY)
+                sandbox_config = getattr(request.app.state, "sandbox_config", None)
+                managed_launches = getattr(request.app.state, "managed_launches", None)
+                if sandbox_config is None or managed_launches is None:
+                    raise OmnigentError(
+                        "managed hosts are not configured on this server — add a "
+                        "'sandbox:' section to the server config",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                if sandbox_config.for_provider(source_sandbox_provider) is None:
+                    offered = ", ".join(sandbox_config.launchable_providers()) or "none"
+                    raise OmnigentError(
+                        f"sandbox provider '{source_sandbox_provider}' is not configured "
+                        f"on this server — available: {offered}",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                if source_managed_workspace is not None:
+                    parse_repo_workspace(source_managed_workspace)
+
         source_agent = await asyncio.to_thread(agent_store.get, source.agent_id)
         if source_agent is None:
             raise OmnigentError(
@@ -2799,6 +2830,15 @@ def register_core_routes(
         if permission_store is not None and user_id is not None:
             await asyncio.to_thread(permission_store.ensure_user, user_id)
             await asyncio.to_thread(permission_store.grant, user_id, new_conv.id, LEVEL_OWNER)
+        if source_sandbox_provider is not None:
+            await _schedule_managed_launch(
+                request,
+                session_id=new_conv.id,
+                agent_id=new_conv.agent_id,
+                user_id=user_id,
+                sandbox_provider=source_sandbox_provider,
+                workspace=source_managed_workspace,
+            )
         # Push the forked session to this user's other open tabs.
         _announce_session_added(user_id, new_conv.id)
 

@@ -2217,6 +2217,7 @@ export function AppShell() {
               sourceTitle={activeSession?.title}
               sourceWorkspace={activeSession?.workspace ?? parentConv?.workspace}
               sourceHostId={activeSession?.hostId ?? parentConv?.host_id}
+              sourceSandboxProvider={activeSession?.sandboxProvider}
               sourceGitBranch={activeSession?.gitBranch}
               upToResponseId={forkUpToResponseId}
               open={forkOpen}

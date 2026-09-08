@@ -978,6 +978,7 @@ def _build_session_response(
     runner_online: bool | None = None,
     host_online: bool | None = None,
     host_resumable: bool = False,
+    sandbox_provider: str | None = None,
     pending_elicitation_events: list[dict[str, Any]] | None = None,
     subtree_usage: dict[str, Any] | None = None,
     model_options: list[dict[str, Any]] | None = None,
@@ -1091,6 +1092,7 @@ def _build_session_response(
         labels=labels,
         runner_id=conv.runner_id,
         host_id=conv.host_id,
+        sandbox_provider=sandbox_provider,
         runner_online=runner_online,
         host_online=host_online,
         host_resumable=host_resumable,
@@ -9986,9 +9988,11 @@ async def _get_session_snapshot(
     # liveness arrives via the poll/stream). One indexed host read, gated to
     # host-bound sessions.
     host_resumable = False
+    sandbox_provider: str | None = None
     if host_store is not None and sandbox_config is not None and conv.host_id is not None:
         host_for_resume = await asyncio.to_thread(host_store.get_host, conv.host_id)
         if host_for_resume is not None:
+            sandbox_provider = host_for_resume.sandbox_provider
             host_resumable = host_resume_supported(host_for_resume, sandbox_config)
     return _build_session_response(
         conv,
@@ -10007,6 +10011,7 @@ async def _get_session_snapshot(
         runner_online=runner_online,
         host_online=host_online,
         host_resumable=host_resumable,
+        sandbox_provider=sandbox_provider,
         pending_elicitation_events=await asyncio.to_thread(
             _pending_elicitation_snapshot_for_session,
             conv_store,

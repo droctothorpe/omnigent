@@ -137,6 +137,7 @@ function renderDialog(
     sourceTitle?: string | null;
     sourceWorkspace?: string | null;
     sourceHostId?: string | null;
+    sourceSandboxProvider?: string | null;
     sourceGitBranch?: string | null;
     upToResponseId?: string | null;
   } = { sourceTitle: "My session" },
@@ -259,6 +260,28 @@ describe("ForkSessionDialog", () => {
     // A fork inherits the source's project, so the project-folder lists must
     // refetch too — otherwise a filed fork stays missing from its folder.
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["project-sessions"] });
+    await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/c/conv_fork"));
+  });
+
+  it("forks a managed session without asking for a reusable host", async () => {
+    forkSessionMock.mockResolvedValue({
+      id: "conv_fork",
+    } as unknown as Awaited<ReturnType<typeof forkSession>>);
+
+    renderDialog({
+      sourceTitle: "Sandbox session",
+      sourceWorkspace: "/home/sandbox-agent/workspace",
+      sourceHostId: "host_sandbox",
+      sourceSandboxProvider: "lakebox",
+    });
+
+    expect(screen.queryByTestId("fork-session-host-select")).not.toBeInTheDocument();
+    expect(screen.getByTestId("fork-session-submit")).not.toBeDisabled();
+
+    fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+    await waitFor(() => expect(forkSessionMock).toHaveBeenCalledTimes(1));
+    expect(launchRunnerMock).not.toHaveBeenCalled();
     await waitFor(() => expect(navigateMock).toHaveBeenCalledWith("/c/conv_fork"));
   });
 

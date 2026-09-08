@@ -281,6 +281,8 @@ export interface Session {
    * older recorded fixtures may omit it (treated as `null`).
    */
   hostId?: string | null;
+  /** Provider backing this session's server-managed sandbox host. */
+  sandboxProvider?: string | null;
   /**
    * Whether this session's host is a dormant resumable managed host the
    * server can wake on the next message. Carried on the snapshot so the open

@@ -1925,6 +1925,10 @@ class SessionResponse(BaseModel):
         a target shares the caller's spawn tree over the REST path.
         ``None`` only when the underlying row predates the
         ``root_conversation_id`` column (not expected post-migration).
+    :param sandbox_provider: Provider backing this session's server-managed
+        sandbox host, e.g. ``"lakebox"``. ``None`` for external/local hosts.
+        Lets clients fork managed sessions into a fresh sandbox without
+        offering the current sandbox as a reusable host.
     :param permission_level: The requesting user's numeric
         permission level on this session: ``1`` = read, ``2`` =
         edit, ``3`` = manage. ``None`` when permissions are
@@ -2109,6 +2113,7 @@ class SessionResponse(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
     runner_id: str | None = None
     host_id: str | None = None
+    sandbox_provider: str | None = None
     runner_online: bool | None = None
     host_online: bool | None = None
     host_resumable: bool = False

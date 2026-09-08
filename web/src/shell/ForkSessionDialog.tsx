@@ -74,6 +74,7 @@ import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { agentRootName, forkTargetCarriesHistory, harnessFamily } from "@/lib/forkHarness";
 import { checkHostDirectory, hostDirectoryMissing } from "@/hooks/useHostFilesystem";
 import { getCliServerUrl } from "@/lib/host";
+import { sandboxOptionLabel } from "@/lib/capabilities";
 import { WorkspacePicker, isNavigablePath } from "./WorkspacePicker";
 import { WorkspacePathField } from "./WorkspacePathField";
 import {
@@ -649,6 +650,7 @@ export function ForkSessionForm({
   sourceTitle,
   sourceWorkspace,
   sourceHostId,
+  sourceSandboxProvider,
   sourceGitBranch,
   upToResponseId,
   onClose,
@@ -657,6 +659,7 @@ export function ForkSessionForm({
   sourceTitle?: string | null;
   sourceWorkspace?: string | null;
   sourceHostId?: string | null;
+  sourceSandboxProvider?: string | null;
   sourceGitBranch?: string | null;
   upToResponseId?: string | null;
   onClose: () => void;
@@ -682,10 +685,11 @@ export function ForkSessionForm({
   // keeps it one-shot — the user can re-collapse it without it springing back.
   const autoExpandedRef = useRef(false);
 
-  // A coding source ran in a working directory; only then does the fork
-  // need a host + directory to start. A non-coding source forks with just
-  // name + agent (no directory to pick).
-  const isCodingSource = Boolean(sourceWorkspace);
+  // A regular coding source needs a reusable host + directory. A managed
+  // source gets a fresh sandbox server-side, so its current sandbox host must
+  // never appear as a reusable target in this form.
+  const isManagedSource = sourceSandboxProvider != null;
+  const isCodingSource = Boolean(sourceWorkspace) && !isManagedSource;
 
   // Host/dir/worktree state — only meaningful for a coding source.
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
@@ -1470,6 +1474,7 @@ export function ForkSessionDialog({
   sourceTitle,
   sourceWorkspace,
   sourceHostId,
+  sourceSandboxProvider,
   sourceGitBranch,
   upToResponseId,
   open,
@@ -1479,6 +1484,7 @@ export function ForkSessionDialog({
   sourceTitle?: string | null;
   sourceWorkspace?: string | null;
   sourceHostId?: string | null;
+  sourceSandboxProvider?: string | null;
   sourceGitBranch?: string | null;
   upToResponseId?: string | null;
   open: boolean;
@@ -1492,7 +1498,11 @@ export function ForkSessionDialog({
       ? "Copies this session's history up to the selected response into a new session you own — messages after it aren't carried over"
       : "Copies this session's history into a new session you own"
   }${
-    sourceWorkspace ? ", then starts it on the host and directory you pick" : ""
+    sourceSandboxProvider
+      ? `, then starts it in a fresh ${sandboxOptionLabel(sourceSandboxProvider)}`
+      : sourceWorkspace
+        ? ", then starts it on the host and directory you pick"
+        : ""
   }. Comments aren't copied, and changes in the clone won't affect the original.`;
 
   return (
@@ -1532,6 +1542,7 @@ export function ForkSessionDialog({
           sourceTitle={sourceTitle}
           sourceWorkspace={sourceWorkspace}
           sourceHostId={sourceHostId}
+          sourceSandboxProvider={sourceSandboxProvider}
           sourceGitBranch={sourceGitBranch}
           upToResponseId={upToResponseId}
           onClose={() => onOpenChange(false)}

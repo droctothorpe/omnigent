@@ -116,6 +116,8 @@ interface SessionResponseWire {
    * other carrier and it's absent for those.
    */
   host_id?: string | null;
+  /** Provider backing a server-managed sandbox host; null otherwise. */
+  sandbox_provider?: string | null;
   /**
    * Whether this session is bound to a dormant managed host the server can
    * wake in place (its sandbox provider supports resume). Read only when the
@@ -314,6 +316,7 @@ function sessionFromWire(wire: SessionResponseWire): Session {
     agentName: wire.agent_name ?? null,
     runnerId: wire.runner_id,
     hostId: wire.host_id ?? null,
+    sandboxProvider: wire.sandbox_provider ?? null,
     hostResumable: wire.host_resumable ?? false,
     status: wire.status,
     backgroundTaskCount: wire.background_task_count ?? undefined,
