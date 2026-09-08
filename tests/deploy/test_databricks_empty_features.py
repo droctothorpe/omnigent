@@ -32,7 +32,7 @@ def deploy_mod() -> ModuleType:
         ("usage_page,harness_install", "usage_page,harness_install"),
     ],
 )
-def test_bundle_vars_provide_a_valid_empty_feature_source(
+def test_bundle_env_provides_a_valid_feature_source(
     deploy_mod: ModuleType, features: str, expected: str
 ) -> None:
     args = Namespace(
@@ -44,6 +44,6 @@ def test_bundle_vars_provide_a_valid_empty_feature_source(
         features=features,
     )
 
-    values = deploy_mod._bundle_vars(args)
-
-    assert values[-2:] == ["--var", f"features={expected}"]
+    # `--var` splits on commas, so features must travel through the environment.
+    assert not any(value.startswith("features=") for value in deploy_mod._bundle_vars(args))
+    assert deploy_mod._bundle_env(args)["BUNDLE_VAR_features"] == expected
