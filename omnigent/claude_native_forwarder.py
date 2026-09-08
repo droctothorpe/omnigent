@@ -1120,8 +1120,7 @@ async def forward_claude_transcript_to_session(
                 # without burying every other error in the fleet's logs.
                 if failure_streak & (failure_streak - 1) == 0:
                     _logger.exception(
-                        "Claude transcript forwarder loop failed "
-                        "(%d consecutive); session=%s",
+                        "Claude transcript forwarder loop failed (%d consecutive); session=%s",
                         failure_streak,
                         session_id,
                         extra={"session_id": session_id},
