@@ -4417,6 +4417,10 @@
           "branding": {
             "$ref": "#/components/schemas/BrandingInfo"
           },
+          "client_session_ids": {
+            "title": "Client Session Ids",
+            "type": "boolean"
+          },
           "databricks_features": {
             "title": "Databricks Features",
             "type": "boolean"
@@ -4518,6 +4522,7 @@
           }
         },
         "required": [
+          "client_session_ids",
           "accounts_enabled",
           "single_user",
           "login_url",
