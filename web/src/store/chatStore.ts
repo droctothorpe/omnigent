@@ -3897,7 +3897,8 @@ const RECONNECT_BACKFILL_MAX_PAGES = 4;
 
 /**
  * Session-snapshot state every reconnect path recovers: `sessionStatus`,
- * token/context/cost counters, and — when the turn ended during the gap —
+ * token/context/cost counters, the MCP startup band, and — when the turn
+ * ended during the gap —
  * the terminal `activeResponse` transition the missed `session.status`
  * event would have applied, so "Working…" clears.
  *
@@ -3915,6 +3916,10 @@ function reconnectStatusPatch(session: Session, s: ChatState): Partial<ChatState
   // returns to "N background tasks still running" rather than vanishing on reconnect.
   patch.backgroundTaskCount = session.backgroundTaskCount ?? 0;
   patch.backgroundTasks = session.backgroundTasks ?? [];
+  // Re-derive the MCP startup band from the snapshot: a settle (or update)
+  // `session.mcp_startup` event that fired into the gap is never replayed,
+  // so a stale band would otherwise stay stuck until a full reload.
+  patch.mcpStartup = activeMcpStartup(session.mcpStartup);
   if (session.contextWindow != null) patch.contextWindow = session.contextWindow;
   if (session.lastTotalTokens != null) patch.tokensUsed = session.lastTotalTokens;
   if (session.totalCostUsd != null) patch.sessionCostUsd = session.totalCostUsd;
