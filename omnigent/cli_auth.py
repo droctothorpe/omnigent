@@ -26,10 +26,11 @@ import os
 import stat
 import tempfile
 import time
-import urllib.parse
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from omnigent.util.server_url import is_workspace_hosted_url
 
 if TYPE_CHECKING:
     import httpx
@@ -265,6 +266,14 @@ def load_token(server_url: str, *, min_remaining_seconds: float = 0.0) -> str | 
     if entry is None:
         return None
 
+    # Records holding no session JWT — Databricks pointer records, malformed
+    # entries — read as "nothing stored". Checking expiry first would treat
+    # their missing expires_at as 0 and warn "expired on 1970-01-01" on
+    # every process, even though no login session ever existed.
+    token = entry.get("token")
+    if not isinstance(token, str):
+        return None
+
     expires_at = entry.get("expires_at", 0)
     if isinstance(expires_at, (int, float)) and expires_at < time.time():
         _warn_expired_once(server_url, expires_at, has_refresh="refresh_token" in entry)
@@ -278,8 +287,7 @@ def load_token(server_url: str, *, min_remaining_seconds: float = 0.0) -> str | 
     ):
         return None
 
-    token = entry.get("token")
-    return token if isinstance(token, str) else None
+    return token
 
 
 # Servers already warned about an expired stored token, so a poll/retry
@@ -542,28 +550,6 @@ DATABRICKS_ORG_ID_HEADER = "X-Databricks-Org-Id"
 # one replica when they carry the same key (the host_id). Omitted for an
 # unsharded / single-replica deployment, which needs no sticky routing.
 OMNIGENT_SLICE_KEY_HEADER = "X-Databricks-Omnigent-Slice-Key"
-
-# A host-sharded deployment mounts the API at this path; an unsharded /
-# single-replica server mounts elsewhere (usually the root). This is the
-# routing-relevant shape of a server URL, so it lives here next to the
-# request-header builder that keys off it (rather than in the browser-link
-# helpers, which only borrow it).
-WORKSPACE_API_PATH = "/api/2.0/omnigent"
-
-
-def is_workspace_hosted_url(base_url: str) -> bool:
-    """Whether *base_url* is a host-sharded deployment mount.
-
-    True for the host-sharded mount (``https://<host>/api/2.0/omnigent``), which
-    is the only deployment fronted by the sharding layer. Used to gate behavior
-    that only applies there (see :func:`databricks_request_headers`).
-
-    :param base_url: Omnigent server base URL, e.g.
-        ``"https://example.databricks.com/api/2.0/omnigent"``.
-    :returns: ``True`` when the URL path is the workspace API mount.
-    """
-    return urllib.parse.urlsplit(base_url.rstrip("/")).path == WORKSPACE_API_PATH
-
 
 # Opaque extra request headers for dev/test: a JSON object of header name→value
 # in :data:`DATABRICKS_EXTRA_HEADERS_ENV_VAR`. Databricks deployments use it to

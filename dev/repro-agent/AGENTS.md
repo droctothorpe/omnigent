@@ -13,6 +13,12 @@ against** — the local server `omnigent run` spins up, or a server passed with
 reproduce in — reproducing on the running app **is** the reproduction. Your
 whole session is browsable in that app afterward.
 
+**Environment note:** when you run under `--server` you're inside a
+Databricks-network session where the public npm/PyPI registries are blocked —
+point package installs at the internal proxies. See
+[`dev/agent-environment.md`](../agent-environment.md) before running any
+`npm`/`pnpm`/`pip`/`uv` install.
+
 You do **not** fix the bug. Finding the root cause and implementing a fix — and
 proving the fix with a before/after test transition — is a separate step; it
 consumes your session (the reconstructed journey, the e2e test, and your notes)
@@ -31,19 +37,24 @@ session and logs are things you *produce*, not inputs:
   - **Linear** → query the GraphQL API with `sys_os_shell`, using the Linear key
     from your environment. It arrives as `LINEAR_API_KEY` locally or as
     `DATABRICKS_LINEAR_API_KEY` under `--server` (the CLI→runner env strip only
-    forwards the `DATABRICKS_`-prefixed name), so read whichever is set. Endpoint
-    `https://api.linear.app/graphql`, header `Authorization: <key>` — **no**
-    `Bearer` prefix. Fetch the ticket by its identifier, e.g.:
+    forwards the `DATABRICKS_`-prefixed name), so read whichever is set. A local
+    Linear API key is sent directly as `Authorization: <key>`. A secretless
+    credential proxy instead injects an `oa_cred_*` placeholder, which must be
+    sent as `Authorization: Bearer <placeholder>` so the proxy can recognize and
+    replace it. Fetch the ticket by its identifier, e.g.:
     ```bash
     KEY="${LINEAR_API_KEY:-$DATABRICKS_LINEAR_API_KEY}"
+    AUTH="$KEY"
+    [[ "$KEY" == oa_cred_* ]] && AUTH="Bearer $KEY"
     curl -s https://api.linear.app/graphql \
-      -H "Authorization: $KEY" -H 'Content-Type: application/json' \
+      -H "Authorization: $AUTH" -H 'Content-Type: application/json' \
       -d '{"query":"{ issue(id: \"OMNI-1234\") { identifier title description url state { name } comments(first: 50) { nodes { body } } attachments(first: 20) { nodes { url } } } }"}'
     ```
     If neither `LINEAR_API_KEY` nor `DATABRICKS_LINEAR_API_KEY` is set (or the
-    fetch fails auth), you cannot read the ticket body — stop with verdict
-    `needs_more_info` naming the missing key rather than guessing the bug from the
-    URL slug.
+    fetch fails auth), you cannot read the ticket body. Stop and report the
+    authentication/configuration failure rather than guessing the bug from the
+    URL slug or emitting `needs_more_info`: missing tracker access is an
+    infrastructure failure, not missing information in the report.
   - **Linear → linked GitHub issue.** A Linear ticket often links a GitHub issue
     (in its `attachments`, description, or comments). If you find one, **always
     fetch that GitHub issue too** (`gh issue view <url> --comments`) and treat it
@@ -93,13 +104,16 @@ Your first turn is a fixed checklist — do all of it before Step 1:
    for UI journeys, and `sys_session_*` / HTTP for backend journeys. Confirm you
    can read the report: `gh` is available for a GitHub issue, or a Linear key
    (`LINEAR_API_KEY` or `DATABRICKS_LINEAR_API_KEY`) is set for a Linear ticket
-   (if it isn't, stop with `needs_more_info`). Also note — without failing —
+   (if it isn't, stop and report an infrastructure/configuration failure without
+   emitting a verdict handoff; the workflow must retry it). Also note — without failing —
    whether the recorders are available (Playwright browsers for
    `pytest --video`, `vhs` for CLI tapes): Step 4 degrades gracefully when they
    are missing.
 
-If you cannot reach the app at all, stop and say so. Don't narrate a clean
-preflight.
+If you cannot reach the app at all, stop and report an operational failure
+without emitting a verdict handoff so the workflow retries. App, network,
+authentication, tooling, sandbox, workspace, timeout, and agent-crash failures
+are never `needs_more_info`. Don't narrate a clean preflight.
 
 ## Step 1 — Reconstruct the user journey
 
@@ -112,7 +126,11 @@ Write down the concrete journey: the entry point (which screen/agent/command),
 the ordered user inputs, the environment/data it needed, and the observable
 failure (crash, traceback, wrong output, missing UI affordance). If the report is
 too thin to reconstruct a concrete journey, stop with verdict `needs_more_info`
-naming exactly what the report is missing.
+naming exactly what the report is missing. This verdict is allowed only after you
+successfully read the complete ticket and linked reports and make a reasonable
+investigation attempt. It means the **report itself** omits product information
+required to define or execute the reproduction—never that your turn, tools,
+credentials, environment, or infrastructure failed.
 
 **The journey is user-observable only — an ordered list of actions a user
 takes.** Write it as concrete numbered steps, each one an action the user
@@ -185,8 +203,14 @@ journey, not a workaround for it.
 **Stamp each sub-symptom with the user-facing surface it shows on.** Alongside
 the verdict you will give each facet (Step 2), record where a user *sees* the
 failure: `web` (the web SPA), `terminal` (a TUI or shell pane rendered inside
-the app — a native-harness pane, an embedded shell), or `cli` (a command-line
-surface outside the app: the `omnigent` CLI, the REPL, a host daemon's output).
+the app — a native-harness pane, an embedded shell), `cli` (a command-line
+surface outside the app: the `omnigent` CLI, the REPL, a host daemon's output),
+`desktop` (a failure in the Electron desktop shell itself — the setup/connect
+page, a native dialog, the window/popup policy — not the SPA it hosts), or
+`mobile` (a failure a user hits on the iOS/Android app — most are the SPA
+behaving differently at a phone viewport or under touch, filmed on the web lane
+at a mobile device profile; a few are native-chrome only — safe-area insets, the
+system-browser OIDC hop, the native setup screen).
 The surface picks the kind of test you author (Step 3) and the recorder that
 captures it (Step 4).
 
@@ -225,7 +249,9 @@ independently, because a compound bug can be partly fixed:
   (e.g. a missing picker, a wrong value, an error toast). The browser tools drive
   the desktop app's embedded browser, so a UI-journey reproduction expects a
   desktop / embedded-browser context; if you have no browser pane to drive, say
-  so and fall back to the backend path or `needs_more_info`.
+  so and fall back to the backend path. If no valid lane is available, report an
+  operational failure without a verdict handoff so the workflow retries; missing
+  browser/tool access is not `needs_more_info`.
 - **Backend/behavioral bugs** — create a session and drive turns via
   `sys_session_*`, or exercise the server's HTTP API directly, and capture the
   bad response / traceback / exit.
@@ -259,6 +285,13 @@ and observe the SPA's error/recovery UI (the error pill, retry, reconnect) — t
 observed error state is the reproduction, and the same test films it in Step 4.
 
 Judge **each sub-symptom** honestly and independently:
+
+**Global `needs_more_info` rule:** use it only for information absent from the
+complete ticket and linked reports. Never use it for work you did not finish,
+evidence you did not attempt to collect, a failed tool, missing credentials,
+unavailable compute/browser/app access, sandbox restrictions, timeout, crash, or
+any other execution problem. Those are workflow failures and must remain
+retryable rather than becoming a product verdict.
 
 - Failure reproduces → **`reproduced`**. Capture the evidence (snapshot, response,
   log excerpt).
@@ -297,6 +330,16 @@ You author the test as the reproduction artifact. You do **not** run a
 before/after fix proof — that is the fix step's job (it builds a candidate fix
 and verifies the same test goes fail→pass).
 
+**Checkpoint the handoff before long finishing work.** As soon as Step 2 settles
+the overall verdict, atomically write the complete Output JSON object to
+`.omnigent/repro-handoff.json` in the workspace (create `.omnigent/` if needed;
+write a temporary sibling and rename it into place). Update that checkpoint if
+later test or recording work changes any handoff field. The checkpoint is a
+crash-safe copy of the final machine-readable handoff: it must use the exact
+fixed shape documented under Output, including `bug_url`, `verdict`, and
+`session_id`. Do this **before** authoring or recording work that could exhaust
+the turn, so CI can still dispatch the fix step if the final response is cut off.
+
 **Show the test inline in your final message.** After you write the file to
 disk, also paste its **complete, verbatim source** into your final message as a
 fenced code block (labelled with the path), so anyone browsing this session sees
@@ -315,191 +358,30 @@ to back, still before the JSON block.
 
 A verdict is stronger when a human can *watch* the outcome. After authoring the
 test, record each facet you settled live, on the surface the user sees it on,
-saved under `recordings/<slug>/` in your workspace:
+saved under `recordings/<slug>/` in your workspace. **See
+[`dev/recording-lanes.md`](../recording-lanes.md) for the full how-to** — which
+surface to drive, standing the recorder's server up (build the SPA first, strip
+leaked runner env), and the per-surface mechanics (`web` / `mobile` / `terminal` /
+`cli` / `desktop`), plus the empty-recordings and caption rules. This section states only
+*which clip repro-agent produces*:
 
-- a **`reproduced`** facet → **before-fix footage** (`kind: "before"`): run the
-  authored test so it FAILS; the failing run's video is the proof the bug is live
-  (e.g. `recordings/1234/before-picker.webm`).
-- an **`already_fixed`** facet → **proof-it-works footage** (`kind: "fixed"`): run
-  the same authored test so it PASSES; the passing run's video shows the journey
-  behaving correctly on the running build (e.g. `recordings/1234/fixed-picker.webm`).
+- a **`reproduced`** facet → **before-fix footage** (`kind: "before"`): use the
+  authored test to drive and verify the failure, but film only the product surface
+  and the user-visible bug (e.g. `recordings/1234/before-picker.webm`). Never film
+  pytest, assertion output, logs, or the test source.
+- an **`already_fixed`** facet → **proof-it-works footage** (`kind: "fixed"`): use
+  the same test to drive and verify the passing journey, while the video shows only
+  the product behaving correctly (e.g. `recordings/1234/fixed-picker.webm`).
 
 `not_reproduced` and `needs_more_info` facets have nothing to film — skip them.
-A `web` / `terminal` / `cli` facet is expected to yield a recording: reproduce it
-on that surface and film it. Only an `api` facet (a failure no user observes on
-any surface) legitimately has no recording.
+Name the clip `<before|fixed>-<facet>.<ext>` when you move it to a stable path.
 
-**Record exactly the verdict-appropriate clip per facet — nothing else.** One
-recording per `reproduced` facet (`kind: "before"`) and one per `already_fixed`
-facet (`kind: "fixed"`); the `kind` must match that facet's verdict, and every
-recording must correspond to a facet in `facets`. Do **not** add a "contrast" or
-"control" clip of a *different*, working journey next to a `reproduced` facet
-(e.g. filming an interactive session working beside the automation session that's
-broken) — an unrequested extra video with no facet behind it only confuses the
-reader about what reproduces. The `before` clip of a `reproduced` facet already
-shows the bug; that is the whole recording for that facet.
-
-Recording is best-effort: if the tooling below is missing, skip it, keep
-`recordings: []`, and say what was missing in `evidence` — never let recording
-block or distort the reproduction itself. Likewise, if a user-facing facet's
-failing state is genuinely unreachable in this harness (e.g. the journey needs an
-online host the spawned test server doesn't have, so the state is never created),
-keep `recordings: []` for it and **name the specific blocker in `evidence`** — an
-empty recordings list on a `web`/`terminal`/`cli` facet must always come with a
-concrete reason, never a silent skip. Do not fabricate a hollow journey that
-doesn't actually reach the failure just to produce a video.
-
-**The recorder needs its own server.** A `web` recording runs the
-`tests/e2e_ui/` suite, which drives a live server. Do **not** point it at the app
-you were launched against: that app is typically auth-gated (a Databricks Apps
-deployment bounces an unauthenticated Playwright to SSO), so the recorder can't
-drive it. Let the `tests/e2e_ui/` fixtures **spawn their own local server +
-runner** instead (the default when no `--ui-base-url` is passed).
-
-**Build the SPA up front — before you run the recorder, not during it.** The
-`tests/e2e_ui/` server serves the SPA from `omnigent/server/static/web-ui/`,
-which starts empty in your worktree (the deploy's pre-built bundle lives in the
-serving layer, not the source tree). The suite *can* build it lazily on first
-boot, but that build pins the machine's cores for a few minutes **while** the
-spawned runner is trying to tunnel and go online — on a busy CI box the runner
-can miss its online deadline and the fixture reports `online: false`, which looks
-like an environment failure but is really just the build starving the boot. So
-**always build the SPA first as its own step**, then run the recorder — and,
-when you are yourself running inside a server-spawned runner (the `--server`
-path), **strip the ambient runner/host env vars** so the fixture's own runner
-starts clean. Those vars (`OMNIGENT_RUNNER_ZYGOTE*` FDs, `OMNIGENT_RUNNER_ID`,
-tunnel/host tokens) leak into the spawned child, make it take the zygote-fork
-path and block on control FDs it doesn't have, so it hangs with an empty
-`runner.log` and stays `online: false`. Strip them with `env -u` on the
-recorder invocation:
-
-```bash
-pnpm --filter web install && pnpm --filter web run build   # once, up front
-env -u OMNIGENT_RUNNER_ID -u OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN \
-    -u OMNIGENT_RUNNER_TUNNEL_TOKEN -u OMNIGENT_RUNNER_PARENT_PID \
-    -u OMNIGENT_RUNNER_ISOLATE_SESSION -u OMNIGENT_RUNNER_WORKSPACE \
-    -u OMNIGENT_HOST_ID -u OMNIGENT_HOST_TOKEN -u OMNIGENT_HOST_NAME \
-    -u RUNNER_SERVER_URL -u OMNIGENT_REMOTE_AUTH_TOKEN \
-    $(env | grep -oE '^OMNIGENT_RUNNER_ZYGOTE[A-Z_]*' | sed 's/^/-u /' | tr '\n' ' ') \
-    pytest <test_path> --video on --screenshot on --output recordings/<slug>
-```
-
-If the spawned runner still doesn't reach `online: true` within the fixture's
-timeout *after* the SPA is built and the env is stripped, capture the tail of the
-fixture's `runner.log` and treat that lane as genuinely unreachable here: keep
-`recordings: []` for it and, in `evidence`, say plainly **"recorder's test server
-did not come online in time"** with the `runner.log` tail — and note whether the
-log was empty (the leaked-env/zygote hang) or showed a later failure, so the
-cause is named from what you observed rather than guessed.
-
-- **`web` facets** — run the authored Playwright test with recording on:
-  `pytest <test_path> --video on --screenshot on --output recordings/<slug>`
-  (the `tests/e2e_ui/` suite is pytest-playwright, so the flags need no extra
-  plumbing). pytest-playwright writes the video into a per-test subdir under
-  `--output` as `video.webm`; **move** it (do not copy) to a stable name at the
-  `recordings/<slug>/` root and delete the leftover per-test subdir, so the same
-  footage isn't left twice (a copy plus the raw `video.webm` both get collected).
-  For a `reproduced` facet the
-  run must FAIL — the failing run's video *is* the before-fix footage
-  (`before-<facet>.webm`). For an `already_fixed` facet the same test PASSES
-  (it already asserts the correct behavior, per Step 3) — that passing run's video
-  is the proof-it-works footage (`fixed-<facet>.webm`).
-
-  **`--video on` only instruments pytest-playwright's own `page` fixture.** Some
-  e2e_ui tests (e.g. the whole `tests/e2e_ui/start_session/` suite) drive
-  Playwright *manually* — `async_playwright()` + `browser.new_page()` — instead
-  of taking the `page` fixture. `--video on` records **nothing** for those: the
-  flag never sees their browser, so you get a green/red test but an empty
-  `recordings/`. If the test the bug lives in is that style (grep it for
-  `async_playwright(` / `new_page(`), author your reproduction so it records: use
-  a **context**, not a bare page — `ctx = await browser.new_context(record_video_dir="recordings/<slug>")`,
-  `page = await ctx.new_page()`, and `await ctx.close()` in a `finally` (the video
-  is only flushed on context close). Then move the emitted `*.webm` to
-  `before-`/`fixed-<facet>.webm` as above. Do **not** report `recordings: []` with
-  "this test style can't record" — it can; it just needs the context. Only fall
-  back to empty if wiring the context genuinely fails, and then name that.
-- **`terminal` facets** — the pane renders inside the web app, so record it the
-  same way as `web`: the Playwright test drives the session page with the terminal
-  view shown, and the pane's contents land in the browser video (`before-`/`fixed-`
-  by the facet's verdict, as above). Save `tmux capture-pane -e` text dumps
-  alongside as machine-checkable evidence. **For a native-harness pane
-  (claude/codex/cursor/goose/hermes/kiro/… — the bug is in a real harness CLI's
-  output), don't hand-roll the launch: the existing render-parity tests already
-  drive the *real* CLI against the mock LLM with the terminal view shown, so copy
-  the closest one** (`tests/e2e_ui/messages/test_native_<harness>_render_parity.py`,
-  which use the `native_<harness>_session` / `native_<harness>_mock_session`
-  fixtures in `tests/e2e_ui/conftest.py`) and adapt its scripted turns to your
-  journey. The `--video on` recorder captures the pane with no extra plumbing.
-  These tests skip when the harness CLI isn't installed; if the one your bug needs
-  is unavailable here, keep `recordings: []` and name the missing CLI in
-  `evidence` (a real environment limit, not a `not_reproduced`).
-- **`cli` facets** — author a VHS tape (`recordings/<slug>/journey.tape`) that
-  replays the SAME numbered journey steps as your PTY test: `Type`/`Enter` the
-  user's commands, `Wait /pattern/` on the observable outcome (the failure for a
-  `reproduced` facet, the correct output for an `already_fixed` one), with an
-  `Output recordings/<slug>/<before|fixed>-<facet>.mp4` directive. Render it with
-  `vhs recordings/<slug>/journey.tape`. The tape is the replayable journey
-  artifact for terminals — the fix step re-renders the same tape for the
-  after-fix recording. If `vhs` is unavailable, still author and keep the tape;
-  note that rendering was skipped.
-
-  **Boot any server/host the journey needs BEFORE the tape drives it — don't
-  make the tape do the slow startup.** A journey like "a host logs in, then
-  reconnects" needs a live server (and maybe a host) already running; if the
-  tape's own commands start the server, VHS's per-command timeout fires during
-  the multi-second boot and the render dies half-way (the cli-lane analog of the
-  recorder-server race on the `web` lane). Start the server/host as a prior shell
-  step, then have the tape `Type` only the user's journey commands against the
-  already-running process and `Wait /pattern/` on the observable outcome. Keep
-  the tape's own steps fast (sub-second each) so no `Wait` straddles a boot.
-
-  **Film the REAL command the user runs — not an API-call stand-in for it.**
-  When the failure surfaces as a command's console output, the tape must run
-  *that command* and capture *its* output — even when reproducing it needs a
-  precondition you have to stage first. Do **not** substitute a script that pokes
-  the underlying endpoint (a `curl`/`httpx` to `POST /auth/login`, a Python
-  snippet inspecting a response) as a proxy for the command: that films the
-  mechanism, not the failure the user sees, and is the same circular
-  substitution as filming the test. Stage the precondition, then run the command.
-  Example — the "host 403s after its login expires" journey: seed an **expired**
-  `auth_tokens.json` (the state `omnigent login` leaves once the JWT lapses —
-  write the entry with a past `expires_at`), then `Type` the actual
-  `omnigent host --server <url>` command and `Wait` for the console failure it
-  prints (e.g. `EXPIRED` / `Connection refused (HTTP 403)`). That console frame
-  is the recording. Only when the command genuinely cannot be driven here (name
-  why) do you fall back to `recordings: []` — never to an endpoint-poke proxy.
-
-  **End the tape on the OUTPUT, not a fixed timer.** A common failure is a clip
-  that stops on an empty prompt because the tape said "run command → `Sleep 10`
-  → stop" and the command's output took longer than the sleep to appear. Always
-  end on a `Wait /<pattern>/` that matches the *observable result line* (the
-  error text, the value, the exit message), with only a short trailing `Sleep`
-  after it lands — never a bare `Sleep`/short total duration as the stop
-  condition. The clip must show the outcome, not the moment before it.
-
-  **A clip of the reproduction TEST running is NOT the journey — never fall back
-  to it.** If the journey tape won't render (server boot times out, `ttyd`
-  missing, VHS unavailable), do **not** substitute a recording of
-  `pytest … FAILS` / the test's `AssertionError` as the clip. That films the
-  regression artifact, not the failure a user sees — a circular recording the
-  handoff must not carry. When the real journey can't be filmed, keep
-  `recordings: []` for that facet and name the specific blocker in `evidence`
-  (per the empty-recordings rule above), exactly as you would for an unreachable
-  `web`/`terminal` lane. The authored test still ships; it just isn't the video.
-
-A recording must end on the outcome the user observes — the failure (wrong screen
-state, bad output, error) for a `before` recording, or the correct end state for a
-`fixed` one. Convert to `.mp4` with `ffmpeg` when available; `.webm`/`.gif` are
-fine otherwise. Recordings are workspace artifacts exactly like the test — leave
-them uncommitted; in CI the artifact bundle collects them.
-
-For each recording, write a short **`caption`** in its handoff entry describing
-**the actions that clip performs** — the ordered steps a viewer watches, ending
-in what the clip shows (see the `recordings` field in Output). You just drove
-those steps, so capture them while they're fresh: e.g. `"start a session → open
-the model picker → select the catalog → picker shows raw IDs"`. This is what a
-reader sees under the video on the ticket, so make it read like a journey, not a
-restatement of the bug title.
+A clip must show a **live action producing the outcome** — a command executing
+and printing, a screen changing — never static text on screen asserting the bug.
+When a facet's whole user-visible outcome is a static piece of text (an error
+line, a value) with nothing to watch, do **not** manufacture a video of it: keep
+`recordings: []` and state the observed text in your evidence, per
+`dev/recording-lanes.md`.
 
 ## Output — the reproduction artifacts
 
@@ -508,6 +390,10 @@ block — the machine-readable handoff to the fix step and to the caller that
 labels the issue. This block is parsed programmatically by taking the last
 ```json fence in the message, so the format and its position are **not** your
 choice:
+
+- Load `.omnigent/repro-handoff.json`, update it with the final test and
+  recording results, atomically rewrite it, and emit that same object in the
+  final fence. The checkpoint and final block must not disagree.
 
 - You may write comprehensive prose above the block (a human-readable summary,
   the journey, the per-facet notes) — that's fine and encouraged. Then, as the
@@ -542,8 +428,11 @@ choice:
   "test_path": "tests/e2e_ui/model_catalog/test_1234.py",
   "recordings": [
     {"surface": "web", "kind": "before", "path": "recordings/1234/before-picker.webm", "format": "webm",
+     "capture_mode": "playwright_ui",
      "caption": "open the model picker → select the catalog → picker shows raw IDs instead of names"}
   ],
+  "recording_unavailable_reason": "",
+  "missing_information": [],
   "session_id": "dc59e331-...",
   "journey": "open model picker → select catalog → picker shows raw IDs",
   "evidence": "snapshot ref / response / log excerpt, plus root-cause leads"
@@ -558,7 +447,7 @@ Field meanings:
   `already_fixed`).
 - `facets` — an array of the per-sub-symptom breakdown from Steps 1–2, each an
   object with `symptom`, its own `verdict` (same four literals), its `surface`
-  (`web` / `terminal` / `cli` / `api`, from Step 1), and one line of
+  (`web` / `terminal` / `cli` / `desktop` / `mobile` / `api`, from Step 1), and one line of
   `evidence`. Always a list, even for a single-symptom bug (then it's one
   element). This is what stops a partially-landed fix from being averaged into a
   misleading single verdict.
@@ -566,6 +455,13 @@ Field meanings:
   relative. When multiple facets still reproduce, cover each live one; if you
   authored more than one file, make this an array of paths. Empty string if you
   authored none (e.g. `needs_more_info`).
+- `missing_information` — `[]` for `reproduced`, `not_reproduced`, and
+  `already_fixed`. For `needs_more_info`, a non-empty list of the concrete
+  product details absent from the full ticket and linked reports that prevent a
+  reproduction, such as the triggering user action, required input, expected
+  behavior, or affected surface. Operational failures, incomplete work, and
+  evidence you simply did not attempt to collect are invalid entries and must
+  not produce this verdict.
 - `session_id` — **this session** (in the app), from `sys_session_get_info`, so
   the fix step can replay how you reproduced it and you can browse it at
   `<server>/c/<session_id>`.
@@ -581,7 +477,7 @@ Field meanings:
   excerpt), plus any root-cause leads you noticed while reproducing (hypotheses
   only — you do not fix).
 - `recordings` — the Step 4 captures: a list of
-  `{"surface", "kind", "path", "format", "caption"}` objects. `kind` is
+  `{"surface", "kind", "path", "format", "capture_mode", "caption"}` objects. `kind` is
   `"before"` for a `reproduced` facet's failing run or `"fixed"` for an
   `already_fixed` facet's passing run (the fix step later re-records the same
   drivers post-fix as `"after"`); `path` workspace-relative. `caption` is a
@@ -591,10 +487,17 @@ Field meanings:
   the catalog → picker shows raw IDs"`. Phrase it for *this* clip's outcome: a
   `before` caption ends in the failure, a `fixed` caption ends in the correct
   behavior (the journey completing). This is per-recording (each clip drives its
-  own steps), distinct from the bug-level `journey` field. Include an entry for
-  the authored-but-unrendered VHS tape too (`"format": "tape"`) when rendering
-  was skipped. Empty list when nothing was recorded — then say what was missing
-  in `evidence`.
+  own steps), distinct from the bug-level `journey` field. `capture_mode` is one
+  of the surface-appropriate values in `dev/recording-lanes.md`. Keep an
+  authored-but-unrendered VHS tape in the artifact, but do not declare it as a
+  recording. Empty list when nothing valid was recorded.
+- `recording_unavailable_reason` — empty when every expected clip is present;
+  otherwise the concrete per-surface tooling or reachability blocker. For a bug
+  whose outcome is purely textual — an `api` facet, or a facet whose user-visible
+  result is just a static error line or value with nothing to watch — say the
+  evidence is textual and put the observed text in `evidence`; `recordings: []` is
+  correct and not a blocker. Never substitute a synthetic fallback or test-runner
+  video.
 
 Keep the prose before the block terse — the one exception is the full test
 source, which you paste in full. You produce the live-confirmed reproduction +

@@ -33,6 +33,9 @@ vi.mock("@/hooks/useWorkspaceChangedFiles", async (importOriginal) => ({
   useWorkspaceAllFiles: vi.fn(),
   useWorkspaceChangedFiles: vi.fn(),
   useWorkspaceDirectory: vi.fn(),
+  // The tree fetches expanded lazy dirs centrally via the plural hook; default
+  // it to no expanded dirs (empty map). Tests that drive lazy content override.
+  useWorkspaceDirectories: vi.fn(() => new Map()),
   useWorkspaceEnvironment: vi.fn(),
   useWorkspaceFileSearch: vi.fn(),
   // Real exports consumed by `instanceof` checks (FlatFileList's offline
@@ -254,16 +257,22 @@ describe("FilesPanel working folder directory", () => {
 });
 
 describe("FilesPanel working folder header role", () => {
-  // The "Working folder" header is a static label in every mode — it is not a
-  // collapse toggle. Collapsing was removed: the panel's content is the whole
-  // point of the panel, so there is nothing to collapse to. The content is
-  // always visible and the header never carries aria-expanded.
+  // The scope heading is static in every mode — it is not a collapse toggle.
+  // Collapsing was removed: the panel's content is the whole point of the
+  // panel, so there is nothing to collapse to. The content is always visible.
   it("renders the header as a static label (no toggle button) in the standalone card", () => {
     renderPanel({ conversationId: "conv_header_card", files: [] });
     expect(screen.queryByRole("button", { name: /working folder/i })).toBeNull();
-    expect(screen.getByText("Working folder")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Working folder" })).toBeInTheDocument();
     // Content is always shown — the tree search box is part of it.
     expect(screen.getByRole("searchbox", { name: "Search all files" })).toBeInTheDocument();
+  });
+
+  it("labels the changed-files scope with a Changes heading", () => {
+    renderPanel({ conversationId: "conv_header_changes", files: [], flatView: true });
+    expect(screen.getByRole("heading", { name: "Changes" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Working folder" })).toBeNull();
+    expect(screen.getByRole("searchbox", { name: "Search changed files" })).toBeInTheDocument();
   });
 
   it("renders the header as a static label (no toggle button) in frameless (inline rail) mode", () => {
@@ -295,7 +304,7 @@ describe("FilesPanel working folder header role", () => {
     );
 
     expect(screen.queryByRole("button", { name: /working folder/i })).toBeNull();
-    expect(screen.getByText("Working folder")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Working folder" })).toBeInTheDocument();
     expect(screen.getByRole("searchbox", { name: "Search all files" })).toBeInTheDocument();
   });
 
@@ -303,7 +312,7 @@ describe("FilesPanel working folder header role", () => {
     renderPanel({ conversationId: "conv_header_drawer", files: [], onClose: vi.fn() });
     // The drawer adds an X close button; the title is a plain label everywhere.
     expect(screen.queryByRole("button", { name: /working folder/i })).toBeNull();
-    expect(screen.getByText("Working folder")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Working folder" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close files" })).toBeInTheDocument();
   });
 });
