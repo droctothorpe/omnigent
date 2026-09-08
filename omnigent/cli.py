@@ -10783,13 +10783,17 @@ def debug_db_upgrade(url: str) -> None:
     """
     from sqlalchemy import create_engine
 
-    from omnigent.db.utils import _run_migrations
+    from omnigent.db.utils import SchemaNewerThanClientError, _run_migrations
 
     _require_existing_sqlite_db(url)
     click.echo(f"Upgrading {url} ...")
     engine = create_engine(url)
     try:
         _run_migrations(engine, url)
+    except SchemaNewerThanClientError as exc:
+        # Expected operator situation (DB written by a newer build): render
+        # as a clean CLI error instead of the crash handler.
+        raise click.ClickException(str(exc)) from exc
     finally:
         engine.dispose()
     click.echo("Upgrade complete.")

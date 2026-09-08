@@ -415,8 +415,8 @@ def _run_migrations(engine: Engine, db_uri: str) -> None:
     :param db_uri: Database connection string forwarded to
         Alembic's ``sqlalchemy.url`` config option, e.g.
         ``"sqlite:///mydb.db"``.
-    :raises RuntimeError: If the database revision is newer than
-        the revisions known to this build.
+    :raises SchemaNewerThanClientError: If the database revision is
+        newer than the revisions known to this build.
     """
     from alembic import command
 
@@ -573,12 +573,24 @@ def _get_head_db_revision(db_uri: str) -> str:
     return head
 
 
+class SchemaNewerThanClientError(RuntimeError):
+    """The database was written by a newer Omnigent build than this one.
+
+    An expected operator situation, not a bug: callers can render it as a
+    clean "upgrade Omnigent" error instead of routing it to a crash handler.
+    """
+
+
 def _verify_db_revision_is_supported(
     db_uri: str,
     current: str | None,
     head: str,
 ) -> None:
-    """Reject a database revision that is unknown to this build."""
+    """Reject a database revision that is unknown to this build.
+
+    :raises SchemaNewerThanClientError: If the database is stamped with a
+        revision this build's migration chain does not contain.
+    """
     if current is None or current == head:
         return
 
@@ -589,7 +601,7 @@ def _verify_db_revision_is_supported(
     try:
         script.get_revision(current)
     except CommandError as exc:
-        raise RuntimeError(
+        raise SchemaNewerThanClientError(
             "Omnigent database schema is newer than this version of Omnigent "
             f"(found revision {current!r}, latest supported revision {head!r}). "
             "Upgrade Omnigent before using this database."

@@ -14,6 +14,7 @@ from sqlalchemy import create_engine, event, text
 from omnigent.db.utils import (
     _LAKEBASE_POOL_RECYCLE_SECONDS,
     _SERVER_POOL_RECYCLE_SECONDS,
+    SchemaNewerThanClientError,
     _build_alembic_config,
     _get_current_db_revision,
     _get_head_db_revision,
@@ -547,13 +548,17 @@ def test_initialize_or_verify_schema_does_not_migrate_database_from_newer_build(
 
 
 def test_run_migrations_reports_database_from_newer_build(tmp_path: Path) -> None:
-    """The manual db-upgrade path must replace Alembic's CommandError."""
+    """The manual db-upgrade path must replace Alembic's CommandError.
+
+    The rejection must be the dedicated type so CLI callers can render it
+    as a clean error instead of a crash.
+    """
     future_revision = "deadbeef1234"
     uri = _make_db_at_unknown_revision(tmp_path / "newer.db", future_revision)
 
     engine = create_engine(uri)
     try:
-        with pytest.raises(RuntimeError, match="newer") as exc_info:
+        with pytest.raises(SchemaNewerThanClientError, match="newer") as exc_info:
             _run_migrations(engine, uri)
         assert _get_current_db_revision(engine) == future_revision
     finally:
