@@ -3917,8 +3917,9 @@ function reconnectStatusPatch(session: Session, s: ChatState): Partial<ChatState
   patch.backgroundTaskCount = session.backgroundTaskCount ?? 0;
   patch.backgroundTasks = session.backgroundTasks ?? [];
   // Re-derive the MCP startup band from the snapshot: a settle (or update)
-  // `session.mcp_startup` event that fired into the gap is never replayed,
-  // so a stale band would otherwise stay stuck until a full reload.
+  // `session.mcp_startup` event that fired into the gap is never replayed.
+  // Deliberately unguarded, unlike the counter fields below — a settled
+  // round's null snapshot must clear a stale band, not preserve it.
   patch.mcpStartup = activeMcpStartup(session.mcpStartup);
   if (session.contextWindow != null) patch.contextWindow = session.contextWindow;
   if (session.lastTotalTokens != null) patch.tokensUsed = session.lastTotalTokens;
