@@ -344,6 +344,7 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.conversation_store import (
     PINNED_LABEL_KEY,
+    ConversationAlreadyExistsError,
     ConversationNotFoundError,
     NameAlreadyExistsError,
     pinned_label_key,
@@ -8500,6 +8501,16 @@ async def _create_session_from_existing_agent(
                 if runner_owner is not None and runner_owner != user_id:
                     inherited_runner_id = None
 
+    if (
+        body.id is not None
+        and body.git is not None
+        and await asyncio.to_thread(conversation_store.get_conversation, body.id)
+    ):
+        raise OmnigentError(
+            f"conversation id {body.id!r} already exists",
+            code=ErrorCode.CONFLICT,
+        )
+
     # Workspace validation: if the caller is binding to a host,
     # they must also pass a workspace, and the workspace must
     # satisfy the agent's os_env.cwd boundary on that host (per
@@ -8658,9 +8669,10 @@ async def _create_session_from_existing_agent(
             workspace=canonical_workspace,
             git_branch=git_branch,
             terminal_launch_args=validated_launch_args,
+            conversation_id=body.id,
             project_id=project_resolution.project_id,
         )
-    except NameAlreadyExistsError as exc:
+    except (ConversationAlreadyExistsError, NameAlreadyExistsError) as exc:
         if (
             created_worktree_path is not None
             and body.host_id is not None

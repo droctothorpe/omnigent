@@ -141,6 +141,7 @@ class BrandingInfo(BaseModel):
 
 
 class ServerInfoResponse(BaseModel):
+    client_session_ids: bool
     accounts_enabled: bool
     single_user: bool
     login_url: str | None
@@ -2441,6 +2442,7 @@ def create_app(
         dictation_available, _ = engine_availability()
         return ServerInfoResponse.model_validate(
             {
+                "client_session_ids": True,
                 "accounts_enabled": accounts_enabled,
                 "single_user": single_user,
                 "login_url": login_url,

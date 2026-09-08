@@ -458,6 +458,17 @@ async def test_info_includes_server_version(
     assert body["server_version"] == VERSION
 
 
+@pytest.mark.asyncio
+async def test_info_advertises_client_session_ids(
+    client: httpx.AsyncClient,
+) -> None:
+    """GET /v1/info advertises caller-selected session ids."""
+    resp = await client.get("/v1/info")
+
+    assert resp.status_code == 200
+    assert resp.json()["client_session_ids"] is True
+
+
 def _branding_png(color: tuple[int, int, int, int]) -> bytes:
     output = BytesIO()
     Image.new("RGBA", (2, 2), color).save(output, format="PNG")

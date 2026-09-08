@@ -246,6 +246,37 @@ async def test_create_without_base_branch_sends_none(
     assert cap.create[0].base_branch is None
 
 
+async def test_duplicate_caller_id_conflicts_before_worktree_create(
+    register_worktree_host: RegisterHost,
+    client: httpx.AsyncClient,
+) -> None:
+    """A known caller id is rejected before creating a git worktree."""
+    cap = register_worktree_host()
+    agent = await create_test_agent(client, name="wt-duplicate-id-agent")
+    session_id = "34567890abcdef1234567890abcdef12"
+    first = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "id": session_id},
+    )
+    assert first.status_code == 201, first.text
+
+    retry = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "id": session_id,
+            "host_id": _HOST_ID,
+            "workspace": _SOURCE_REPO,
+            "git": {"branch_name": "feature/must-not-exist"},
+        },
+    )
+
+    assert retry.status_code == 409, retry.text
+    assert retry.json()["error"]["code"] == "conflict"
+    assert cap.create == []
+    assert cap.remove == []
+
+
 async def test_create_with_invalid_base_branch_fails_400(
     register_worktree_host: RegisterHost,
     client: httpx.AsyncClient,

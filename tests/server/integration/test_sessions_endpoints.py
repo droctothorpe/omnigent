@@ -152,6 +152,82 @@ async def test_create_session_without_title_returns_none(
     assert session["title"] is None
 
 
+async def test_create_session_uses_caller_supplied_id(
+    client: httpx.AsyncClient,
+) -> None:
+    """A valid caller id is persisted and returned unchanged."""
+    agent = await create_test_agent(client)
+    session_id = "0123456789abcdef0123456789abcdef"
+
+    response = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "id": session_id},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["id"] == session_id
+    persisted = await client.get(f"/v1/sessions/{session_id}")
+    assert persisted.status_code == 200
+    assert persisted.json()["id"] == session_id
+
+
+async def test_create_session_without_id_generates_one(
+    client: httpx.AsyncClient,
+) -> None:
+    """Omitting id preserves server-generated session identifiers."""
+    agent = await create_test_agent(client)
+
+    response = await client.post("/v1/sessions", json={"agent_id": agent["id"]})
+
+    assert response.status_code == 201, response.text
+    session_id = response.json()["id"]
+    assert len(session_id) == 32
+    assert all(char in "0123456789abcdef" for char in session_id)
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "0123456789abcdef0123456789abcde",
+        "0123456789abcdef0123456789abcdef0",
+        "01234567-89ab-cdef-0123-456789abcdef",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "g123456789abcdef0123456789abcdef",
+    ],
+)
+async def test_create_session_rejects_malformed_caller_id(
+    client: httpx.AsyncClient,
+    session_id: str,
+) -> None:
+    """Caller ids must be bare 32-character lowercase hex strings."""
+    agent = await create_test_agent(client)
+
+    response = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "id": session_id},
+    )
+
+    assert response.status_code == 422, response.text
+
+
+async def test_create_session_duplicate_caller_id_returns_409(
+    client: httpx.AsyncClient,
+) -> None:
+    """Reusing a caller-supplied session id is a conflict."""
+    agent = await create_test_agent(client)
+    payload = {
+        "agent_id": agent["id"],
+        "id": "fedcba9876543210fedcba9876543210",
+    }
+
+    first = await client.post("/v1/sessions", json=payload)
+    second = await client.post("/v1/sessions", json=payload)
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 409, second.text
+    assert second.json()["error"]["code"] == "conflict"
+
+
 async def test_first_message_schedules_background_semantic_title(
     client: httpx.AsyncClient,
     app: Any,

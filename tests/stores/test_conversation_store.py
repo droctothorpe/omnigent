@@ -3159,6 +3159,24 @@ def test_create_session_with_agent_records_workspace(
     assert fetched.host_id is None
 
 
+def test_create_session_with_agent_uses_caller_supplied_conversation_id(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Bundled session creation uses a caller id when provided."""
+    conversation_id = "234567890abcdef1234567890abcdef1"
+
+    created = conversation_store.create_session_with_agent(
+        conversation_id=conversation_id,
+        agent_id="18373c2f7c4d68719e6dbc4b9599b9b1",
+        agent_name="client-id-bundle-agent",
+        agent_bundle_location="18373c2f7c4d68719e6dbc4b9599b9b1/bundle1",
+        agent_description=None,
+    )
+
+    assert created.conversation.id == conversation_id
+    assert conversation_store.get_conversation(conversation_id) is not None
+
+
 def test_create_session_with_agent_records_host_id_with_workspace(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

@@ -3494,6 +3494,7 @@ class SqlAlchemyConversationStore(ConversationStore):
     def create_session_with_agent(
         self,
         *,
+        conversation_id: str | None = None,
         agent_id: str,
         agent_name: str,
         agent_bundle_location: str,
@@ -3518,6 +3519,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         ``session_id`` pointing at that conversation, then backfills
         ``conversations.agent_id``.
 
+        :param conversation_id: Optional caller-supplied session id.
+            ``None`` generates a new random id.
         :param agent_id: Pre-generated agent id, e.g.
             ``"ag_abc123"``.
         :param agent_name: Human-readable agent name from the
@@ -3565,7 +3568,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             conversation exists.
         """
         return self._create_session_with_agent_with_id(
-            generate_conversation_id(),
+            conversation_id if conversation_id is not None else generate_conversation_id(),
             agent_id=agent_id,
             agent_name=agent_name,
             agent_bundle_location=agent_bundle_location,

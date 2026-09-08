@@ -351,6 +351,59 @@ async def test_create_session_accepts_multipart_bundled_create(
     assert "session_id" in resp.json()
 
 
+async def test_multipart_create_uses_caller_supplied_id(
+    client: httpx.AsyncClient,
+) -> None:
+    """Multipart metadata may select the persisted session id."""
+    session_id = "1234567890abcdef1234567890abcdef"
+    bundle = build_agent_bundle(name="client-id-multipart-agent")
+
+    response = await client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({"id": session_id})},
+        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["session_id"] == session_id
+    persisted = await client.get(f"/v1/sessions/{session_id}")
+    assert persisted.status_code == 200
+    assert persisted.json()["id"] == session_id
+
+
+async def test_multipart_create_duplicate_caller_id_returns_409(
+    client: httpx.AsyncClient,
+) -> None:
+    """Multipart caller-id collisions use the existing conflict response."""
+    session_id = "abcdef1234567890abcdef1234567890"
+
+    first = await client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({"id": session_id})},
+        files={
+            "bundle": (
+                "agent.tar.gz",
+                build_agent_bundle(name="client-id-first-agent"),
+                "application/gzip",
+            )
+        },
+    )
+    second = await client.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({"id": session_id})},
+        files={
+            "bundle": (
+                "agent.tar.gz",
+                build_agent_bundle(name="client-id-second-agent"),
+                "application/gzip",
+            )
+        },
+    )
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 409, second.text
+
+
 async def test_multipart_managed_create_reaches_managed_launch(
     client: httpx.AsyncClient,
 ) -> None:

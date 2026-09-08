@@ -1477,6 +1477,7 @@ class _SessionCreateRequestBase(BaseModel):
     # Declared here, in the legacy field position, so validation errors keep
     # main's ordering. Concrete public models narrow the wire type below.
     agent_id: Any
+    id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     project_id: str | None = None
     initial_items: list[SessionEventInput] = Field(default_factory=list)
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
@@ -1641,6 +1642,7 @@ class SessionCreateMetadata(BaseModel):
         valid with ``host_type: "managed"``.
     """
 
+    id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
     project_id: str | None = None
     labels: dict[str, str] = Field(default_factory=dict)

@@ -1518,6 +1518,7 @@ class ConversationStore(ABC):
     def create_session_with_agent(
         self,
         *,
+        conversation_id: str | None = None,
         agent_id: str,
         agent_name: str,
         agent_bundle_location: str,
@@ -1539,6 +1540,8 @@ class ConversationStore(ABC):
         database transaction. If either insert or any label write
         fails, none of the database rows are committed.
 
+        :param conversation_id: Optional caller-supplied session id.
+            ``None`` generates a new random id.
         :param agent_id: Pre-generated agent id, e.g.
             ``"ag_abc123"``.
         :param agent_name: Human-readable agent name from the

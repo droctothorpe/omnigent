@@ -9258,6 +9258,7 @@ def _persist_stored_session_bundle(
     """
     try:
         created = conversation_store.create_session_with_agent(
+            conversation_id=metadata.id,
             agent_id=agent_id,
             agent_name=agent_name,
             agent_bundle_location=agent_bundle_location,
