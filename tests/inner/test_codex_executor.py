@@ -15,8 +15,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from omnigent import _native_forwarder_health as native_forwarder_health
-from omnigent.codex_model_vocabulary import codex_spawn_model
 from omnigent.inner.codex_executor import (
     _TURN_EVENT_WARN_SECONDS,
     CodexExecutor,
@@ -41,7 +39,9 @@ from omnigent.inner.executor import (
     ToolCallStatus,
     TurnComplete,
 )
-from omnigent.model_fallbacks import CODEX_DEFAULT_MODEL
+from omnigent.models.codex_model_vocabulary import codex_spawn_model
+from omnigent.models.model_fallbacks import CODEX_DEFAULT_MODEL
+from omnigent.native import _native_forwarder_health as native_forwarder_health
 
 
 def _run(coro):
@@ -2708,6 +2708,29 @@ def test_populate_codex_skills_copy_mode_keeps_skill_symlinks_as_links(
         "copy mode dereferenced a skill symlink: the target's bytes were "
         "materialized into the sandbox-mounted skills subtree"
     )
+
+
+def test_populate_codex_skills_from_bundle_sources_from_codex_home(tmp_path: Path) -> None:
+    """
+    ``source_codex_home`` reads host skills from the resolved ``$CODEX_HOME``.
+
+    Native Codex honors ``$CODEX_HOME``; its launch passes the resolved host
+    home here so the seeded skills match what the CLI loads. Without the
+    override the helper reads ``~/.codex`` (the wrapped executor's behavior),
+    so a host skill under a custom ``$CODEX_HOME`` is picked up only when the
+    override is supplied.
+    """
+    from omnigent.inner.codex_executor import populate_codex_skills_from_bundle
+
+    custom_codex_home = tmp_path / "custom-codex"
+    _make_skill_dir(custom_codex_home / "skills", "host-skill")
+    codex_home = tmp_path / "codex_home"
+
+    populate_codex_skills_from_bundle(codex_home, None, "all", source_codex_home=custom_codex_home)
+
+    linked = codex_home / "skills" / "host-skill"
+    assert linked.is_symlink() or linked.is_dir()
+    assert (linked / "SKILL.md").is_file()
 
 
 def test_populate_codex_skills_from_bundle_none_leaves_no_dir(tmp_path: Path) -> None:
