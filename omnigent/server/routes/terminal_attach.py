@@ -82,7 +82,7 @@ from starlette import status
 
 from omnigent.debug_logging import debug_event
 from omnigent.errors import OmnigentError
-from omnigent.native_coding_agents import is_agent_terminal_resource_id
+from omnigent.native.native_coding_agents import is_agent_terminal_resource_id
 from omnigent.runtime import (
     get_runner_ws_factory,
     get_terminal_registry,

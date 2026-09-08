@@ -12,7 +12,7 @@ from omnigent._wrapper_labels import (
     WRAPPER_LABEL_KEY,
 )
 from omnigent.harness_plugins import KIRO_NATIVE_CODING_AGENT, PI_NATIVE_CODING_AGENT
-from omnigent.native_coding_agents import (
+from omnigent.native.native_coding_agents import (
     AGENT_TERMINAL_RESOURCE_IDS,
     NATIVE_CODING_AGENTS,
     is_agent_terminal_resource_id,
