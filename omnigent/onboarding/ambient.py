@@ -77,6 +77,16 @@ CLAUDE_CODE_MANAGED_SETTINGS_PATHS: tuple[Path, ...] = (
     Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "ClaudeCode" / "managed-settings.json",
 )
 
+
+@dataclass(frozen=True)
+class ClaudeManagedSettings:
+    """Non-secret launch state from Claude Code's authoritative managed settings."""
+
+    base_url: str | None
+    has_credential: bool
+    model_env: tuple[tuple[str, str], ...]
+
+
 # Maps each provider whose env key we surface to the served model family.
 # Providers absent here (or mapped to ``None``) are reported with
 # ``family=None`` — their key is detected but no harness surface is
@@ -492,30 +502,17 @@ def claude_auth_has_credential(creds_path: Path) -> bool:
     return False
 
 
-def claude_managed_gateway(
+def claude_managed_settings(
     paths: tuple[Path, ...] | None = None,
-) -> tuple[str | None, bool]:
-    """Read the credential Claude Code applies from its managed settings chain.
+) -> ClaudeManagedSettings | None:
+    """Read the first authoritative object in Claude Code's managed settings chain.
 
-    The single canonical parser for Claude Code's managed-settings credential,
-    shared by ambient detection, the readiness gate, and the Smart-Routing
-    gateway check (:func:`omnigent.harnesses.claude_native.main.managed_claude_gateway_signal`
-    delegates here). A credential counts as delivered when the file carries a
-    top-level ``apiKeyHelper`` (a token-printing command) or a truthy
-    ``env.CLAUDE_CODE_USE_GATEWAY``.
-
-    The **first readable, object-shaped** file decides, matching Claude Code's
-    own precedence: a settings file that exists but pins no credential reports
-    "none" rather than falling through to a lower-precedence file it would
-    itself override.
+    Only non-secret fields that affect launch behavior are returned. Model env
+    pairs are sorted so callers can safely include them in cache fingerprints.
 
     :param paths: Settings files to read, highest precedence first; defaults to
         :data:`CLAUDE_CODE_MANAGED_SETTINGS_PATHS`.
-    :returns: ``(base_url, has_credential)`` from the first readable file, or
-        ``(None, False)`` when none is present or parseable. ``base_url`` is the
-        gateway ``env.ANTHROPIC_BASE_URL`` (``None`` when unset — a helper alone
-        credentials api.anthropic.com); ``has_credential`` is whether Claude
-        Code has a usable credential to apply at launch.
+    :returns: The first readable object as non-secret launch state, or ``None``.
     """
     for path in CLAUDE_CODE_MANAGED_SETTINGS_PATHS if paths is None else paths:
         try:
@@ -534,8 +531,44 @@ def claude_managed_gateway(
             "0",
             "false",
         )
-        return base_url or None, has_helper or use_gateway
-    return None, False
+        model_env = tuple(
+            sorted(
+                (key, value.strip())
+                for key, value in env.items()
+                if isinstance(key, str)
+                and isinstance(value, str)
+                and value.strip()
+                and (
+                    key == "ANTHROPIC_MODEL"
+                    or key == "ANTHROPIC_CUSTOM_MODEL_OPTION"
+                    or key == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"
+                    or (key.startswith("ANTHROPIC_DEFAULT_") and key.endswith("_MODEL"))
+                )
+            )
+        )
+        return ClaudeManagedSettings(
+            base_url=base_url or None,
+            has_credential=has_helper or use_gateway,
+            model_env=model_env,
+        )
+    return None
+
+
+def claude_managed_gateway(
+    paths: tuple[Path, ...] | None = None,
+) -> tuple[str | None, bool]:
+    """Read the credential Claude Code applies from its managed settings chain.
+
+    The first readable, object-shaped file decides, matching Claude Code's own
+    precedence. Credential commands and tokens never leave the parser.
+
+    :param paths: Settings files to read, highest precedence first.
+    :returns: ``(base_url, has_credential)``, or ``(None, False)``.
+    """
+    settings = claude_managed_settings(paths)
+    if settings is None:
+        return None, False
+    return settings.base_url, settings.has_credential
 
 
 def claude_managed_gateway_display_name(paths: tuple[Path, ...] | None = None) -> str | None:

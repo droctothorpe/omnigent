@@ -3989,14 +3989,14 @@ async def test_auto_create_claude_terminal_refreshes_a_stale_catalog_before_rese
         refreshed_rows.append({"id": "haiku", "model": "claude-haiku-4-5-20251001"})
     probes: list[int] = []
 
-    async def _probe(config: object) -> list[dict[str, object]]:
-        del config
+    async def _probe(config: object, settings: object) -> list[dict[str, object]]:
+        del config, settings
         probes.append(1)
         if refresh == "fails":
             raise OSError("provider unreachable")
         return refreshed_rows
 
-    monkeypatch.setattr("omnigent.harnesses.claude_native.main.claude_model_catalog", _probe)
+    monkeypatch.setattr("omnigent.harnesses.claude_native.main._claude_model_catalog", _probe)
     fingerprint = claude_catalog_fingerprint(None)
     model_catalog_store.write_catalog("claude-native", fingerprint, stale_rows)
     path = model_catalog_store.catalog_path("claude-native", fingerprint)
@@ -4235,12 +4235,12 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
     )
     refreshed = [{"id": "sonnet", "model": "claude-sonnet-5", "isDefault": True}]
 
-    async def _fake_probe_catalog(config: object) -> list[dict[str, object]]:
-        del config
+    async def _fake_probe_catalog(config: object, settings: object) -> list[dict[str, object]]:
+        del config, settings
         return refreshed
 
     monkeypatch.setattr(
-        "omnigent.harnesses.claude_native.main.claude_model_catalog", _fake_probe_catalog
+        "omnigent.harnesses.claude_native.main._claude_model_catalog", _fake_probe_catalog
     )
     fingerprint = claude_catalog_fingerprint(None)
     model_catalog_store.write_catalog(

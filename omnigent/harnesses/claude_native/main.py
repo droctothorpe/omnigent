@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from prompt_toolkit.layout.controls import FormattedTextControl
     from prompt_toolkit.styles import Style
 
+    from omnigent.onboarding.ambient import ClaudeManagedSettings
     from omnigent.onboarding.provider_config import ProviderEntry
     from omnigent.spec.types import AgentSpec
 
@@ -439,21 +440,64 @@ def _serves_canonical_anthropic_ids(claude_config: ClaudeNativeUcodeConfig) -> b
     return host == "anthropic.com" or host.endswith(".anthropic.com")
 
 
-def _ambient_env_is_non_anthropic_gateway() -> bool:
-    """Whether the ambient process env routes through a non-Anthropic gateway.
+def _managed_claude_settings() -> ClaudeManagedSettings | None:
+    """Read Claude Code's authoritative managed-settings launch state."""
+    from omnigent.onboarding.ambient import claude_managed_settings
 
-    Used as the ``claude_config is None`` counterpart to
-    :func:`_serves_canonical_anthropic_ids`: when managed settings (e.g. Isaac)
-    set ``ANTHROPIC_BASE_URL`` to a Databricks gateway, the catalog and its
-    fingerprint must treat the env as a non-canonical endpoint.
+    return claude_managed_settings(_managed_settings_paths())
+
+
+def _ambient_claude_gateway_base_url_from(
+    managed_settings: ClaudeManagedSettings | None,
+) -> str | None:
+    """Return the effective ambient endpoint from one settings snapshot."""
+    ambient = os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "").strip()
+    if ambient:
+        return ambient
+    return managed_settings.base_url if managed_settings is not None else None
+
+
+def _ambient_claude_gateway_base_url() -> str | None:
+    """The endpoint a config-less Claude launch actually inferences against.
+
+    An enterprise install pins the gateway in Claude Code's managed settings,
+    which omnigent never adopts as a provider, so it is absent from this
+    process env. Reading the env alone reports such a launch as canonical
+    Anthropic when it is really a gateway.
+
+    :returns: The base URL, or ``None`` when no endpoint override applies.
     """
-    from urllib.parse import urlparse
+    return _ambient_claude_gateway_base_url_from(_managed_claude_settings())
 
-    base_url = os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "")
+
+def _ambient_env_is_non_anthropic_gateway_from(
+    managed_settings: ClaudeManagedSettings | None,
+) -> bool:
+    """Classify the ambient endpoint using one managed-settings snapshot."""
+    ambient_base_url = os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV, "").strip()
+    base_url = ambient_base_url or (
+        managed_settings.base_url if managed_settings is not None else None
+    )
     if not base_url:
+        return False
+    if not ambient_base_url and not _managed_claude_model_pins_have_catalog_prefix_from(
+        managed_settings
+    ):
         return False
     host = (urlparse(base_url).hostname or "").lower()
     return host != "anthropic.com" and not host.endswith(".anthropic.com")
+
+
+def _ambient_env_is_non_anthropic_gateway() -> bool:
+    """Whether a config-less launch routes through a non-Anthropic gateway.
+
+    The ``claude_config is None`` counterpart to
+    :func:`_serves_canonical_anthropic_ids`. An explicit process env keeps its
+    existing endpoint semantics. A managed-settings endpoint counts only when
+    its model pins prove that it uses catalog-prefixed ids, so an unrelated
+    third-party gateway that accepts bare Anthropic ids is left unchanged.
+    """
+    return _ambient_env_is_non_anthropic_gateway_from(_managed_claude_settings())
 
 
 def _claude_family(token: str) -> str | None:
@@ -747,31 +791,49 @@ def _claude_model_display_name(tier: str, model_id: str) -> str:
     return f"{family} {'.'.join(version_parts)}" if version_parts else family
 
 
-def _managed_claude_model_config() -> ClaudeNativeUcodeConfig | None:
-    """Read the model overrides Claude Code applies from managed settings."""
+def _managed_claude_model_config_from(
+    managed_settings: ClaudeManagedSettings | None,
+) -> ClaudeNativeUcodeConfig | None:
+    """Build model overrides from one managed-settings snapshot."""
+    if managed_settings is None:
+        return None
     allowed_env = {
         *_UCODE_CLAUDE_TIER_TO_ENV.values(),
         _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV,
         _ANTHROPIC_CUSTOM_MODEL_OPTION_NAME_ENV,
     }
-    for path in _managed_settings_paths():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+    managed_env = dict(managed_settings.model_env)
+    model_env = {key: value for key, value in managed_env.items() if key in allowed_env}
+    default_model = managed_env.get(_ANTHROPIC_MODEL_ENV)
+    if not model_env and not default_model:
+        return None
+    return ClaudeNativeUcodeConfig(env=model_env, model=default_model)
+
+
+def _managed_claude_model_config() -> ClaudeNativeUcodeConfig | None:
+    """Read the model overrides Claude Code applies from managed settings."""
+    return _managed_claude_model_config_from(_managed_claude_settings())
+
+
+def _managed_claude_model_pins_have_catalog_prefix_from(
+    managed_settings: ClaudeManagedSettings | None,
+) -> bool:
+    """Check all model pins in one managed-settings snapshot for a namespace."""
+    from omnigent.models.claude_model_vocabulary import prefix_folded_model_id
+
+    if managed_settings is None:
+        return False
+    for env_var, model in managed_settings.model_env:
+        if env_var == _ANTHROPIC_CUSTOM_MODEL_OPTION_NAME_ENV:
             continue
-        raw_env = payload.get("env") if isinstance(payload, dict) else None
-        if not isinstance(raw_env, dict):
-            continue
-        model_env = {
-            key: value.strip()
-            for key, value in raw_env.items()
-            if key in allowed_env and isinstance(value, str) and value.strip()
-        }
-        if model_env:
-            raw_default = raw_env.get(_ANTHROPIC_MODEL_ENV)
-            default_model = raw_default.strip() if isinstance(raw_default, str) else None
-            return ClaudeNativeUcodeConfig(env=model_env, model=default_model or None)
-    return None
+        if prefix_folded_model_id(model) != model.lower():
+            return True
+    return False
+
+
+def _managed_claude_model_pins_have_catalog_prefix() -> bool:
+    """Whether managed settings pin a model in a known gateway namespace."""
+    return _managed_claude_model_pins_have_catalog_prefix_from(_managed_claude_settings())
 
 
 def managed_claude_gateway_signal() -> tuple[str | None, bool]:
@@ -1207,8 +1269,36 @@ async def probe_claude_model_options(
     )
 
 
+def _claude_catalog_fingerprint(
+    claude_config: ClaudeNativeUcodeConfig | None,
+    managed_settings: ClaudeManagedSettings | None,
+) -> str:
+    """Build a launch fingerprint from one managed-settings snapshot."""
+    from omnigent.claude_launcher import resolve_claude_launch
+    from omnigent.models.model_catalog_store import binary_identity, fingerprint_of
+
+    command, _ = resolve_claude_launch("claude", [])
+    ambient_gateway = (
+        _ambient_claude_gateway_base_url_from(managed_settings) if claude_config is None else None
+    )
+    managed_model_env = (
+        managed_settings.model_env
+        if claude_config is None and managed_settings is not None
+        else None
+    )
+    return fingerprint_of(
+        "claude-native",
+        sorted(claude_config.env.items()) if claude_config is not None else None,
+        claude_config.api_key_helper if claude_config is not None else None,
+        claude_config.model if claude_config is not None else None,
+        binary_identity(command),
+        ambient_gateway,
+        managed_model_env,
+    )
+
+
 def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) -> str:
-    """The launch fingerprint keying claude's shared model catalog.
+    """The launch fingerprint keying Claude's shared model catalog.
 
     One formula for every consumer (host boot probe, runner launch, session
     listing), so they read and write the same catalog file.
@@ -1221,19 +1311,66 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
     :param claude_config: The resolved launch config, or ``None``.
     :returns: A stable fingerprint string.
     """
-    from omnigent.claude_launcher import resolve_claude_launch
-    from omnigent.models.model_catalog_store import binary_identity, fingerprint_of
+    managed_settings = _managed_claude_settings() if claude_config is None else None
+    return _claude_catalog_fingerprint(claude_config, managed_settings)
 
-    command, _ = resolve_claude_launch("claude", [])
-    ambient_gateway = os.environ.get(_UCODE_CLAUDE_BASE_URL_ENV) if claude_config is None else None
-    return fingerprint_of(
-        "claude-native",
-        sorted(claude_config.env.items()) if claude_config is not None else None,
-        claude_config.api_key_helper if claude_config is not None else None,
-        claude_config.model if claude_config is not None else None,
-        binary_identity(command),
-        ambient_gateway,
-    )
+
+async def _claude_model_catalog(
+    claude_config: ClaudeNativeUcodeConfig | None,
+    managed_settings: ClaudeManagedSettings | None,
+) -> list[dict[str, object]] | None:
+    """Build a Claude catalog from one managed-settings snapshot."""
+    probe = await probe_claude_model_options(claude_config)
+    if probe is None:
+        return None
+    rows = list(probe.alias_rows)
+    non_canonical = (
+        claude_config is not None and not _serves_canonical_anthropic_ids(claude_config)
+    ) or (claude_config is None and _ambient_env_is_non_anthropic_gateway_from(managed_settings))
+    if non_canonical:
+        rows = [row for row in rows if not str(row.get("model", "")).startswith("claude-")]
+
+    from omnigent.models.claude_model_vocabulary import prefix_folded_model_id
+
+    configured_pin = claude_config.model if claude_config is not None else None
+    default_model = configured_pin or probe.default_model
+    folded_default = prefix_folded_model_id(default_model) if default_model else ""
+    marked = False
+    out: list[dict[str, object]] = []
+    for row in rows:
+        is_default = (
+            bool(default_model)
+            and not marked
+            and (
+                prefix_folded_model_id(str(row.get("model", ""))) == folded_default
+                or row.get("id") == default_model
+            )
+        )
+        if is_default:
+            marked = True
+            out.append({**row, "isDefault": True})
+        else:
+            out.append({key: value for key, value in row.items() if key != "isDefault"})
+    if default_model and not marked:
+        canonical_ids_ok = (claude_config is None and not non_canonical) or (
+            claude_config is not None and _serves_canonical_anthropic_ids(claude_config)
+        )
+        servable = canonical_ids_ok or not default_model.startswith("claude-")
+        if servable:
+            label = (
+                probe.default_label
+                if default_model == probe.default_model and probe.default_label
+                else default_model
+            )
+            out.append(
+                {
+                    "id": default_model,
+                    "model": default_model,
+                    "displayName": label,
+                    "isDefault": True,
+                }
+            )
+    return out
 
 
 async def claude_model_catalog(
@@ -1255,57 +1392,8 @@ async def claude_model_catalog(
     :param claude_config: The resolved launch config, or ``None``.
     :returns: Catalog rows, or ``None`` when the probe failed.
     """
-    probe = await probe_claude_model_options(claude_config)
-    if probe is None:
-        return None
-    rows = list(probe.alias_rows)
-    _non_canonical = (
-        claude_config is not None and not _serves_canonical_anthropic_ids(claude_config)
-    ) or (claude_config is None and _ambient_env_is_non_anthropic_gateway())
-    if _non_canonical:
-        rows = [row for row in rows if not str(row.get("model", "")).startswith("claude-")]
-
-    configured_pin = claude_config.model if claude_config is not None else None
-    default_model = configured_pin or probe.default_model
-    marked = False
-    out: list[dict[str, object]] = []
-    for row in rows:
-        is_default = (
-            bool(default_model)
-            and not marked
-            and (row.get("model") == default_model or row.get("id") == default_model)
-        )
-        if is_default:
-            marked = True
-            out.append({**row, "isDefault": True})
-        else:
-            out.append({key: value for key, value in row.items() if key != "isDefault"})
-    if default_model and not marked:
-        # Append the observed default as its own honest row — but never
-        # claim a bare Anthropic id is launchable on an endpoint that
-        # rejects that spelling.
-        _canonical_ids_ok = (
-            claude_config is None and not _ambient_env_is_non_anthropic_gateway()
-        ) or (claude_config is not None and _serves_canonical_anthropic_ids(claude_config))
-        servable = _canonical_ids_ok or not default_model.startswith("claude-")
-        if servable:
-            # The probe's printed label describes the ENUMERATION run's
-            # model; it only names a config-pinned default when the two are
-            # the same model.
-            label = (
-                probe.default_label
-                if default_model == probe.default_model and probe.default_label
-                else default_model
-            )
-            out.append(
-                {
-                    "id": default_model,
-                    "model": default_model,
-                    "displayName": label,
-                    "isDefault": True,
-                }
-            )
-    return out
+    managed_settings = _managed_claude_settings() if claude_config is None else None
+    return await _claude_model_catalog(claude_config, managed_settings)
 
 
 async def claude_launch_catalog(
@@ -1323,9 +1411,12 @@ async def claude_launch_catalog(
     """
     from omnigent.models import model_catalog_store
 
-    fingerprint = claude_catalog_fingerprint(claude_config)
+    managed_settings = _managed_claude_settings() if claude_config is None else None
+    fingerprint = _claude_catalog_fingerprint(claude_config, managed_settings)
     return await model_catalog_store.ensure_catalog(
-        "claude-native", fingerprint, lambda: claude_model_catalog(claude_config)
+        "claude-native",
+        fingerprint,
+        lambda: _claude_model_catalog(claude_config, managed_settings),
     )
 
 
@@ -1344,9 +1435,12 @@ async def claude_reprobed_launch_catalog(
     """
     from omnigent.models import model_catalog_store
 
-    fingerprint = claude_catalog_fingerprint(claude_config)
+    managed_settings = _managed_claude_settings() if claude_config is None else None
+    fingerprint = _claude_catalog_fingerprint(claude_config, managed_settings)
     return await model_catalog_store.reprobe_catalog(
-        "claude-native", fingerprint, lambda: claude_model_catalog(claude_config)
+        "claude-native",
+        fingerprint,
+        lambda: _claude_model_catalog(claude_config, managed_settings),
     )
 
 
@@ -1359,8 +1453,9 @@ def claude_launch_catalog_is_stale(claude_config: ClaudeNativeUcodeConfig | None
     """
     from omnigent.models import model_catalog_store
 
+    managed_settings = _managed_claude_settings() if claude_config is None else None
     return model_catalog_store.catalog_is_stale(
-        "claude-native", claude_catalog_fingerprint(claude_config)
+        "claude-native", _claude_catalog_fingerprint(claude_config, managed_settings)
     )
 
 

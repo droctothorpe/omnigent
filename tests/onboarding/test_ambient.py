@@ -990,3 +990,31 @@ def test_claude_managed_gateway_first_readable_file_decides(clean_env, monkeypat
     low.write_text(json.dumps(_ISAAC_CLAUDE_SETTINGS))
     monkeypatch.setattr(ambient, "CLAUDE_CODE_MANAGED_SETTINGS_PATHS", (high, low))
     assert ambient.claude_managed_gateway() == (None, False)
+
+
+def test_claude_managed_settings_returns_normalized_model_pins(clean_env, monkeypatch) -> None:
+    """The launch snapshot exposes sorted, trimmed model state but no secrets."""
+    path = _write_managed_settings(
+        clean_env,
+        monkeypatch,
+        {
+            "env": {
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": " system.ai.claude-sonnet-4-6 ",
+                "ANTHROPIC_MODEL": "system.ai.claude-opus-4-8",
+                "ANTHROPIC_BASE_URL": " https://gateway.example.com/anthropic ",
+                "ANTHROPIC_API_KEY": "secret",
+            },
+            "apiKeyHelper": "print-secret",
+        },
+    )
+
+    settings = ambient.claude_managed_settings((path,))
+
+    assert settings == ambient.ClaudeManagedSettings(
+        base_url="https://gateway.example.com/anthropic",
+        has_credential=True,
+        model_env=(
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "system.ai.claude-sonnet-4-6"),
+            ("ANTHROPIC_MODEL", "system.ai.claude-opus-4-8"),
+        ),
+    )

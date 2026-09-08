@@ -56,6 +56,10 @@ from tests._image_fixtures import (
 
 @pytest.fixture(autouse=True)
 def _stub_catalog_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The gateway lookup reads Claude Code's managed settings, so leave the
+    # host's real file out of it: an enterprise install would otherwise make
+    # every "no ambient gateway" case read as a gateway.
+    monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", ())
     monkeypatch.setattr(
         "omnigent.models.model_catalog.resolve_catalog_model",
         lambda provider_name, *, family, **kwargs: SimpleNamespace(
@@ -10352,12 +10356,12 @@ async def test_claude_launch_catalog_reads_the_store_then_probes_once(
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     calls: list[int] = []
 
-    async def _fake_catalog(config: object) -> list[dict[str, object]]:
-        del config
+    async def _fake_catalog(config: object, settings: object) -> list[dict[str, object]]:
+        del config, settings
         calls.append(1)
         return [{"id": "sonnet", "model": "claude-sonnet-5", "isDefault": True}]
 
-    monkeypatch.setattr(claude_native, "claude_model_catalog", _fake_catalog)
+    monkeypatch.setattr(claude_native, "_claude_model_catalog", _fake_catalog)
     first = await claude_native.claude_launch_catalog(None)
     second = await claude_native.claude_launch_catalog(None)
     assert first == second == [{"id": "sonnet", "model": "claude-sonnet-5", "isDefault": True}]
@@ -10819,6 +10823,48 @@ def test_catalog_fingerprint_includes_ambient_gateway_url(
     assert fp_with_gateway != fp_different_gateway
 
 
+def test_catalog_fingerprint_changes_when_managed_model_pins_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin-only managed-settings edits cannot reuse the previous catalog."""
+    binary = tmp_path / "claude"
+    binary.write_text("binary")
+    _point_claude_at(monkeypatch, binary)
+    managed_settings = tmp_path / "managed-settings.json"
+    monkeypatch.setattr(
+        claude_native,
+        "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+        (managed_settings,),
+    )
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    base_env = {"ANTHROPIC_BASE_URL": "https://gateway.example.com/anthropic"}
+    managed_settings.write_text(
+        json.dumps(
+            {
+                "env": {
+                    **base_env,
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
+                }
+            }
+        )
+    )
+    bare_pin = claude_native.claude_catalog_fingerprint(None)
+
+    managed_settings.write_text(
+        json.dumps(
+            {
+                "env": {
+                    **base_env,
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-8[1m]",
+                }
+            }
+        )
+    )
+    prefixed_pin = claude_native.claude_catalog_fingerprint(None)
+
+    assert bare_pin != prefixed_pin
+
+
 async def test_claude_model_catalog_filters_canonical_ids_for_ambient_gateway(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -10855,6 +10901,211 @@ async def test_claude_model_catalog_filters_canonical_ids_for_ambient_gateway(
     assert [row["id"] for row in rows] == ["sonnet-gateway"]
     # No canonical claude-* models
     assert all(not str(row.get("model", "")).startswith("claude-") for row in rows)
+
+
+def _isaac_managed_settings(tmp_path: Path) -> Path:
+    """Managed settings shaped like an enterprise install writes them.
+
+    The gateway and the family pins live here and nowhere else, so omnigent
+    resolves no provider config and its own env names no endpoint. Only
+    opus/sonnet/haiku are pinned, mirroring what Isaac writes.
+    """
+    path = tmp_path / "managed-settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://dbc-test.cloud.databricks.com/ai-gateway/anthropic",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-8[1m]",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "system.ai.claude-sonnet-4-6[1m]",
+                },
+                "apiKeyHelper": "printf token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+async def test_claude_model_catalog_drops_bare_ids_on_a_managed_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A managed-settings gateway counts even though it never enters the env.
+
+    Claude Code resolves every alias no ``ANTHROPIC_DEFAULT_*_MODEL`` pins to a
+    canonical Anthropic id the gateway rejects. Reading only the process env
+    reported this launch as canonical Anthropic, which switched the servability
+    filter off and published those rows as launchable.
+    """
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        claude_native,
+        "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+        (_isaac_managed_settings(tmp_path),),
+    )
+
+    async def _fake_probe(config: object) -> claude_native.ClaudeModelProbe:
+        del config
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[
+                {
+                    "id": "opus",
+                    "model": "system.ai.claude-opus-4-8[1m]",
+                    "displayName": "Opus 4.8 (1M context)",
+                },
+                {"id": "fable", "model": "claude-fable-5-1", "displayName": "Fable 5.1"},
+            ],
+            default_model="system.ai.claude-opus-4-8[1m]",
+            default_label="Opus 4.8 (1M context)",
+        )
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    rows = await claude_native.claude_model_catalog(None)
+    assert rows is not None
+    assert [row["id"] for row in rows] == ["opus"]
+
+
+async def test_claude_model_catalog_keeps_bare_ids_for_unprefixed_managed_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom managed gateway needs prefix evidence before filtering rows."""
+    managed_settings = tmp_path / "managed-settings.json"
+    managed_settings.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://gateway.example.com/anthropic",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
+                },
+                "apiKeyHelper": "printf token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        claude_native,
+        "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+        (managed_settings,),
+    )
+
+    async def _fake_probe(config: object) -> claude_native.ClaudeModelProbe:
+        del config
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[
+                {
+                    "id": "opus",
+                    "model": "claude-opus-4-8[1m]",
+                    "displayName": "Opus 4.8 (1M context)",
+                },
+                {"id": "fable", "model": "claude-fable-5-1", "displayName": "Fable 5.1"},
+            ],
+            default_model="claude-opus-4-8[1m]",
+            default_label="Opus 4.8 (1M context)",
+        )
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    rows = await claude_native.claude_model_catalog(None)
+    assert rows is not None
+    assert [row["id"] for row in rows] == ["opus", "fable"]
+
+
+def test_managed_gateway_uses_one_file_for_url_and_prefix_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lower-precedence namespace pin cannot classify the winning URL."""
+    high = tmp_path / "high.json"
+    high.write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example.com/anthropic"}})
+    )
+    low = tmp_path / "low.json"
+    low.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://ignored.example.com/anthropic",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-8[1m]",
+                }
+            }
+        )
+    )
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", (high, low))
+
+    assert claude_native._ambient_env_is_non_anthropic_gateway() is False
+
+
+def test_managed_global_model_pin_is_catalog_prefix_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ANTHROPIC_MODEL participates in managed gateway classification."""
+    managed_settings = tmp_path / "managed-settings.json"
+    managed_settings.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://gateway.example.com/anthropic",
+                    "ANTHROPIC_MODEL": "system.ai.claude-opus-4-8[1m]",
+                }
+            }
+        )
+    )
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        claude_native,
+        "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+        (managed_settings,),
+    )
+
+    assert claude_native._ambient_env_is_non_anthropic_gateway() is True
+
+
+async def test_claude_model_catalog_marks_a_bare_reported_default_on_its_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare reported default marks its gateway-spelled row, not a second one.
+
+    Claude Code names its default in its own spelling, which can be the bare
+    Anthropic id where the alias row carries the gateway's ``system.ai.`` one.
+    Comparing verbatim left the row unmarked and appended the bare id as its own
+    row: two rows one version of one family apart, only one of them routable.
+    """
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        claude_native,
+        "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS",
+        (_isaac_managed_settings(tmp_path),),
+    )
+
+    async def _fake_probe(config: object) -> claude_native.ClaudeModelProbe:
+        del config
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[
+                {
+                    "id": "opus",
+                    "model": "system.ai.claude-opus-4-8[1m]",
+                    "displayName": "Opus 4.8 (1M context)",
+                }
+            ],
+            default_model="claude-opus-4-8[1m]",
+            default_label="Opus 4.8 (1M context)",
+        )
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    rows = await claude_native.claude_model_catalog(None)
+    assert rows == [
+        {
+            "id": "opus",
+            "model": "system.ai.claude-opus-4-8[1m]",
+            "displayName": "Opus 4.8 (1M context)",
+            "isDefault": True,
+        }
+    ]
 
 
 async def test_claude_model_catalog_keeps_canonical_ids_without_ambient_gateway(
