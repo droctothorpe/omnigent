@@ -5975,6 +5975,39 @@ async def test_github_set_preference_falls_back_to_host_when_runner_offline(
     assert captured["params"] == {"account": "octocat", "remote": None}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "detail_contains"),
+    [
+        (["not", "an", "object"], "must be a JSON object"),
+        ({"account": 123}, "'account' must be a string"),
+        ({"remote": ["x"]}, "'remote' must be a string"),
+        ({"remote": "--unset"}, "must not start with '-'"),
+    ],
+)
+async def test_github_set_preference_rejects_bad_body(
+    offline_env_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    body: Any,
+    detail_contains: str,
+) -> None:
+    """A malformed body is a 400 (client error), not a 500, and never reaches the
+    runner/host write."""
+    from omnigent.server.routes import _host_filesystem
+
+    async def _boom(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("write must not be attempted for an invalid body")
+
+    monkeypatch.setattr(_host_filesystem, "write_workspace_from_host", _boom)
+
+    resp = await offline_env_client.post(
+        f"/v1/sessions/{_OFFLINE_SESSION}/resources/github/preferences",
+        json=body,
+    )
+    assert resp.status_code == 400, resp.text
+    assert detail_contains in resp.text
+
+
 # ── Workspace-file gzip (GZipFileContentRoute) ───────────────────
 #
 # These exercise the real routes through the real router, because the whole

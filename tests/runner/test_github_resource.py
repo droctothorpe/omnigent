@@ -450,7 +450,10 @@ def test_github_info_runs_gh_as_preferred_account(
         "github_account_preference",
         lambda key: "bob" if key == "/ws/omnigent" else None,
     )
-    monkeypatch.setattr(github_resource, "_gh_auth_token", lambda _root, login: f"tok-{login}")
+    monkeypatch.setattr(
+        github_resource, "_gh_auth_token", lambda _root, login, _host="github.com": f"tok-{login}"
+    )
+    monkeypatch.setattr(github_resource, "_host_for_login", lambda _root, _login: "github.com")
     seen: dict[str, str | None] = {}
 
     def fake_gh(
@@ -673,6 +676,60 @@ def test_account_token_for_none_without_preference(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(github_resource, "_workspace_key", lambda _root: "/ws/omnigent")
     monkeypatch.setattr(github_resource._config, "github_account_preference", lambda _key: None)
     assert github_resource._account_token_for("/root") is None
+
+
+def test_account_token_uses_the_accounts_own_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A preferred account on an Enterprise host has its token fetched from THAT
+    host, not a hardcoded github.com."""
+    monkeypatch.delenv("IS_SANDBOX", raising=False)
+    monkeypatch.setattr(github_resource, "_workspace_key", lambda _root: "/ws/omnigent")
+    monkeypatch.setattr(github_resource._config, "github_account_preference", lambda _key: "alice")
+
+    def fake_gh(
+        argv: Sequence[str], *, cwd: str, token: str | None = None
+    ) -> tuple[int, str, str]:
+        if list(argv[:4]) == ["auth", "status", "--json", "hosts"]:
+            hosts = {"hosts": {"ghe.corp.com": [{"login": "alice", "state": "success"}]}}
+            return (0, json.dumps(hosts), "")
+        if tuple(argv[:3]) == ("auth", "token", "--user"):
+            # Assert the token lookup targets the account's host, not github.com.
+            assert argv[argv.index("-h") + 1] == "ghe.corp.com"
+            return (0, "tok-ghe\n", "")
+        return (1, "", "no stub")
+
+    monkeypatch.setattr(github_resource, "_gh", fake_gh)
+    assert github_resource._account_token_for("/root") == "tok-ghe"
+
+
+def test_host_for_login_defaults_to_github_when_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A login not found among enumerated accounts defaults to github.com."""
+
+    def fake_gh(
+        argv: Sequence[str], *, cwd: str, token: str | None = None
+    ) -> tuple[int, str, str]:
+        if list(argv[:4]) == ["auth", "status", "--json", "hosts"]:
+            return (0, json.dumps({"hosts": {}}), "")
+        return (1, "", "no stub")
+
+    monkeypatch.setattr(github_resource, "_gh", fake_gh)
+    assert github_resource._host_for_login("/root", "nobody") == "github.com"
+
+
+def test_gh_auth_token_passes_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_gh_auth_token`` pins the lookup to the given host."""
+    seen: dict[str, str] = {}
+
+    def fake_gh(
+        argv: Sequence[str], *, cwd: str, token: str | None = None
+    ) -> tuple[int, str, str]:
+        seen["host"] = argv[argv.index("-h") + 1]
+        return (0, "tok\n", "")
+
+    monkeypatch.setattr(github_resource, "_gh", fake_gh)
+    assert github_resource._gh_auth_token("/root", "alice", "ghe.corp.com") == "tok"
+    assert seen["host"] == "ghe.corp.com"
 
 
 def test_set_github_preference_sets_default_and_account(

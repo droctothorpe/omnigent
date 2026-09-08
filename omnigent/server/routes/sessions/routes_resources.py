@@ -2637,8 +2637,25 @@ def register_resources_routes(
         :returns: The refreshed ``session.github.info`` object.
         """
         conv = await _validate_session(session_id, request, LEVEL_EDIT)
-        body = await request.json()
-        params = {"account": body.get("account"), "remote": body.get("remote")}
+        try:
+            body = await request.json()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="request body must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="request body must be a JSON object")
+        account = body.get("account")
+        remote = body.get("remote")
+        for field_name, field_value in (("account", account), ("remote", remote)):
+            if field_value is not None and not isinstance(field_value, str):
+                raise HTTPException(
+                    status_code=400, detail=f"'{field_name}' must be a string or null"
+                )
+        # ``remote`` is forwarded to ``gh repo set-default <remote>`` as a
+        # positional arg; reject a leading dash so a value like ``--unset`` can't
+        # be smuggled in as a flag.
+        if isinstance(remote, str) and remote.startswith("-"):
+            raise HTTPException(status_code=400, detail="'remote' must not start with '-'")
+        params = {"account": account, "remote": remote}
         try:
             status, result = await _proxy_post_to_runner(
                 session_id,

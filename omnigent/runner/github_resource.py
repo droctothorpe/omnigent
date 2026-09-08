@@ -275,12 +275,31 @@ def _workspace_key(root: str) -> str | None:
     return None
 
 
-def _gh_auth_token(root: str, login: str) -> str | None:
-    """Return *login*'s GitHub token via ``gh auth token --user`` (never logged)."""
-    rc, out, _ = _gh(["auth", "token", "--user", login, "-h", "github.com"], cwd=root)
+def _gh_auth_token(root: str, login: str, host: str = "github.com") -> str | None:
+    """Return *login*'s token on *host* via ``gh auth token --user`` (never logged).
+
+    :param host: The gh host the account lives on. Accounts can be on an
+        Enterprise host, so pass the account's own host rather than assuming
+        ``github.com`` — a token lookup pinned to the wrong host fails (or, for a
+        login present on both, returns the wrong identity).
+    """
+    rc, out, _ = _gh(["auth", "token", "--user", login, "-h", host], cwd=root)
     if rc != 0:
         return None
     return out.strip() or None
+
+
+def _host_for_login(root: str, login: str) -> str:
+    """The gh host the preferred *login* is configured on; ``github.com`` if unknown.
+
+    Only consulted when a per-workspace account preference is set (an
+    ``auth status`` call), so it stays off the happy path.
+    """
+    _, accounts = _list_accounts(root)
+    for account in accounts:
+        if account.get("login") == login and account.get("host"):
+            return str(account["host"])
+    return "github.com"
 
 
 def _account_token_for(root: str, workspace_key: str | None = None) -> str | None:
@@ -300,7 +319,7 @@ def _account_token_for(root: str, workspace_key: str | None = None) -> str | Non
     login = _config.github_account_preference(key)
     if not login:
         return None
-    return _gh_auth_token(root, login)
+    return _gh_auth_token(root, login, _host_for_login(root, login))
 
 
 # Cap the per-check list so a pathological rollup can't bloat the payload; the

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -129,6 +130,10 @@ def save_global_config(
     tmp = resolved.with_name(resolved.name + ".tmp")
     with tmp.open("w") as config_file:
         yaml.safe_dump(cfg, config_file, default_flow_style=False, sort_keys=True)
+    # Carry over the existing file's permissions so a private config (0600 — it
+    # can hold provider credentials) isn't silently widened to the umask default.
+    with contextlib.suppress(FileNotFoundError):
+        os.chmod(tmp, resolved.stat().st_mode & 0o777)
     os.replace(tmp, resolved)
 
 

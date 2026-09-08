@@ -133,3 +133,14 @@ def test_save_global_config_respects_config_home(
     # Written to (and read back from) OMNIGENT_CONFIG_HOME/config.yaml.
     assert (tmp_path / "config.yaml").exists()
     assert github_account_preference("/Users/daniel.lok/omnigent") == "daniellok-db"
+
+
+def test_save_global_config_preserves_file_mode(tmp_path: Path) -> None:
+    import os
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("default_agent: /x\n")
+    os.chmod(cfg, 0o600)  # a locked-down config (may hold provider credentials)
+    save_global_config({"model": "y"}, path=cfg)
+    # The atomic rewrite must not widen 0600 to the umask default.
+    assert (cfg.stat().st_mode & 0o777) == 0o600
