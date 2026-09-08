@@ -138,6 +138,34 @@ async def test_happy_path_parses_full_config(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.asyncio
+async def test_reasoning_effort_parses_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The persisted per-session effort reaches the launch config.
+
+    The new-session composer commits ``reasoning_effort`` on the create call;
+    the runner must read it back so the codex terminal boots at that effort
+    instead of the model default.
+    """
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8123")
+    snapshot = {"workspace": "/tmp/repo", "reasoning_effort": "high"}
+    cfg = await _run(_Client(_Resp(200, snapshot)))
+    assert cfg.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["absent", "", 5, ["high"]])
+async def test_malformed_reasoning_effort_is_dropped(
+    monkeypatch: pytest.MonkeyPatch, value: Any
+) -> None:
+    """A malformed effort must not sink the launch — boot at Codex's default."""
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8123")
+    snapshot: dict[str, Any] = {"workspace": "/tmp/repo"}
+    if value != "absent":
+        snapshot["reasoning_effort"] = value
+    cfg = await _run(_Client(_Resp(200, snapshot)))
+    assert cfg.reasoning_effort is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "labels",
     [

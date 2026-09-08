@@ -4350,6 +4350,12 @@ def _build_native_terminal_message_event(
     # inject as ONE locked step, so the switch can't race the message.
     if model_override is not None:
         event["model_override"] = model_override
+    # Ride the persisted session effort like the generic forward path stamps
+    # ``runner_body["reasoning"]``, so the native executor applies it via
+    # ``thread/settings/update`` ahead of ``turn/start`` even when the
+    # terminal booted before this effort landed.
+    if conv.reasoning_effort is not None:
+        event["reasoning"] = {"effort": conv.reasoning_effort}
     return event
 
 

@@ -458,6 +458,10 @@ class _CodexNativeLaunchConfig:
         still has work to do. False on a session something already routed —
         a web create that pinned the model before the pane launched — so the
         ``UserPromptSubmit`` hook is never registered and no prompt is held.
+    :param reasoning_effort: Persisted per-session effort, e.g. ``"high"``
+        (the new-session composer's create field, kept current by later
+        effort changes). Applied at launch as a ``model_reasoning_effort``
+        config override so the thread boots at the selected effort.
     """
 
     workspace: Path
@@ -472,6 +476,7 @@ class _CodexNativeLaunchConfig:
     auto_harness: bool = False
     routing_enabled: bool = False
     turn_routing: bool = False
+    reasoning_effort: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1004,6 +1009,12 @@ async def _codex_native_launch_config(
         not isinstance(external_session_id, str) or not external_session_id
     ):
         raise RuntimeError(f"Invalid external_session_id for Codex session {session_id!r}.")
+    # The persisted per-session effort (validated at create/PATCH time). A
+    # malformed value must not sink the terminal launch — launch at Codex's
+    # default instead, mirroring the pi-native reader.
+    reasoning_effort = snapshot.get("reasoning_effort")
+    if not (isinstance(reasoning_effort, str) and reasoning_effort):
+        reasoning_effort = None
     # The session's stored workspace is the worktree path for worktree
     # sessions (set by _create_session_worktree), or the repo root
     # otherwise. Use it as the Codex terminal cwd so worktree sessions
@@ -1063,6 +1074,7 @@ async def _codex_native_launch_config(
         auto_harness=routing_class.auto_harness,
         routing_enabled=routing_class.routing_enabled,
         turn_routing=routing_class.turn_routing,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -4261,6 +4273,30 @@ async def _auto_create_codex_terminal(
         )
         or None
     )
+    # Boot the thread at the session's persisted effort. Rides ``-c
+    # model_reasoning_effort=`` so both the app-server and the ``--remote``
+    # TUI (which loads its own config, see build_codex_remote_args) resolve
+    # it. Filtered to codex's vocabulary like the claude-native ``--effort``
+    # guard; a foreign persisted value must not sink the launch.
+    _effort_overrides: list[str] = []
+    if launch_config.reasoning_effort is not None:
+        from omnigent.util.reasoning_effort import CODEX_NATIVE_EFFORTS, validate_effort
+
+        try:
+            _launch_effort = validate_effort(
+                launch_config.reasoning_effort, "codex", CODEX_NATIVE_EFFORTS
+            )
+        except ValueError:
+            _launch_effort = None
+            _logger.warning(
+                "codex-native: ignoring unsupported persisted reasoning effort %r "
+                "for session %s; launching at Codex's default effort",
+                launch_config.reasoning_effort,
+                session_id,
+                extra={"session_id": session_id},
+            )
+        if _launch_effort is not None:
+            _effort_overrides.append(f"model_reasoning_effort={json.dumps(_launch_effort)}")
     # SDK initialization can block on DNS/auth before model discovery times out.
     # Keep it off the runner loop so heartbeats and other sessions can progress.
     app_server = await asyncio.to_thread(
@@ -4270,7 +4306,11 @@ async def _auto_create_codex_terminal(
         cwd=Path(workspace),
         model=_codex_launch.model,
         profile=_codex_launch.profile,
-        extra_config_overrides=[*_codex_launch.config_overrides, *mcp_overrides],
+        extra_config_overrides=[
+            *_codex_launch.config_overrides,
+            *mcp_overrides,
+            *_effort_overrides,
+        ],
         bridge_dir=bridge_dir,
         ap_server_url=launch_config.policy_server_url,
         ap_auth_headers=policy_headers,

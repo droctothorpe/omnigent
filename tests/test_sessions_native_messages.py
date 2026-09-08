@@ -65,6 +65,25 @@ def test_codex_native_session_uses_codex_harness_for_web_messages() -> None:
     }
 
 
+def test_native_terminal_message_carries_persisted_reasoning_effort() -> None:
+    """
+    The persisted session effort rides the native message event, like the
+    generic forward path stamps ``runner_body["reasoning"]``. Without it the
+    native executor sees no effort and never applies the session's selected
+    effort to the running thread ahead of ``turn/start``.
+    """
+    import dataclasses
+
+    from omnigent.server.routes import sessions as sessions_routes
+
+    conv = dataclasses.replace(
+        _conversation_with_wrapper("codex-native-ui"), reasoning_effort="high"
+    )
+
+    event = sessions_routes._build_native_terminal_message_event(conv, _message_event())
+    assert event["reasoning"] == {"effort": "high"}
+
+
 def test_kiro_native_session_uses_kiro_harness_for_web_messages() -> None:
     """Kiro-native web messages use the native bypass, like Codex."""
     from omnigent.server.routes import sessions as sessions_routes
