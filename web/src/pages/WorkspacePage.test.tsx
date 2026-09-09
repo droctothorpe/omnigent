@@ -255,17 +255,25 @@ describe("WorkspacePage", () => {
     expect(useWorkspaceLayoutStore.getState().root).toMatchObject({ sizes: [55, 45] });
   });
 
-  it("uses pane titles without a focused border or global-header clearance", async () => {
+  it("highlights only the focused pane and moves the highlight on pointer focus", async () => {
     const targetPaneId = useWorkspaceLayoutStore.getState().root.id;
     act(() => useWorkspaceLayoutStore.getState().splitPane(targetPaneId, "session-b", "right"));
 
     const { container } = renderWorkspace("/c/session-b");
     const unfocusedPane = container.querySelector('[data-workspace-pane-id][data-focused="false"]');
+    const focusedPane = container.querySelector('[data-workspace-pane-id][data-focused="true"]');
     expect(unfocusedPane).not.toBeNull();
-    fireEvent.pointerDown(unfocusedPane!);
-    await waitFor(() => expect(unfocusedPane).toHaveAttribute("data-focused", "true"));
+    expect(focusedPane).not.toBeNull();
+    expect(unfocusedPane).not.toHaveClass("ring-1", "ring-inset", "ring-primary/40");
+    expect(focusedPane).toHaveClass("ring-1", "ring-inset", "ring-primary/40");
 
-    expect(unfocusedPane?.className).not.toContain("shadow-[inset_0_0_0_1px");
+    fireEvent.pointerDown(unfocusedPane!);
+    await waitFor(() => {
+      expect(unfocusedPane).toHaveAttribute("data-focused", "true");
+      expect(unfocusedPane).toHaveClass("ring-1", "ring-inset", "ring-primary/40");
+      expect(focusedPane).not.toHaveClass("ring-1", "ring-inset", "ring-primary/40");
+    });
+
     expect(unfocusedPane?.closest(".pt-14")).toBeNull();
   });
 

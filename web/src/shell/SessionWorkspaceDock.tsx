@@ -238,6 +238,7 @@ export function SessionWorkspaceDock({
         onCloseTerminal={setTerminalPendingClose}
         maximized={maximized}
         onToggleMaximized={() => setMaximized((current) => !current)}
+        onCollapse={onCollapse}
         permissionLevel={permissionLevel}
         filesPanelSort={filesPanelSort}
         onSortChange={setFilesPanelSort}

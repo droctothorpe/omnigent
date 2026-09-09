@@ -7,6 +7,7 @@ import {
   Loader2Icon,
   MaximizeIcon,
   MinimizeIcon,
+  PanelRightCloseIcon,
   PlusIcon,
   TerminalIcon,
   XIcon,
@@ -641,6 +642,8 @@ interface WorkspacePanelProps {
   maximized: boolean;
   /** Toggle the rail's maximized state. */
   onToggleMaximized: () => void;
+  /** Collapse this panel from within a per-session workspace dock. */
+  onCollapse?: () => void;
   /** Viewer's permission level (gates edit affordances). */
   permissionLevel: number | null;
   /** Changed-files sort order, shared with the viewer's prev/next order. */
@@ -708,6 +711,7 @@ function WorkspacePanelImpl({
   onCloseTerminal,
   maximized,
   onToggleMaximized,
+  onCollapse,
   permissionLevel,
   filesPanelSort,
   onSortChange,
@@ -754,6 +758,7 @@ function WorkspacePanelImpl({
   return (
     <aside
       aria-label={ariaLabel}
+      data-workspace-panel=""
       data-conversation-id={conversationId}
       inert={inert}
       // The resize hook can starve the rail to width 0 while it stays mounted;
@@ -780,7 +785,7 @@ function WorkspacePanelImpl({
         maximized
           ? cn("md:absolute md:inset-0", variant === "global" && "md:border-l")
           : variant === "session-column"
-            ? "md:h-auto md:w-full md:basis-[var(--session-workspace-basis,45%)] md:shrink-0 md:border-t @min-[720px]/session-column:md:h-full @min-[720px]/session-column:md:w-auto @min-[720px]/session-column:md:border-t-0 @min-[720px]/session-column:md:border-l"
+            ? "md:h-auto md:w-full md:basis-[var(--session-workspace-basis,45%)] md:shrink-0 @min-[720px]/session-column:md:h-full @min-[720px]/session-column:md:w-auto"
             : "md:shrink-0 md:border-l",
       )}
       // Width is fixed by the resize handle normally; maximized ignores it and
@@ -1036,6 +1041,19 @@ function WorkspacePanelImpl({
             {maximized ? <MinimizeIcon className="size-4" /> : <MaximizeIcon className="size-4" />}
           </Button>
         </WorkspaceTabTooltip>
+        {variant === "session-column" && onCollapse && (
+          <WorkspaceTabTooltip label="Collapse workspace">
+            <Button
+              variant="ghost"
+              aria-label="Collapse workspace"
+              onClick={onCollapse}
+              size="icon-xs"
+              className="flex size-6"
+            >
+              <PanelRightCloseIcon className="size-4" />
+            </Button>
+          </WorkspaceTabTooltip>
+        )}
       </div>
       {/* Tab content — single slot. An open shell tab holds its xterm; a
           file tab holds FileViewer; the Files/Changes tabs show FilesPanel
