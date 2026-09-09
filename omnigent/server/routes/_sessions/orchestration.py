@@ -331,7 +331,7 @@ from omnigent.server.schemas import (
     SessionUsageEvent,
     SkillSummary,
 )
-from omnigent.server.user_settings import background_session_titles_enabled_for_user
+from omnigent.server.background_session_titles import background_session_titles_enabled
 from omnigent.spec.types import (
     AgentSpec,
     Phase,
@@ -2324,7 +2324,7 @@ async def _persist_external_conversation_item(
         coordinator=background_title_coordinator,
         conversation=conv,
         event=SessionEventInput(type=item.type, data=item.data.model_dump()),
-        enabled=await background_session_titles_enabled_for_user(permission_store, user_id),
+        enabled=background_session_titles_enabled(request.headers),
     )
     persisted_items = await asyncio.to_thread(conversation_store.append, session_id, batch)
     persisted = persisted_items[-1]
@@ -8954,9 +8954,7 @@ async def _create_session_from_existing_agent(
                     coordinator=background_title_coordinator,
                     conversation=conv,
                     event=item,
-                    enabled=await background_session_titles_enabled_for_user(
-                        permission_store, user_id
-                    ),
+                    enabled=background_session_titles_enabled(request.headers),
                 )
                 await _dispatch_session_event_to_runner(
                     conv.id,

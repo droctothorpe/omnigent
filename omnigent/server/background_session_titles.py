@@ -8,6 +8,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Mapping
 from typing import TYPE_CHECKING, Any
 
 from omnigent.entities.conversation import (
@@ -26,6 +27,13 @@ if TYPE_CHECKING:
     from omnigent.server.schemas import SessionEventInput
 
 _logger = logging.getLogger(__name__)
+
+BACKGROUND_SESSION_TITLES_HEADER = "x-omnigent-background-session-titles"
+
+
+def background_session_titles_enabled(headers: Mapping[str, str]) -> bool:
+    """Resolve the browser-local title preference from a request header."""
+    return headers.get(BACKGROUND_SESSION_TITLES_HEADER, "on").lower() != "off"
 
 
 def _background_session_title_harness_supported(harness: str | None) -> bool:
