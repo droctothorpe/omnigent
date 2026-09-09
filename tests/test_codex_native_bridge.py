@@ -306,10 +306,7 @@ def test_write_codex_config_model_replaces_key_after_multiline_array(bridge_dir:
     """The model writer shares the array-aware scan (same duplicate-key hazard)."""
     _write_config(
         bridge_dir,
-        "notify = [\n"
-        '["notify-send", "Codex"],\n'
-        "]\n"
-        'model = "databricks-gpt-5-5"\n',
+        'notify = [\n["notify-send", "Codex"],\n]\nmodel = "databricks-gpt-5-5"\n',
     )
 
     assert write_codex_config_model(bridge_dir, "gpt-5.6-luna") is True
