@@ -2972,9 +2972,7 @@ def test_resolve_databricks_codex_model_pin_never_blocks_on_discovery() -> None:
         patch("omnigent.onboarding.ucode_state.read_ucode_state", return_value=None),
     ):
         # A fresh machine has no cached state: pins pass through untouched.
-        assert (
-            resolve("https://h.example.com", "prof", "system.ai.kimi-k3") == "system.ai.kimi-k3"
-        )
+        assert resolve("https://h.example.com", "prof", "system.ai.kimi-k3") == "system.ai.kimi-k3"
         assert resolve("https://h.example.com", "prof", "gpt-5-6-sol") == "gpt-5-6-sol"
     for network_mock in (creds, discovery, creds2, discovery2):
         network_mock.assert_not_called()
