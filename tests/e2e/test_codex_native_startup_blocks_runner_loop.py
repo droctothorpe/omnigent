@@ -1,8 +1,9 @@
 """Native Codex startup must not block on redundant Databricks discovery.
 
-Regression guard: a native Codex launch that pins the exact canonical
-``system.ai.*`` model must not rediscover the workspace's model listing, and
-the launch build must not freeze the runner's event loop for other sessions.
+Regression guard: a native Codex launch that pins a model the machine's
+cached ucode workspace state already lists must not rediscover the
+workspace's model listing, and the launch build must not freeze the runner's
+event loop for other sessions.
 
 User journey (driven for real against a spawned server + runner):
 
@@ -10,34 +11,30 @@ User journey (driven for real against a spawned server + runner):
    workspace answers the Unity Catalog model listing slowly (a stub that
    delays ``/api/2.1/unity-catalog/model-services`` by
    :data:`_DISCOVERY_DELAY_S`).
-2. The codex wrapper spec pins the *exact canonical* model
-   ``system.ai.gpt-5-6-sol`` -- an id the gateway already serves, so no
-   rediscovery should be needed to build the launch.
+2. The machine has onboarded: ucode's cached workspace state lists the ids
+   the gateway serves, and the codex wrapper spec pins one of them exactly
+   (``system.ai.gpt-5-6-sol``), so no rediscovery is needed to build the
+   launch.
 3. A plain ``hello_world`` session (B) is created on the same runner as a
    loop-liveness probe.
 4. The codex-native session (A) is created; binding it makes the runner
    auto-create A's Codex terminal via ``build_codex_native_server()``.
 
-Two observable symptoms are asserted, each keyed to the reported bug:
+Two regressions are guarded, each keyed to the reported bug:
 
-* **Facet 1 -- redundant model discovery.** Even though A pins the exact
-  canonical ``system.ai.*`` model, the runner still issues the workspace
-  model-services listing (``_resolve_databricks_codex_model`` runs credential
-  resolution + live discovery before its ``if requested`` short-circuit). The
-  regression contract is that a canonical pin must *not* trigger rediscovery,
-  so the test asserts the discovery endpoint was **not** hit -- it fails on the
-  buggy build (the listing *is* hit) and passes once the pin short-circuits.
+* **Facet 1 -- redundant model discovery.** On the buggy build,
+  ``_resolve_databricks_codex_model`` ran credential resolution plus the live
+  workspace listing for every launch, even one whose pin the cached state
+  already confirms. The contract is that such a pin must *not* trigger
+  rediscovery, so the test asserts the discovery endpoint was **not** hit.
 
-* **Facet 2 -- frozen runner event loop.** ``build_codex_native_server()`` runs
-  synchronously on the runner's asyncio loop, so while the slow discovery
-  dependency blocks, the runner cannot service *any* other session. The test
-  hammers session B's runner-served filesystem endpoint from a background
-  thread and asserts no round-trip stalls near the discovery delay. It fails on
-  the buggy build (B's endpoint stalls for ~the full discovery delay) and
-  passes once the blocking builder work is offloaded off the event loop.
-
-Both assertions encode the desired post-fix behavior, so this test is
-red on the current build and turns green when the fix lands.
+* **Facet 2 -- frozen runner event loop.** On the buggy build the slow
+  discovery dependency ran synchronously on the runner's asyncio loop, so the
+  runner could not service *any* other session while it blocked; offloading
+  the builder off the loop landed separately on main. The test hammers
+  session B's runner-served filesystem endpoint from a background thread and
+  asserts no round-trip stalls near the discovery delay, guarding both fixes
+  together.
 
 Usage::
 
@@ -281,6 +278,25 @@ def codex_native_databricks_env(tmp_path: Path) -> Iterator[dict[str, object]]:
     workdir = tmp_path / "workspace"
     for path in (home_dir, source_codex_home, state_dir, artifact_dir, workdir):
         path.mkdir(parents=True, exist_ok=True)
+
+    # The machine has onboarded: ucode's cached workspace state (read via the
+    # fixture-scoped HOME) lists the pinned model, which is what entitles the
+    # launch to skip the live listing.
+    stub_host = f"http://127.0.0.1:{stub_port}"
+    ucode_dir = home_dir / ".ucode"
+    ucode_dir.mkdir()
+    (ucode_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "state_version": 1,
+                "current_workspace": stub_host,
+                "workspaces": {
+                    stub_host: {"workspace": stub_host, "codex_models": [_PINNED_MODEL]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     agent_yaml = tmp_path / "hello_world.yaml"
     agent_yaml.write_text(_HELLO_AGENT_YAML, encoding="utf-8")

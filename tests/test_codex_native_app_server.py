@@ -2886,11 +2886,11 @@ async def test_probe_codex_model_options_probes_every_launch_shape(
 def test_resolve_databricks_codex_model_matches_servable_ids() -> None:
     """The codex launch model resolves against what the workspace serves.
 
-    An unset model takes the newest servable id from the live listing; a
-    legacy ``databricks-`` override resolves to the served ``system.ai.`` id
-    the cached workspace state records for that same model; and a model the
-    cache does not place passes through untouched (the gateway's error beats
-    a silent substitution).
+    An unset model takes the newest servable id; a legacy ``databricks-``
+    override resolves to the served ``system.ai.`` id for that same model; and a
+    model the workspace does not serve passes through untouched (the gateway's
+    error beats a silent substitution). Cached ucode state is absent here, so
+    every pin keeps the live resolution path.
     """
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2907,10 +2907,7 @@ def test_resolve_databricks_codex_model_matches_servable_ids() -> None:
             "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
             return_value=servable,
         ),
-        patch(
-            "omnigent.onboarding.ucode_state.read_ucode_state",
-            return_value=SimpleNamespace(codex_models=list(servable)),
-        ),
+        patch("omnigent.onboarding.ucode_state.read_ucode_state", return_value=None),
     ):
         assert (
             _resolve_databricks_codex_model("https://h.example.com", "prof", None)
@@ -2928,22 +2925,18 @@ def test_resolve_databricks_codex_model_matches_servable_ids() -> None:
         )
 
 
-def test_resolve_databricks_codex_model_pin_never_blocks_on_discovery() -> None:
-    """An explicit pin resolves without credentials or a live listing.
+def test_resolve_databricks_codex_model_cache_confirmed_pin_skips_discovery() -> None:
+    """A pin the cached workspace listing already carries resolves offline.
 
-    For a pin, discovery could only translate the requested spelling onto
-    the one the workspace serves, and the workspace state cached at
-    onboarding already knows those spellings — so the launch never waits on
-    credential acquisition or a workspace round-trip. Without any cached
-    state, every pin passes through untouched: the gateway's error beats a
-    stalled launch.
+    The live round-trip could only echo such a pin back, so the resolver
+    answers from the cache alone — no credential acquisition, no listing —
+    and a slow workspace cannot stall the launch.
     """
     from types import SimpleNamespace
     from unittest.mock import patch
 
     from omnigent.harnesses.codex_native.app_server import _resolve_databricks_codex_model
 
-    resolve = _resolve_databricks_codex_model
     with (
         patch("omnigent.runtime.credentials.databricks.resolve_databricks_workspace") as creds,
         patch(
@@ -2954,28 +2947,49 @@ def test_resolve_databricks_codex_model_pin_never_blocks_on_discovery() -> None:
             return_value=SimpleNamespace(codex_models=["system.ai.gpt-5-6-sol"]),
         ),
     ):
-        # A pin the cache already spells as served echoes back.
         assert (
-            resolve("https://h.example.com", "prof", "system.ai.gpt-5-6-sol")
+            _resolve_databricks_codex_model(
+                "https://h.example.com", "prof", "system.ai.gpt-5-6-sol"
+            )
             == "system.ai.gpt-5-6-sol"
         )
-        # The cache translates a legacy spelling; the network never runs.
-        assert (
-            resolve("https://h.example.com", "prof", "databricks-gpt-5-6-sol")
-            == "system.ai.gpt-5-6-sol"
-        )
+    creds.assert_not_called()
+    discovery.assert_not_called()
+
+
+def test_resolve_databricks_codex_model_never_respells_a_pin_from_the_cache() -> None:
+    """A cache spelled differently than the pin cannot rewrite the pin offline.
+
+    Cached ucode state is written by an external CLI and may predate the
+    gateway's spelling migration. When it spells the pinned model
+    differently, resolving from the cache would downgrade a routable pin to
+    a spelling the gateway no longer serves — so only the live listing may
+    respell a pin.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from omnigent.harnesses.codex_native.app_server import _resolve_databricks_codex_model
+
     with (
-        patch("omnigent.runtime.credentials.databricks.resolve_databricks_workspace") as creds2,
         patch(
-            "omnigent.models.databricks_model_discovery.discover_databricks_codex_models"
-        ) as discovery2,
-        patch("omnigent.onboarding.ucode_state.read_ucode_state", return_value=None),
+            "omnigent.runtime.credentials.databricks.resolve_databricks_workspace",
+            return_value=SimpleNamespace(token="tok"),
+        ),
+        patch(
+            "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
+            return_value=("system.ai.gpt-5-5",),
+        ) as discovery,
+        patch(
+            "omnigent.onboarding.ucode_state.read_ucode_state",
+            return_value=SimpleNamespace(codex_models=["databricks-gpt-5-5"]),
+        ),
     ):
-        # A fresh machine has no cached state: pins pass through untouched.
-        assert resolve("https://h.example.com", "prof", "system.ai.kimi-k3") == "system.ai.kimi-k3"
-        assert resolve("https://h.example.com", "prof", "gpt-5-6-sol") == "gpt-5-6-sol"
-    for network_mock in (creds, discovery, creds2, discovery2):
-        network_mock.assert_not_called()
+        assert (
+            _resolve_databricks_codex_model("https://h.example.com", "prof", "system.ai.gpt-5-5")
+            == "system.ai.gpt-5-5"
+        )
+    discovery.assert_called_once()
 
 
 def test_probe_codex_home_bridges_provider_tables_and_credential(

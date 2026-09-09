@@ -2361,19 +2361,19 @@ def _resolve_databricks_codex_model(host: str, profile: str, requested: str | No
     third-party listing whose Databricks ids carry the legacy
     ``databricks-`` spelling the gateway now answers with ``501
     NOT_IMPLEMENTED ... Use Unity Catalog model services (v3)`` — so a launch
-    could pin a model the workspace will not serve. An unpinned launch picks
-    its default from the workspace instead, as claude-native already does:
-    the live Unity Catalog listing, then ucode's cached copy of it, then the
-    bundled catalog as the documented last resort.
+    could pin a model the workspace will not serve. Resolve from the workspace
+    instead, as claude-native already does: the live Unity Catalog listing,
+    then ucode's cached copy of it, then the bundled catalog as the documented
+    last resort.
 
-    An explicit pin never blocks the launch on credential acquisition or a
-    live listing: for a pin, resolution can only translate the requested
-    spelling onto the one the workspace serves, and the workspace listing
-    cached at onboarding already knows those spellings. A pin the cache
-    resolves launches under its served spelling (so a legacy
-    ``model_override`` persisted before this change still launches); one the
-    cache cannot place passes through untouched, because the gateway's error
-    beats a stalled launch and a silent substitution alike.
+    An explicit model is matched against the servable ids, so a legacy
+    ``model_override`` persisted before this change still launches; one the
+    workspace does not serve passes through untouched, because the gateway's
+    error beats a silent substitution. A pin the cached ucode listing already
+    carries verbatim resolves to itself without credentials or a live
+    listing — the round-trip could only echo it back. The cache is never
+    trusted to *respell* a pin (it may predate the gateway's spelling
+    migration); only the live listing may do that.
 
     :param host: Workspace origin, e.g. ``"https://example.com"``.
     :param profile: Databricks CLI profile backing the launch.
@@ -2386,8 +2386,12 @@ def _resolve_databricks_codex_model(host: str, profile: str, requested: str | No
         select_servable_model,
     )
 
-    if requested:
-        return select_servable_model(requested, _cached_codex_models(host)) or requested
+    if requested and select_servable_model(requested, _cached_codex_models(host)) == requested:
+        # The cached workspace listing already carries this exact pin, so the
+        # credential + live listing round-trip below could only echo it back.
+        # A missing or differently-spelled cache entry keeps the full path:
+        # only the live listing may respell a pin.
+        return requested
 
     servable: tuple[str, ...] = ()
     try:
@@ -2411,6 +2415,8 @@ def _resolve_databricks_codex_model(host: str, profile: str, requested: str | No
         )
         servable = _cached_codex_models(host)
 
+    if requested:
+        return select_servable_model(requested, servable) or requested
     if servable:
         return servable[0]
     return model_catalog.resolve_catalog_model("databricks", family="openai").model_id
