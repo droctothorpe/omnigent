@@ -140,8 +140,17 @@ def test_native_shell_terminal_spec_offers_installed_shells_default_first(
 def test_native_shell_terminal_spec_falls_back_to_bash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no shells installed the spec still offers a single bash terminal."""
+    """With no shells resolvable anywhere the spec still offers a single bash.
+
+    Resolution is fully hermetic: nothing on PATH, nothing in the standard shell
+    dirs, and no usable ``$SHELL`` absolute path — otherwise the dir probe would
+    leak whatever shells the host actually has installed.
+    """
+    from omnigent import _platform
+
     monkeypatch.setattr("shutil.which", lambda name: None)
+    monkeypatch.setattr(_platform, "_resolve_interactive_shell", lambda name: None)
+    monkeypatch.setattr(_platform.os.path, "isabs", lambda path: False)
     monkeypatch.delenv("SHELL", raising=False)
     spec = native_shell_terminal_spec()
     assert list(spec) == ["bash"]
