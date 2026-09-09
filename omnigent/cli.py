@@ -2163,6 +2163,14 @@ def _enforce_wrapper_guard() -> None:
         raise SystemExit(2)
 
 
+class _StaleHostHintIrrelevantError(click.ClickException):
+    """A CLI error whose cause is fully diagnosed at raise time.
+
+    ``main()`` renders it without the stale-host recovery hint: the cause
+    cannot be a stale host process, so that advice would mislead.
+    """
+
+
 def main() -> None:
     """
     Console-script entry point for ``omnigent``.
@@ -2314,7 +2322,7 @@ def main() -> None:
     except click.ClickException as exc:
         log_cli_exception(exc, prefix="Click CLI error")
         exc.show()
-        if suggest_stale_host_recovery:
+        if suggest_stale_host_recovery and not isinstance(exc, _StaleHostHintIrrelevantError):
             print_stale_host_hint()
         raise SystemExit(exc.exit_code) from exc
     except click.Abort as exc:
@@ -10792,8 +10800,9 @@ def debug_db_upgrade(url: str) -> None:
         _run_migrations(engine, url)
     except SchemaNewerThanClientError as exc:
         # Expected operator situation (DB written by a newer build): render
-        # as a clean CLI error instead of the crash handler.
-        raise click.ClickException(str(exc)) from exc
+        # as a clean CLI error, without the crash handler or the unrelated
+        # stale-host recovery hint.
+        raise _StaleHostHintIrrelevantError(str(exc)) from exc
     finally:
         engine.dispose()
     click.echo("Upgrade complete.")

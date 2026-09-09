@@ -249,3 +249,7 @@ def test_db_upgrade_unknown_revision_fails_cleanly_without_crash(tmp_path: Path)
         "db-upgrade leaked the raw alembic resolution error instead of the "
         f"actionable newer-schema message:\n{combined}"
     )
+    assert "runner tunnel rejection" not in combined, (
+        "db-upgrade appended the stale-host recovery hint to a schema-version "
+        f"mismatch, which a stale host cannot cause:\n{combined}"
+    )
