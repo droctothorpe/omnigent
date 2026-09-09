@@ -506,9 +506,7 @@ def _create_pinned_session(rig: _Rig, *, reasoning_effort: str) -> str:
             thread_live = True
             break
         time.sleep(1.0)
-    assert thread_live, (
-        f"codex-native thread never came live for {session_id}\n{rig.log_tails()}"
-    )
+    assert thread_live, f"codex-native thread never came live for {session_id}\n{rig.log_tails()}"
 
     # The report's PATCH: accepted by omnigent (CODEX_NATIVE_EFFORTS carries
     # the full ladder) ...
