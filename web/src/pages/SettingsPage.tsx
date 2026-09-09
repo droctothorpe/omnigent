@@ -1282,13 +1282,10 @@ function BackgroundSessionTitlesControl() {
   const labelId = useId();
   const descriptionId = useId();
 
-  const toggle = useCallback(
-    (next: boolean) => {
-      setEnabled(next);
-      writeBackgroundSessionTitlesEnabled(next);
-    },
-    [],
-  );
+  const toggle = useCallback((next: boolean) => {
+    setEnabled(next);
+    writeBackgroundSessionTitlesEnabled(next);
+  }, []);
 
   return (
     <div className="flex items-start justify-between gap-6">

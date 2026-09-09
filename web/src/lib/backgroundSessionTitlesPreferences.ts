@@ -26,7 +26,5 @@ export function writeBackgroundSessionTitlesEnabled(enabled: boolean): void {
 }
 
 export function backgroundSessionTitlesRequestHeaders(): Record<string, string> {
-  return readBackgroundSessionTitlesEnabled()
-    ? {}
-    : { [BACKGROUND_SESSION_TITLES_HEADER]: "off" };
+  return readBackgroundSessionTitlesEnabled() ? {} : { [BACKGROUND_SESSION_TITLES_HEADER]: "off" };
 }

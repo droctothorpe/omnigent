@@ -6,9 +6,8 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Mapping
 from typing import TYPE_CHECKING, Any
 
 from omnigent.entities.conversation import (

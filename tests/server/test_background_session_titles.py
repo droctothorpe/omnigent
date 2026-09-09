@@ -8,8 +8,8 @@ import pytest
 
 from omnigent.runner.background_titles.service import FOLLOW_USER_LANGUAGE_TITLE_INSTRUCTION
 from omnigent.server.background_session_titles import (
-    BACKGROUND_TITLE_MAX_CHARS,
     BACKGROUND_SESSION_TITLES_HEADER,
+    BACKGROUND_TITLE_MAX_CHARS,
     CUSTOM_BACKGROUND_TITLE_MAX_CHARS,
     BackgroundSessionTitleCoordinator,
     BackgroundTitleRequest,
