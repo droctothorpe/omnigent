@@ -180,7 +180,8 @@ def read_discovered_codex_models(host: str) -> tuple[str, ...]:
         raw = json.loads(target.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return ()
-    except (OSError, json.JSONDecodeError):
+    # ValueError covers malformed JSON and undecodable bytes alike.
+    except (OSError, ValueError):
         _logger.warning("discovered codex models read failed for %s", host, exc_info=True)
         return ()
     if not isinstance(raw, dict):
@@ -206,13 +207,15 @@ def write_discovered_codex_models(host: str, models: Iterable[str]) -> None:
     try:
         try:
             raw = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             raw = {}
         if not isinstance(raw, dict):
             raw = {}
         raw[host.rstrip("/")] = list(models)
         root.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".json.tmp")
+        # Per-writer tmp name: concurrent launches must not tear each other's
+        # in-flight write between write_text and the atomic replace.
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(raw, separators=(",", ":")) + "\n", encoding="utf-8")
         os.replace(tmp, target)
     except OSError:

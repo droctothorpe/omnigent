@@ -3055,6 +3055,12 @@ def test_discovered_codex_models_roundtrip_and_tolerate_bad_state(
     (tmp_path / "state" / "discovered-models.json").write_text("not json", encoding="utf-8")
     assert read_discovered_codex_models("https://h.example.com") == ()
 
+    # Undecodable bytes read as empty, and a rewrite recovers the record.
+    (tmp_path / "state" / "discovered-models.json").write_bytes(b"\xff\xfe\x00")
+    assert read_discovered_codex_models("https://h.example.com") == ()
+    write_discovered_codex_models("https://h.example.com", ["system.ai.gpt-5-6-sol"])
+    assert read_discovered_codex_models("https://h.example.com") == ("system.ai.gpt-5-6-sol",)
+
 
 def test_probe_codex_home_bridges_provider_tables_and_credential(
     monkeypatch: pytest.MonkeyPatch,
