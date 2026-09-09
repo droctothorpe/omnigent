@@ -417,6 +417,8 @@ def test_codex_native_startup_does_not_block_runner_loop(
             if resp.status_code == 200:
                 break
         except httpx.HTTPError:
+            # Transient connect/read errors are expected until the endpoint
+            # comes up; the loop deadline fails persistent ones.
             pass
         time.sleep(0.5)
     else:
@@ -457,7 +459,7 @@ def test_codex_native_startup_does_not_block_runner_loop(
         # ---- session A: codex-native pinned to the exact canonical model ----
         import tempfile
 
-        from omnigent.codex_native import _materialize_codex_agent_spec
+        from omnigent.harnesses.codex_native.main import _materialize_codex_agent_spec
 
         with tempfile.TemporaryDirectory() as spec_tmp:
             spec_path = _materialize_codex_agent_spec(Path(spec_tmp), model=_PINNED_MODEL)
@@ -492,6 +494,8 @@ def test_codex_native_startup_does_not_block_runner_loop(
                     terminal_seen = True
                     break
             except httpx.HTTPError:
+                # Transient errors are expected while the terminal spawns;
+                # the loop deadline fails persistent ones.
                 pass
             time.sleep(0.5)
         assert terminal_seen, "codex-native session A never surfaced its terminal resource"
