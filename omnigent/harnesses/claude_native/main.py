@@ -3113,6 +3113,23 @@ def _native_claude_config_from_entry(
 _BROKER_APIKEY_HELPER_TTL_MS = 900_000
 
 
+# A managed connect deployment can pin the gateway serving-endpoint model (e.g.
+# ``databricks-claude-sonnet-4-6``) so sessions default to a model the workspace
+# actually serves, rather than the bundled catalog default (which may name a
+# family the workspace has not deployed). Mirrors the opencode gateway env var.
+# Discovering the served model from the gateway is a follow-up cleanup.
+_DATABRICKS_GATEWAY_MODEL_ENV = "OMNIGENT_DATABRICKS_GATEWAY_MODEL"
+
+
+def _connect_broker_default_model() -> str:
+    """The model a managed connect session pins: the deployment override if set,
+    else the bundled Databricks Claude catalog default."""
+    pinned = os.environ.get(_DATABRICKS_GATEWAY_MODEL_ENV, "").strip()
+    if pinned:
+        return pinned
+    return model_catalog.resolve_catalog_model("databricks", family="claude").model_id
+
+
 def _connect_broker_claude_config() -> ClaudeNativeUcodeConfig | None:
     """Gateway config for a managed host connected via the credential broker.
 
@@ -3160,7 +3177,7 @@ def _connect_broker_claude_config() -> ClaudeNativeUcodeConfig | None:
             _CLAUDE_CODE_CUSTOM_HEADERS_ENV: _DATABRICKS_CODING_AGENT_HEADER,
         },
         api_key_helper=api_key_helper,
-        model=model_catalog.resolve_catalog_model("databricks", family="claude").model_id,
+        model=_connect_broker_default_model(),
     )
 
 

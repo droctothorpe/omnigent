@@ -10994,6 +10994,29 @@ def test_resolve_native_claude_config_connect_broker_fallback(
     assert config.model == "catalog-databricks-claude-default"
 
 
+def test_connect_fallback_pins_deployment_gateway_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deployment can pin the served gateway model via
+    OMNIGENT_DATABRICKS_GATEWAY_MODEL so managed sessions default to a model the
+    workspace actually serves, rather than the bundled catalog default."""
+    _isolate_to_connect_fallback(monkeypatch)
+    from omnigent.host import databricks_credential as dc
+
+    cfg = tmp_path / ".databrickscfg"
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    monkeypatch.setenv("OMNIGENT_DATABRICKS_GATEWAY_MODEL", "databricks-claude-sonnet-4-6")
+    dc._write_profile(cfg, "https://ws.example")
+    dc._write_sidecar(cfg, "https://srv", "hid", "launch-tok", "https://ws.example")
+
+    config = claude_native.resolve_native_claude_config(spec=None, refresh_models=False)
+
+    assert config is not None
+    # The deployment override wins over the (stubbed) catalog default.
+    assert config.model == "databricks-claude-sonnet-4-6"
+
+
 def test_resolve_native_claude_config_declines_without_broker_sidecar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
