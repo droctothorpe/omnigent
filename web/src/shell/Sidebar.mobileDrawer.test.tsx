@@ -289,6 +289,17 @@ describe("mobile sidebar drawer keyboard inset", () => {
     );
   });
 
+  it("applies no bottom padding for a sub-threshold viewport delta", () => {
+    // A small visual-viewport shrink (browser chrome shifting, not a
+    // keyboard) sits below the hook's inset threshold and must not pad.
+    setIOSViewport(844, 804); // 40px delta — below the 80px threshold
+    renderSidebar();
+
+    expect(screen.getByRole("complementary", { name: "Conversations" }).style.paddingBottom).toBe(
+      "",
+    );
+  });
+
   it("applies no bottom padding off the iOS shell even when the viewport shrinks", () => {
     // A shrunk visual viewport but no iOS shell marker: the browser/Electron
     // keyboard is handled by normal layout, so the drawer must not pad itself.
