@@ -3001,9 +3001,7 @@ def test_resolve_databricks_codex_model_ucode_state_never_confirms_or_respells_a
         )
         # A legacy pin still gets its live translation.
         assert (
-            _resolve_databricks_codex_model(
-                "https://h.example.com", "prof", "databricks-gpt-5-5"
-            )
+            _resolve_databricks_codex_model("https://h.example.com", "prof", "databricks-gpt-5-5")
             == "system.ai.gpt-5-5"
         )
     assert discovery.call_count == 2
