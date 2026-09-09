@@ -6,11 +6,10 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import secrets
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -41,9 +40,6 @@ MCP_STARTUP_CANCELLED = "cancelled"
 MCP_STARTUP_STATES = frozenset(
     {MCP_STARTUP_STARTING, MCP_STARTUP_READY, MCP_STARTUP_FAILED, MCP_STARTUP_CANCELLED}
 )
-# Top-level ``model_reasoning_effort = "<value>"`` line, capturing the value so
-# a model switch can clamp it to one the new model accepts (GLM has no xhigh).
-_EFFORT_KEY_RE = re.compile(r'^(\s*model_reasoning_effort\s*=\s*")([^"]*)("\s*(?:#.*)?)$')
 # Must match ``_CONFIG_FILE`` in ``claude_native_bridge.py`` because
 # ``serve-mcp`` reads this filename for the token.
 _MCP_CONFIG_FILE = "bridge.json"
@@ -585,23 +581,22 @@ def write_codex_config_model(bridge_dir: Path, model: str) -> bool:
     """
     from omnigent.util.reasoning_effort import clamp_effort_for_model
 
-    def _clamp_stale_effort(line: str) -> str | None:
+    def _clamp_stale_effort(document: MutableMapping[str, object]) -> None:
         # The config keeps the launch model's effort (e.g. the user's xhigh
         # default), which the switched-to model may reject (GLM has no xhigh).
         # Clamp it to a value the new model accepts so the next turn does not
         # 400 on reasoning.effort.
-        effort_match = _EFFORT_KEY_RE.match(line)
-        if effort_match:
-            clamped = clamp_effort_for_model(effort_match.group(2), model)
-            if clamped and clamped != effort_match.group(2):
-                return f"{effort_match.group(1)}{clamped}{effort_match.group(3)}"
-        return None
+        effort = document.get("model_reasoning_effort")
+        if isinstance(effort, str):
+            clamped = clamp_effort_for_model(effort, model)
+            if clamped and clamped != effort:
+                document["model_reasoning_effort"] = clamped
 
     return _upsert_top_level_config_key(
         codex_home_for_bridge_dir(bridge_dir) / "config.toml",
-        _MODEL_TOP_KEY_RE,
-        f"model = {json.dumps(model)}",
-        rewrite_other_line=_clamp_stale_effort,
+        "model",
+        model,
+        mutate_document=_clamp_stale_effort,
     )
 
 
@@ -632,79 +627,61 @@ def write_codex_config_effort(bridge_dir: Path, effort: str) -> bool:
     """
     return _upsert_top_level_config_key(
         codex_home_for_bridge_dir(bridge_dir) / "config.toml",
-        _EFFORT_TOP_KEY_RE,
-        f"model_reasoning_effort = {json.dumps(effort)}",
+        "model_reasoning_effort",
+        effort,
     )
-
-
-# Top-level key assignments the config writers upsert, tolerating leading
-# whitespace (valid TOML) like _EFFORT_KEY_RE does.
-_MODEL_TOP_KEY_RE = re.compile(r"^\s*model\s*=")
-_EFFORT_TOP_KEY_RE = re.compile(r"^\s*model_reasoning_effort\s*=")
 
 
 def _upsert_top_level_config_key(
     config_path: Path,
-    key_re: re.Pattern[str],
-    pin_line: str,
+    key: str,
+    value: str,
     *,
-    rewrite_other_line: Callable[[str], str | None] | None = None,
+    mutate_document: Callable[[MutableMapping[str, object]], None] | None = None,
 ) -> bool:
     """
     Upsert one top-level key in a ``config.toml``, best-effort.
 
     Shared engine of :func:`write_codex_config_model` /
-    :func:`write_codex_config_effort`. The scan must only consider top-level
-    STATEMENT lines, and "the first line starting with ``[``" is not a reliable
-    end-of-top-level marker: a top-level multiline array value's continuation
-    lines may begin with ``[`` (nested arrays). Breaking there would miss an
-    existing key after the array and insert a duplicate at the top — invalid
-    TOML that every reader (``tomllib`` and codex itself) rejects. So array
-    nesting is tracked with the same bracket-counting heuristic proven in
-    ``codex_executor._normalize_copied_codex_effort``: a ``[`` at statement
-    position is a real table header (top-level keys end there); inside an
-    unclosed array, lines are only counted, never matched.
+    :func:`write_codex_config_effort`. The file is parsed with ``tomlkit``
+    (style-preserving) rather than scanned line-by-line: hand-rolled scans
+    mis-handle valid TOML (multiline arrays whose column-0 continuation lines
+    start with ``[``, brackets inside strings/comments, quoted keys), and a
+    missed existing key means inserting a duplicate — invalid TOML that every
+    reader (``tomllib`` and codex itself) rejects, corrupting the mirror
+    rather than staling it. An existing top-level ``key`` (bare or quoted) is
+    replaced in place; a missing one is prepended above the existing content,
+    so it can never land under a ``[table]`` header.
 
     :param config_path: The ``config.toml`` to rewrite (created if missing).
-    :param key_re: Matches the top-level assignment lines to replace.
-    :param pin_line: Replacement/insert line, e.g. ``model = "gpt-5.6-luna"``.
-    :param rewrite_other_line: Optional rewrite for other top-level statement
-        lines (returns the new line, or ``None`` to keep it); used by the
-        model writer to clamp a stale effort line.
+    :param key: Top-level key to upsert, e.g. ``"model"``.
+    :param value: String value to record, e.g. ``"gpt-5.6-luna"``.
+    :param mutate_document: Optional extra mutation of the parsed document,
+        applied before serializing; used by the model writer to clamp a stale
+        effort. Only top-level keys are visible to it.
     :returns: ``True`` when the file was updated; ``False`` when it could not
-        be read (including undecodable bytes) or written.
+        be read, parsed (malformed/undecodable — never made worse), or
+        written.
     """
+    import tomlkit
+    from tomlkit.exceptions import ParseError
+
     try:
         existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-        lines = existing.splitlines()
-        replaced = False
-        array_depth = 0  # net unclosed '[' from a top-level multiline array value
-        for i, line in enumerate(lines):
-            if array_depth == 0:
-                # At statement position a leading '[' is a real table header
-                # ([table] / [[array-of-tables]]) -- top-level keys end here.
-                if line.lstrip().startswith("["):
-                    break
-                if key_re.match(line):
-                    lines[i] = pin_line
-                    replaced = True
-                    continue  # the pinned line opens no array
-                if rewrite_other_line is not None:
-                    rewritten = rewrite_other_line(line)
-                    if rewritten is not None:
-                        lines[i] = rewritten
-                        continue  # rewritten lines (effort clamp) open no array
-            # Track array nesting (a bracket-counting heuristic, not a full
-            # TOML parser, but sufficient for this narrow config shape) so
-            # bracketed array content is not mistaken for a table header.
-            array_depth += line.count("[") - line.count("]")
-            if array_depth < 0:
-                array_depth = 0
-        if not replaced:
-            lines.insert(0, pin_line)
+        document = tomlkit.parse(existing)
+        if key in document:
+            document[key] = value
+            output = tomlkit.dumps(document)
+        else:
+            # Prepend: the first line is always top-level, never in a table.
+            output = f"{key} = {json.dumps(value)}\n{existing}"
+            document = tomlkit.parse(output)
+        if mutate_document is not None:
+            mutate_document(document)
+            output = tomlkit.dumps(document)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        config_path.write_text(output, encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ParseError):
         return False
     return True
 

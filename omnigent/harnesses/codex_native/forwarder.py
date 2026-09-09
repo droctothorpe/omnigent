@@ -2964,6 +2964,9 @@ def _refresh_effort_from_config(bridge_dir: Path, forwarder_state: _CodexForward
     config_effort = read_codex_config_effort(bridge_dir)
     if not config_effort:
         return
+    # Change is detected by VALUE, not file revision, so an ABA rewrite between
+    # reads (config A -> live settings B -> terminal back to A) reads as
+    # "unchanged" and the live B wins. Narrow race; the next real change heals it.
     if config_effort != forwarder_state.last_config_effort:
         forwarder_state.effort = config_effort
     forwarder_state.last_config_effort = config_effort

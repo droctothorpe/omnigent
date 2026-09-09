@@ -315,12 +315,65 @@ def test_write_codex_config_model_replaces_key_after_multiline_array(bridge_dir:
     assert len([line for line in body.splitlines() if line.startswith("model =")]) == 1
 
 
-def test_write_codex_config_effort_false_on_undecodable_file(bridge_dir: Path) -> None:
-    """Undecodable bytes → ``False`` (the promised best-effort), not a raise."""
+def test_write_codex_config_effort_replaces_key_after_bracket_in_string(bridge_dir: Path) -> None:
+    """Brackets inside string values/comments must not derail the upsert.
+
+    A line-scanning heuristic that counts brackets sees the lone ``[`` in
+    ``notify = ["["]`` as an unclosed array and skips every following key,
+    inserting a duplicate — invalid TOML. The tomlkit-based upsert parses the
+    document, so string/comment content cannot be mistaken for structure.
+    """
+    _write_config(
+        bridge_dir,
+        'notify = ["["]\n'
+        'model = "gpt-5.5"  # experimental [beta\n'
+        'model_reasoning_effort = "medium"\n',
+    )
+
+    assert write_codex_config_effort(bridge_dir, "high") is True
+    assert read_codex_config_effort(bridge_dir) == "high"
+    body = (codex_home_for_bridge_dir(bridge_dir) / "config.toml").read_text()
+    assert body.count("model_reasoning_effort") == 1
+    # The style-preserving rewrite keeps unrelated lines (and comments) intact.
+    assert 'notify = ["["]' in body
+    assert "# experimental [beta" in body
+
+
+def test_write_codex_config_model_clamps_stale_effort_for_capped_model(bridge_dir: Path) -> None:
+    """Switching onto a capped model clamps a too-high stale effort line.
+
+    The switched-to thread inherits config.toml's effort; one above the new
+    model's ladder would 400 the next turn, so the model write clamps it.
+    """
+    _write_config(bridge_dir, 'model = "gpt-5.5"\nmodel_reasoning_effort = "xhigh"\n')
+
+    assert write_codex_config_model(bridge_dir, "databricks-glm-5-2") is True
+    assert read_codex_config_model(bridge_dir) == "databricks-glm-5-2"
+    assert read_codex_config_effort(bridge_dir) == "medium"
+
+
+def test_write_codex_config_model_replaces_quoted_key(bridge_dir: Path) -> None:
+    """A quoted top-level ``"model"`` key is the same key — replaced, not duplicated."""
+    _write_config(bridge_dir, '"model" = "databricks-gpt-5-5"\n')
+
+    assert write_codex_config_model(bridge_dir, "gpt-5.6-luna") is True
+    assert read_codex_config_model(bridge_dir) == "gpt-5.6-luna"
+
+
+def test_write_codex_config_effort_false_on_undecodable_or_malformed_file(
+    bridge_dir: Path,
+) -> None:
+    """Undecodable or malformed files → ``False`` (best-effort), never made worse."""
     home = codex_home_for_bridge_dir(bridge_dir)
     home.mkdir(parents=True, exist_ok=True)
     (home / "config.toml").write_bytes(b"\xff\xfe\x00broken")
 
+    assert write_codex_config_effort(bridge_dir, "high") is False
+    assert write_codex_config_model(bridge_dir, "gpt-5.6-luna") is False
+
+    # Malformed TOML (e.g. a torn partial write) is refused rather than
+    # rewritten into something even a lenient reader cannot recover.
+    (home / "config.toml").write_text('model_reasoning_effort = "high\n[broken')
     assert write_codex_config_effort(bridge_dir, "high") is False
     assert write_codex_config_model(bridge_dir, "gpt-5.6-luna") is False
 
