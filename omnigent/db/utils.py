@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from omnigent.db.query_context import query_name_scope
 from omnigent.entities import NewConversationItem
+from omnigent.version import VERSION
 
 _logger = logging.getLogger(__name__)
 
@@ -603,8 +604,11 @@ def _verify_db_revision_is_supported(
     except CommandError as exc:
         raise SchemaNewerThanClientError(
             "Omnigent database schema is newer than this version of Omnigent "
-            f"(found revision {current!r}, latest supported revision {head!r}). "
-            "Upgrade Omnigent before using this database."
+            f"({VERSION}): found revision {current!r}, latest supported "
+            f"revision {head!r}. The database does not record which Omnigent "
+            "version wrote it, so upgrade Omnigent to the latest release "
+            f"(any version that includes revision {current!r}) before using "
+            "this database."
         ) from exc
 
 

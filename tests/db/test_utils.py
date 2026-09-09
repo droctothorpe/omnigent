@@ -42,6 +42,7 @@ from omnigent.entities.conversation import (
     ResourceEventData,
     SlashCommandData,
 )
+from omnigent.version import VERSION
 
 
 @pytest.fixture(autouse=True)
@@ -524,6 +525,10 @@ def test_initialize_or_verify_schema_reports_database_from_newer_build(
     msg = str(exc_info.value)
     assert future_revision in msg
     assert head in msg
+    assert VERSION in msg, (
+        f"Error message must state the installed Omnigent version so the "
+        f"operator knows which build is too old. Got: {msg!r}"
+    )
     assert "out of date" not in msg.lower()
     assert "db-upgrade" not in msg
 
@@ -564,7 +569,12 @@ def test_run_migrations_reports_database_from_newer_build(tmp_path: Path) -> Non
     finally:
         engine.dispose()
 
-    assert "Can't locate revision" not in str(exc_info.value)
+    msg = str(exc_info.value)
+    assert "Can't locate revision" not in msg
+    assert VERSION in msg, (
+        f"Error message must state the installed Omnigent version so the "
+        f"operator knows which build is too old. Got: {msg!r}"
+    )
 
 
 # ── slash_command persistence path ────────────────────

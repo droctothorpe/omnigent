@@ -16,6 +16,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from omnigent.cli import cli
+from omnigent.version import VERSION
 
 # An Alembic revision id no build's migration chain will ever contain —
 # stands in for a database stamped by a build newer than this one.
@@ -61,6 +62,10 @@ def test_db_upgrade_newer_schema_renders_clean_cli_error(tmp_path: Path) -> None
     assert "newer than this version" in result.output, (
         "db-upgrade must tell the user the database is newer than this build "
         f"and to upgrade Omnigent; instead it printed:\n{result.output}"
+    )
+    assert VERSION in result.output, (
+        "db-upgrade must state the installed Omnigent version so the user "
+        f"knows which build is too old; instead it printed:\n{result.output}"
     )
     assert "Traceback (most recent call last)" not in result.output, (
         f"db-upgrade printed a raw traceback instead of a friendly error:\n{result.output}"
