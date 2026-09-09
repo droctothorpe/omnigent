@@ -3037,7 +3037,9 @@ def test_discovered_codex_models_roundtrip_and_tolerate_bad_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The persisted served listing round-trips per host and reads bad state as empty."""
+    """The persisted served listing round-trips per host; bad or old state reads empty."""
+    import time
+
     from omnigent.harnesses.codex_native.state import (
         read_discovered_codex_models,
         write_discovered_codex_models,
@@ -3059,6 +3061,65 @@ def test_discovered_codex_models_roundtrip_and_tolerate_bad_state(
     (tmp_path / "state" / "discovered-models.json").write_bytes(b"\xff\xfe\x00")
     assert read_discovered_codex_models("https://h.example.com") == ()
     write_discovered_codex_models("https://h.example.com", ["system.ai.gpt-5-6-sol"])
+    assert read_discovered_codex_models("https://h.example.com") == ("system.ai.gpt-5-6-sol",)
+
+    # An expired record reads as empty: a stale spelling must not keep
+    # confirming a pin after the workspace could have migrated.
+    stale = {
+        "https://h.example.com": {
+            "models": ["system.ai.gpt-5-6-sol"],
+            "recorded_at": int(time.time()) - 8 * 24 * 60 * 60,
+        }
+    }
+    (tmp_path / "state" / "discovered-models.json").write_text(
+        json.dumps(stale), encoding="utf-8"
+    )
+    assert read_discovered_codex_models("https://h.example.com") == ()
+
+
+def test_resolve_databricks_codex_model_expired_record_rediscovers_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An expired persisted listing cannot confirm a pin; the launch heals live.
+
+    The record is rewritten only by live discovery, so without an expiry an
+    always-pinned launch would trust a stale spelling forever after a
+    workspace vocabulary migration. Past the TTL the pin returns to the live
+    listing — which respells, echoes, or passes it through per what the
+    workspace serves now — and the fresh listing is re-persisted.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from omnigent.harnesses.codex_native.app_server import _resolve_databricks_codex_model
+    from omnigent.harnesses.codex_native.state import read_discovered_codex_models
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(state_dir))
+    (state_dir / "discovered-models.json").write_text(
+        json.dumps({"https://h.example.com": {"models": ["system.ai.gpt-5-5"], "recorded_at": 1}}),
+        encoding="utf-8",
+    )
+    with (
+        patch(
+            "omnigent.runtime.credentials.databricks.resolve_databricks_workspace",
+            return_value=SimpleNamespace(token="tok"),
+        ),
+        patch(
+            "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
+            return_value=("system.ai.gpt-5-6-sol",),
+        ) as discovery,
+    ):
+        # The workspace no longer serves the pinned model: the stale record
+        # must not vouch for it, and the live path passes it through loud.
+        assert (
+            _resolve_databricks_codex_model("https://h.example.com", "prof", "system.ai.gpt-5-5")
+            == "system.ai.gpt-5-5"
+        )
+    discovery.assert_called_once()
+    # The live listing was re-persisted, healing the record for later launches.
     assert read_discovered_codex_models("https://h.example.com") == ("system.ai.gpt-5-6-sol",)
 
 

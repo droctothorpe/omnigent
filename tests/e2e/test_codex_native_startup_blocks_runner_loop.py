@@ -285,7 +285,10 @@ def codex_native_databricks_env(tmp_path: Path) -> Iterator[dict[str, object]]:
     # pinned model, which is what entitles the launch to skip the listing.
     stub_host = f"http://127.0.0.1:{stub_port}"
     (state_dir / "discovered-models.json").write_text(
-        json.dumps({stub_host: [_PINNED_MODEL]}), encoding="utf-8"
+        json.dumps(
+            {stub_host: {"models": [_PINNED_MODEL], "recorded_at": int(time.time())}}
+        ),
+        encoding="utf-8",
     )
 
     agent_yaml = tmp_path / "hello_world.yaml"

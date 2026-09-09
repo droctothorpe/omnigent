@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,12 @@ _STATE_ROOT_ENV_VAR = "OMNIGENT_CODEX_NATIVE_STATE_DIR"
 _logger = logging.getLogger(__name__)
 _LAUNCH_FILE = "launch.json"
 _DISCOVERED_MODELS_FILE = "discovered-models.json"
+#: How long a persisted served listing may confirm a launch pin. Long enough
+#: that pinned launches skip the discovery round-trip in practice; short
+#: enough to bound how long a stale spelling could strand an always-pinned
+#: launch after a workspace vocabulary migration (past it, the launch
+#: rediscovers live and re-persists the fresh listing).
+_DISCOVERED_MODELS_TTL_S = 24 * 60 * 60
 _ID_HASH_CHARS = 32
 
 
@@ -166,14 +173,16 @@ def read_launch_state(conversation_id: str) -> CodexNativeLaunchState | None:
 
 
 def read_discovered_codex_models(host: str) -> tuple[str, ...]:
-    """Codex ids a live workspace listing previously reported for *host*.
+    """Codex ids a recent live workspace listing reported for *host*.
 
     Written only from a successful Unity Catalog listing, so unlike
     externally-written ucode state the ids carry the spelling the workspace
-    actually serves. Missing, unreadable, or malformed state reads as empty.
+    actually serves. Records older than :data:`_DISCOVERED_MODELS_TTL_S`
+    read as empty — so a stale spelling cannot confirm a pin indefinitely —
+    and so do missing, unreadable, or malformed ones.
 
     :param host: Workspace origin, e.g. ``"https://example.com"``.
-    :returns: The persisted served ids, or ``()`` when none are recorded.
+    :returns: The recently persisted served ids, or ``()``.
     """
     target = _codex_native_state_root() / _DISCOVERED_MODELS_FILE
     try:
@@ -186,7 +195,15 @@ def read_discovered_codex_models(host: str) -> tuple[str, ...]:
         return ()
     if not isinstance(raw, dict):
         return ()
-    models = raw.get(host.rstrip("/"))
+    entry = raw.get(host.rstrip("/"))
+    if not isinstance(entry, dict):
+        return ()
+    recorded_at = entry.get("recorded_at")
+    if not isinstance(recorded_at, int | float):
+        return ()
+    if time.time() - recorded_at > _DISCOVERED_MODELS_TTL_S:
+        return ()
+    models = entry.get("models")
     if not isinstance(models, list):
         return ()
     return tuple(str(model) for model in models)
@@ -211,12 +228,14 @@ def write_discovered_codex_models(host: str, models: Iterable[str]) -> None:
             raw = {}
         if not isinstance(raw, dict):
             raw = {}
-        raw[host.rstrip("/")] = list(models)
+        raw[host.rstrip("/")] = {"models": list(models), "recorded_at": int(time.time())}
         root.mkdir(parents=True, exist_ok=True)
         # Per-writer tmp name: concurrent launches must not tear each other's
         # in-flight write between write_text and the atomic replace.
         tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(raw, separators=(",", ":")) + "\n", encoding="utf-8")
         os.replace(tmp, target)
-    except OSError:
+    # TypeError/ValueError keep the best-effort promise if a caller ever
+    # passes something json.dumps refuses.
+    except (OSError, TypeError, ValueError):
         _logger.warning("discovered codex models write failed for %s", host, exc_info=True)

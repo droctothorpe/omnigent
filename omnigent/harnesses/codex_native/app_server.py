@@ -2370,11 +2370,12 @@ def _resolve_databricks_codex_model(host: str, profile: str, requested: str | No
     ``model_override`` persisted before this change still launches; one the
     workspace does not serve passes through untouched, because the gateway's
     error beats a silent substitution. One shortcut: a pin carried verbatim
-    by the served listing a previous live discovery persisted resolves to
+    by the served listing a recent live discovery persisted resolves to
     itself without credentials or a new listing — the round-trip could only
     echo it back. Only that listing may confirm a pin, because only it is
-    known to carry the served spelling; externally-written ucode state has
-    no authority over a pin's spelling (its vocabulary may predate the
+    known to carry the served spelling, and its record expires so a stale
+    spelling cannot confirm forever; externally-written ucode state has no
+    authority over a pin's spelling (its vocabulary may predate the
     gateway's spelling migration) and is consulted only after live
     discovery fails, as before.
 
@@ -2396,11 +2397,11 @@ def _resolve_databricks_codex_model(host: str, profile: str, requested: str | No
     if requested:
         served = read_discovered_codex_models(host)
         if select_servable_model(requested, served) == requested:
-            # A listing this code previously fetched live from the workspace
-            # carries the exact pin, so the credential + live listing
-            # round-trip below could only echo it back. Anything less — a
-            # missing record, or a hit under a different spelling — keeps the
-            # full path: only a live listing may respell a pin.
+            # A listing recently fetched live from the workspace carries the
+            # exact pin, so the credential + live listing round-trip below
+            # could only echo it back. Anything less — a missing or expired
+            # record, or a hit under a different spelling — keeps the full
+            # path: only a live listing may respell a pin.
             return requested
 
     servable: tuple[str, ...] = ()
