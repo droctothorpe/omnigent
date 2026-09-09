@@ -1174,6 +1174,7 @@ def register_events_routes(
                 background_title_coordinator=background_title_coordinator,
                 permission_store=permission_store,
                 user_id=user_id,
+                enabled=background_session_titles_enabled(request.headers),
             )
             return {"queued": False, "item_id": item_id}
         if body.type == _EXTERNAL_OUTPUT_TEXT_DELTA_TYPE:

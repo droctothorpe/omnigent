@@ -2221,6 +2221,7 @@ async def _persist_external_conversation_item(
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
     permission_store: PermissionStore | None = None,
     user_id: str | None = None,
+    enabled: bool = True,
 ) -> str:
     """
     Persist and broadcast a conversation item produced outside AP.
@@ -2324,7 +2325,7 @@ async def _persist_external_conversation_item(
         coordinator=background_title_coordinator,
         conversation=conv,
         event=SessionEventInput(type=item.type, data=item.data.model_dump()),
-        enabled=background_session_titles_enabled(request.headers),
+        enabled=enabled,
     )
     persisted_items = await asyncio.to_thread(conversation_store.append, session_id, batch)
     persisted = persisted_items[-1]
