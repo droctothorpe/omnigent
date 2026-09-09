@@ -40,10 +40,6 @@ from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError, StatementError
 
 from omnigent.codex_approval_modes import CODEX_NATIVE_PERMISSION_VALUES
-from omnigent.cost_plan import (
-    COST_CONTROL_LABEL_NAMESPACE,
-    reserved_cost_control_keys,
-)
 from omnigent.db.utils import generate_task_id
 from omnigent.entities import (
     USER_SESSION_TITLE_MAX_CHARS,
@@ -66,15 +62,12 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_plugins import (
     NativeCodingAgent,
 )
-from omnigent.native_coding_agents import (
+from omnigent.models.model_metadata import concrete_reported_model
+from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
 )
 from omnigent.policies.types import EvaluationContext
-from omnigent.reasoning_effort import (
-    EFFORT_VALUES,
-    validate_effort,
-)
 from omnigent.runner.identity import (
     token_bound_runner_id,
 )
@@ -275,10 +268,6 @@ from omnigent.server.schemas import (
     SkillSummary,
     ToolOutputDeltaEvent,
 )
-from omnigent.session_lifecycle import (
-    labels_with_closed_status,
-    title_without_closed_marker,
-)
 from omnigent.spec.types import (
     AgentSpec,
     Phase,
@@ -294,6 +283,18 @@ from omnigent.stores.conversation_store import (
 )
 from omnigent.stores.host_store import Host, HostStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.util.cost_plan import (
+    COST_CONTROL_LABEL_NAMESPACE,
+    reserved_cost_control_keys,
+)
+from omnigent.util.reasoning_effort import (
+    EFFORT_VALUES,
+    validate_effort,
+)
+from omnigent.util.session_lifecycle import (
+    labels_with_closed_status,
+    title_without_closed_marker,
+)
 
 
 def _codex_plan_mode_enabled(mode: str) -> bool:
@@ -1032,6 +1033,7 @@ def _client_supplied_hook_elicitation_id(
 def _consume_pre_resolved_harness_elicitation(
     session_id: str,
     elicitation_id: str,
+    request_fingerprint: str | None = None,
 ) -> _PreResolvedHarnessElicitation | None:
     """
     Consume a resolution that arrived before the hook wait registered.
@@ -1039,6 +1041,16 @@ def _consume_pre_resolved_harness_elicitation(
     :param session_id: Omnigent session id, e.g. ``"conv_abc123"``.
     :param elicitation_id: Harness elicitation id, e.g.
         ``"elicit_codex_abc123"``.
+    :param request_fingerprint: Digest of the consuming re-park's request
+        params, e.g. a sha256 hex string. A verdict-carrying tombstone
+        is adopted ONLY on a proven same-question match: both sides
+        must carry a fingerprint and they must be equal. Any other
+        combination (either side ``None``, or a mismatch) fails closed
+        — the tombstone is dropped and the prompt is re-published — so
+        a stale approval can never gate a DIFFERENT question that
+        reused this id. Terminal-side tombstones (``result is None``)
+        skip the check: adopting one only fail-asks, and their producer
+        has no params to fingerprint.
     :returns: The consumed tombstone when one matched this session
         (its ``result`` carries the web verdict to honor, or ``None``
         for a terminal-side resolution), or ``None`` when nothing was
@@ -1048,10 +1060,23 @@ def _consume_pre_resolved_harness_elicitation(
     tombstone = _harness_pre_resolved_elicitations.pop(elicitation_id, None)
     if tombstone is None:
         return None
-    if tombstone.session_id == session_id:
-        return tombstone
-    _harness_pre_resolved_elicitations[elicitation_id] = tombstone
-    return None
+    if tombstone.session_id != session_id:
+        _harness_pre_resolved_elicitations[elicitation_id] = tombstone
+        return None
+    if tombstone.result is not None and (
+        tombstone.request_fingerprint is None
+        or request_fingerprint is None
+        or tombstone.request_fingerprint != request_fingerprint
+    ):
+        # A verdict is replayed only on a proven same-question match.
+        # A differing fingerprint means the id was reused by a LATER,
+        # different question; a missing fingerprint on either side
+        # means the match cannot be proven (e.g. the gap path found no
+        # valid pending prompt to digest). Both fail closed: drop the
+        # tombstone and let the new prompt be published — the safe cost
+        # is one re-ask, never a stale approval gating a new question.
+        return None
+    return tombstone
 
 
 def _prune_pre_resolved_harness_elicitations(now: float | None = None) -> None:
@@ -1590,16 +1615,28 @@ def _publish_input_consumed(
     session_stream.publish(session_id, event.model_dump())
 
 
+# Wall-clock start of each session's in-flight compaction. A long compaction
+# re-announces in_progress on every status poll; carrying one stable
+# started_at lets clients anchor their elapsed counter to the true start,
+# even across a page reload (the live stream has no replay).
+_compaction_started_at: dict[str, int] = {}
+
+
 def _publish_compaction_in_progress(session_id: str) -> None:
     """
     Publish the standard compaction progress event to a session stream.
 
+    Repeated calls while the same compaction runs reuse the ``started_at``
+    recorded on the first call; ``completed``/``failed`` clear it so the
+    next compaction starts a fresh clock.
+
     :param session_id: Session/conversation identifier,
         e.g. ``"conv_abc123"``.
     """
+    started_at = _compaction_started_at.setdefault(session_id, int(time.time()))
     session_stream.publish(
         session_id,
-        {"type": "response.compaction.in_progress"},
+        {"type": "response.compaction.in_progress", "started_at": started_at},
     )
 
 
@@ -1617,6 +1654,7 @@ def _publish_compaction_completed(session_id: str, total_tokens: int | None) -> 
     :param total_tokens: Tiktoken estimate of the post-compaction
         context size, e.g. ``8421``. ``None`` when unavailable.
     """
+    _compaction_started_at.pop(session_id, None)
     payload: dict[str, object] = {"type": "response.compaction.completed"}
     if total_tokens is not None:
         payload["total_tokens"] = total_tokens
@@ -1636,6 +1674,7 @@ def _publish_compaction_failed(session_id: str) -> None:
     :param session_id: Session/conversation identifier,
         e.g. ``"conv_abc123"``.
     """
+    _compaction_started_at.pop(session_id, None)
     session_stream.publish(session_id, {"type": "response.compaction.failed"})
 
 
@@ -2214,8 +2253,8 @@ async def _persist_external_model_change(
             "external_model_change requires data.model to be a non-empty string",
             code=ErrorCode.INVALID_INPUT,
         )
-    model = raw_model.strip()
-    if conv.reported_model == model:
+    model = concrete_reported_model(raw_model)
+    if model is None or conv.reported_model == model:
         return
     await asyncio.to_thread(
         conversation_store.update_conversation,
@@ -3086,11 +3125,12 @@ def _parse_external_conversation_item(
             "external_conversation_item data.response_id must be a non-empty string",
             code=ErrorCode.INVALID_INPUT,
         )
-    # NOTE: external conversation items are persisted with a random
-    # primary key like any other item — there is no server-side dedup.
-    # Producers (the claude-native / codex-native forwarders) are
-    # responsible for not re-posting records they have already sent;
-    # they no longer emit a ``source_id`` dedup key to the server.
+    # NOTE: producers that can re-post (the native transcript forwarders
+    # retry timed-out POSTs whose disposition they cannot know) send a
+    # ``data.source_id`` dedup key; the persist path derives the item's
+    # stable id from it so the append is idempotent (see
+    # ``_persist_external_conversation_item``). Items without one keep the
+    # store-assigned random id and no server-side dedup.
     # Cap a native tool result so a multi-MB output isn't persisted + broadcast as one frame.
     if item_type == "function_call_output" and isinstance(item_data.get("output"), str):
         item_data = {**item_data, "output": cap_tool_output(item_data["output"])}
@@ -4247,6 +4287,8 @@ def _publish_status(
     background_task_count: int | None = None,
     background_tasks: list[BackgroundTaskInfo] | None = None,
     blocked_on: str | None = None,
+    persist_live_status: bool = True,
+    scheduled_run_outcome: Literal["auto", "failed"] = "auto",
 ) -> None:
     """
     Publish a typed :class:`SessionStatusEvent` to the live stream and
@@ -4300,7 +4342,8 @@ def _publish_status(
     # Mirror the transition onto the conversation row (best-effort,
     # deduplicated, off-loop) so replicas that don't hold this session's
     # runner tunnel serve the same sidebar status.
-    session_live_state.persist_live_status(session_id, status)
+    if persist_live_status:
+        session_live_state.persist_live_status(session_id, status)
     # Event-driven scheduled-run completion. A terminal edge (idle = the turn
     # completed; failed = it errored/disconnected) flips the conversation's
     # still-``running`` scheduled_task_run to succeeded/failed. This is the
@@ -4311,7 +4354,14 @@ def _publish_status(
     # the common case: interactive (non-scheduled) conversations have no
     # running run, and the reverse lookup cheaply returns None. running/waiting
     # edges are skipped entirely so the hot path pays nothing mid-turn.
-    if status == "idle":
+    if scheduled_run_outcome == "failed":
+        session_live_state.persist_scheduled_run_completion(
+            session_id,
+            "failed",
+            error_code="incomplete",
+            error="runner disappeared before the turn reached a terminal state",
+        )
+    elif status == "idle":
         session_live_state.persist_scheduled_run_completion(session_id, "succeeded")
     elif status == "failed":
         # Canonical server-side broken-turn signal: every server-originated
@@ -4388,6 +4438,46 @@ def _publish_status(
     if blocked_on is None:
         payload.pop("blocked_on", None)
     session_stream.publish(session_id, payload)
+
+
+def reconcile_orphaned_running_status(
+    session_id: str,
+    conversation_store: ConversationStore,
+    stale_before: int,
+) -> bool:
+    """
+    Settle a session that reads ``running`` but whose runner is
+    confirmed gone down to a non-running resting state.
+
+    A ``running`` live-status is only meaningful while a runner is
+    actually executing the turn. When the runner (and its host) have
+    dropped past the liveness window — a server replica that restarted
+    and outlived the runner, a crashed host, a graceful disconnect
+    mid-turn — the persisted ``running`` is stale: no executor will
+    ever emit the terminal edge that would clear it, so it sticks
+    forever. The sidebar then shows a turn that isn't happening, and
+    ``stop_session`` reports a success it never delivered.
+
+    This is the lazy-on-read backstop for that stale state. The store performs
+    one conditional transition so a fresh liveness stamp or terminal status
+    written by another replica wins the race. A successful transition updates
+    the local cache and stream without issuing a second status write, and
+    classifies any associated scheduled run as failed/incomplete.
+
+    :param session_id: Session/conversation identifier to settle.
+    :param conversation_store: Store performing the conditional transition.
+    :param stale_before: Runner stamps at or after this epoch are fresh.
+    :returns: Whether this call performed the transition.
+    """
+    if not conversation_store.settle_orphaned_live_status(session_id, stale_before):
+        return False
+    _publish_status(
+        session_id,
+        "idle",
+        persist_live_status=False,
+        scheduled_run_outcome="failed",
+    )
+    return True
 
 
 def _truncate_label(value: str) -> str:
@@ -6330,10 +6420,17 @@ def _build_new_item(
     """
     Construct a :class:`NewConversationItem` from a POSTed event.
 
-    Validates the data payload via ``parse_item_data`` (the same
-    validator the route boundary already invoked) and wraps the
+    Validates the data payload via ``parse_item_data`` and wraps the
     result with the response_id linkage required by the conversation
     store.
+
+    The item *type* is checked at the route boundary, but ``data`` is a
+    free-form dict there, so a caller can name a known type and omit the
+    fields it requires — ``{"type": "message"}`` with no ``role`` or
+    ``content`` is the shape seen in production. That is bad input, so the
+    raised ``ValidationError`` becomes an
+    :class:`~omnigent.errors.OmnigentError` the caller can act on rather
+    than escaping as an unhandled 500.
 
     :param body: Validated event input — guaranteed to be a known
         item type (the route checked ``_ALLOWED_EVENT_TYPES``).
@@ -6345,8 +6442,16 @@ def _build_new_item(
         single-user mode.
     :returns: A :class:`NewConversationItem` ready for delivery
         or persistence.
+    :raises OmnigentError: When ``body.data`` does not satisfy the
+        payload schema for ``body.type``.
     """
-    data = parse_item_data(body.type, {"type": body.type, **body.data})
+    try:
+        data = parse_item_data(body.type, {"type": body.type, **body.data})
+    except ValidationError as exc:
+        raise OmnigentError(
+            f"invalid data for {body.type!r} item: {exc}",
+            code=ErrorCode.INVALID_INPUT,
+        ) from exc
     return NewConversationItem(
         type=body.type,
         response_id=response_id,
@@ -7213,12 +7318,90 @@ async def _relay_persist(
         )
 
 
+async def _relay_response_policy_deny_reason(
+    conversation_store: ConversationStore,
+    session_id: str,
+    text: str,
+) -> str | None:
+    """
+    Evaluate *text* against the session's OUTPUT (RESPONSE) phase policies.
+
+    Runner-relayed (scaffold) harnesses never POST the assistant message
+    back through ``POST /v1/sessions/{id}/events``, so the
+    ``Phase.RESPONSE`` evaluator there is unreachable for them. The relay's
+    terminal text flush is their single persist point, so this evaluates the
+    same output policies over the final assistant text right before it
+    becomes durable — making a spec's ``response``-phase policy enforceable
+    in the runner topology.
+
+    Fails OPEN (returns ``None``) on any evaluation error, matching the LLM
+    phases' advisory default: a policy-engine hiccup must not destroy the
+    narration the user already watched.
+
+    :param conversation_store: Store for the conversation/labels lookup.
+    :param session_id: Session/conversation identifier.
+    :param text: The joined assistant text segment about to persist.
+    :returns: The deny reason when an output policy DENYs, else ``None``.
+    """
+    from omnigent.runtime._globals import _agent_store
+
+    if _agent_store is None:
+        # Fail open, but loudly: a mis-initialized runtime would otherwise
+        # silently disable RESPONSE-phase gating for every relayed session.
+        _logger.warning(
+            "Relay: agent store not initialized; skipping RESPONSE-phase "
+            "policy evaluation for session=%s",
+            session_id,
+            extra={"session_id": session_id},
+        )
+        return None
+    try:
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if conv is None or conv.agent_id is None:
+            return None
+        body = SessionEventInput(
+            type="message",
+            data={
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            },
+        )
+        # The relay has no HTTP caller; the acting principal is the
+        # turn-initiating human persisted at forward time (same label the
+        # policy-evaluate route falls back to), so per-user policies gate
+        # on the correct actor.
+        turn_actor = (conv.labels or {}).get(_TURN_ACTOR_LABEL)
+        verdict = await _evaluate_output_policy(
+            session_id,
+            conv,
+            body,
+            conversation_store,
+            _agent_store,
+            None,
+            actor=_build_actor(turn_actor),
+        )
+    except Exception:  # noqa: BLE001 — fail open: output phases are advisory on error
+        _logger.exception(
+            "Relay: RESPONSE-phase policy evaluation failed for session=%s; "
+            "persisting the text unmodified",
+            session_id,
+            extra={"session_id": session_id},
+        )
+        return None
+    if verdict is None:
+        return None
+    return str(verdict.get("reason") or "Denied by policy")
+
+
 async def _flush_relay_text(
     conversation_store: ConversationStore | None,
     session_id: str,
     text_acc: list[str],
     response_id: str | None,
     model_id: str | None,
+    *,
+    deny_reason: str | None = None,
+    evaluate_response_phase: bool = False,
 ) -> None:
     """
     Persist buffered assistant text as a message item and clear the buffer.
@@ -7253,12 +7436,32 @@ async def _flush_relay_text(
     permanently. On failure the buffers are left intact so the text still
     replays and is retried at the next flush / ``response.completed``.
 
+    On an OUTPUT-phase DENY the denied text must never become a durable
+    assistant message. Two deny sources feed this (both persist the same
+    ``[Denied by policy: ...]`` sentinel the ``_evaluate_output_policy``
+    route path uses):
+
+    - *deny_reason*: the ``PHASE_LLM_RESPONSE`` DENY the policy-evaluate
+      route recorded for this session's in-flight turn — the harness only
+      errors the turn after the text already streamed, so the relay is
+      the last gate before the denied content persists.
+    - *evaluate_response_phase*: evaluate the joined text against the
+      spec's ``Phase.RESPONSE`` policies right here. Runner-relayed
+      harnesses never POST the assistant message back through
+      ``POST .../events``, so this flush is the only place the
+      ``response`` phase can fire in this topology.
+
     :param conversation_store: Store to append to, or ``None`` to skip
         persistence (test parsing path).
     :param session_id: Conversation/session id, e.g. ``"conv_abc123"``.
     :param text_acc: Accumulated delta strings; cleared in place on success.
     :param response_id: Turn id so the segment groups with its tool calls.
     :param model_id: Assistant agent label for the message.
+    :param deny_reason: When set, an output policy already denied this
+        turn's assistant text; persist the deny sentinel instead of it.
+    :param evaluate_response_phase: When ``True`` (terminal flush), gate
+        the text through the spec's RESPONSE-phase policies before
+        persisting.
     """
     if not text_acc:
         return
@@ -7272,6 +7475,27 @@ async def _flush_relay_text(
     if conversation_store is None:
         text_acc.clear()
         return
+    if deny_reason is None and evaluate_response_phase:
+        deny_reason = await _relay_response_policy_deny_reason(
+            conversation_store, session_id, text
+        )
+    if deny_reason is not None:
+        # Substitute the sentinel for the denied content — same Option-B
+        # shape as the ``_evaluate_output_policy`` route path, so follow-up
+        # turns and the items API see a consistent deny record. Publish the
+        # sentinel delta too: live clients already rendered the denied text
+        # from the stream (that flash is the residual gap full buffering
+        # would close), so without a visible sentinel the deny would only
+        # be discoverable after a reload.
+        text = f"{_DENY_SENTINEL_PREFIX}{deny_reason}]"
+        # Commit the substitution into the retry buffer itself: a failed
+        # persist below leaves ``text_acc`` for the next flush, and that
+        # retry must carry the sentinel, never the denied content. Without
+        # this, a RESPONSE-phase deny would be re-evaluated from scratch on
+        # retry — and a stateful policy whose labels moved on the first
+        # DENY could flip to ALLOW and leak the original text.
+        text_acc[:] = [text]
+        _publish_policy_deny(session_id, deny_reason)
     import uuid
 
     try:
@@ -8705,7 +8929,32 @@ def _spec_config_flag_explicitly_disabled(spec: AgentSpec, key: str) -> bool:
     return isinstance(value, str) and value.strip().lower() == "false"
 
 
-def _derive_terminal_launch_args_from_spec(sub_spec: AgentSpec) -> list[str] | None:
+def _spec_config_flag_explicitly_enabled(spec: AgentSpec, key: str) -> bool:
+    """
+    Return whether an ``executor.config`` flag is explicitly set true.
+
+    The mirror of :func:`_spec_config_flag_explicitly_disabled`, used for
+    opt-IN semantics: the flag defaults to off and only an intentional
+    ``true`` / ``True`` enables it. Enabling values are matched without
+    whitespace tolerance (the value-matching policy of
+    :func:`_derive_terminal_launch_args_from_spec`), so ``" true"`` does
+    not enable.
+
+    :param spec: A parsed agent / sub-agent spec.
+    :param key: The ``executor.config`` key to read, e.g. ``"yolo"``.
+    :returns: ``True`` only when the value is the boolean ``True`` or the
+        case-insensitive string ``"true"``; ``False`` otherwise (including
+        when the key is absent).
+    """
+    value = spec.executor.config.get(key)
+    if isinstance(value, bool):
+        return value is True
+    return isinstance(value, str) and value.lower() == "true"
+
+
+def _derive_terminal_launch_args_from_spec(
+    spec: AgentSpec, *, headless_defaults: bool = True
+) -> list[str] | None:
     """
     Derive native-terminal YOLO pass-through args from a trusted sub-spec.
 
@@ -8755,7 +9004,7 @@ def _derive_terminal_launch_args_from_spec(sub_spec: AgentSpec) -> list[str] | N
     (``permission_mode``) are matched exactly, mirroring claude-native's
     verbatim pass-through and the runner's exact ``bypassPermissions``
     comparison (``should_skip_permissions`` in
-    :mod:`omnigent.antigravity_native_launch`). A present-but-unrecognized
+    :mod:`omnigent.harnesses.antigravity_native.launch`). A present-but-unrecognized
     value logs at debug and leaves args unset.
 
     Only those native harnesses are translated; for any other harness
@@ -8764,16 +9013,31 @@ def _derive_terminal_launch_args_from_spec(sub_spec: AgentSpec) -> list[str] | N
     this returns ``None`` so no terminal args are set. ``None`` is also
     returned when the relevant field is absent / falsey.
 
-    :param sub_spec: The trusted child sub-agent spec, resolved from the
-        server-loaded parent bundle via :func:`_resolve_subagent_spec`.
+    ``headless_defaults`` selects the stance for a spec that declares
+    nothing: named-worker / bundled-child creates keep the headless
+    default above (codex-native / cursor-native bypass by DEFAULT, because
+    nobody can answer their prompts). Top-level and self-resolved-agent
+    creates pass ``headless_defaults=False``: those sessions are
+    interactive — a human can answer an ApprovalCard — so only the spec's
+    EXPLICIT declarations are honored (``yolo: true``, a
+    ``permission_mode`` / ``exec_mode`` value) and an undeclared spec
+    keeps the harness's own default approval stance.
+
+    :param spec: A trusted, server-loaded spec: a named worker's sub-spec
+        (via :func:`_resolve_subagent_spec`), a bundled child's spec, or —
+        with ``headless_defaults=False`` — the session's own agent spec.
+    :param headless_defaults: Whether an undeclared codex-native /
+        cursor-native spec falls back to the headless full-bypass default.
+        ``True`` for headless worker creates; ``False`` for top-level /
+        self-resolved creates, where only explicit opt-ins translate.
     :returns: A flat CLI-arg list to store as the child session's
         ``terminal_launch_args``, or ``None`` when nothing should be set.
     :raises ValueError: If a spec-derived argument violates the same
         bounds enforced for request-supplied ``terminal_launch_args``.
     """
-    harness = _spec_harness(sub_spec)
+    harness = _spec_harness(spec)
     if harness == _CLAUDE_NATIVE_HARNESS:
-        permission_mode = sub_spec.executor.config.get("permission_mode")
+        permission_mode = spec.executor.config.get("permission_mode")
         if permission_mode:
             return _validate_terminal_launch_args(["--permission-mode", str(permission_mode)])
         return None
@@ -8786,7 +9050,9 @@ def _derive_terminal_launch_args_from_spec(sub_spec: AgentSpec) -> list[str] | N
         # approval/sandbox). Without the flag the thread is created at
         # codex's on-request + own-sandbox default and a headless worker
         # stalls. An explicit ``yolo: false`` is the opt-out. See #171.
-        if _spec_config_flag_explicitly_disabled(sub_spec, "yolo"):
+        if _spec_config_flag_explicitly_disabled(spec, "yolo"):
+            return None
+        if not headless_defaults and not _spec_config_flag_explicitly_enabled(spec, "yolo"):
             return None
         return _validate_terminal_launch_args(["--dangerously-bypass-approvals-and-sandbox"])
     if harness == _CURSOR_NATIVE_HARNESS:
@@ -8795,27 +9061,29 @@ def _derive_terminal_launch_args_from_spec(sub_spec: AgentSpec) -> list[str] | N
         # by default so headless polly workers don't stall on mirrored
         # approval cards. ``yolo: false`` is the keep-prompting opt-out.
         mode = (
-            sub_spec.executor.config.get("permission_mode")
-            or sub_spec.executor.config.get("exec_mode")
+            spec.executor.config.get("permission_mode")
+            or spec.executor.config.get("exec_mode")
             or ""
         )
         mode_norm = str(mode).strip().lower()
         if mode_norm in ("auto", "auto-review"):
             return _validate_terminal_launch_args(["--auto-review"])
-        if _spec_config_flag_explicitly_disabled(sub_spec, "yolo"):
+        if _spec_config_flag_explicitly_disabled(spec, "yolo"):
+            return None
+        if not headless_defaults and not _spec_config_flag_explicitly_enabled(spec, "yolo"):
             return None
         return _validate_terminal_launch_args(["--yolo"])
     if harness == _KIMI_NATIVE_HARNESS:
         # Opt-IN (unlike codex/cursor's headless default-bypass). The bool
         # arm covers programmatically built specs; the string arm covers the
         # parser's stringified ``"True"`` (see the value-matching policy).
-        yolo = sub_spec.executor.config.get("yolo")
+        yolo = spec.executor.config.get("yolo")
         if yolo is True or (isinstance(yolo, str) and yolo.lower() == "true"):
             return _validate_terminal_launch_args(["--yolo"])
         if (
             yolo is not None
             and yolo is not False
-            and not _spec_config_flag_explicitly_disabled(sub_spec, "yolo")
+            and not _spec_config_flag_explicitly_disabled(spec, "yolo")
         ):
             _logger.debug(
                 "kimi-native sub-spec has unrecognized yolo=%r; launching without --yolo.",
@@ -8825,7 +9093,7 @@ def _derive_terminal_launch_args_from_spec(sub_spec: AgentSpec) -> list[str] | N
     if harness == _ANTIGRAVITY_NATIVE_HARNESS:
         # Opt-IN, matched exactly like the runner's should_skip_permissions;
         # other modes have no agy analogue and leave args unset.
-        mode = sub_spec.executor.config.get("permission_mode")
+        mode = spec.executor.config.get("permission_mode")
         if isinstance(mode, str):
             if mode == "bypassPermissions":
                 return _validate_terminal_launch_args(["--dangerously-skip-permissions"])
@@ -9541,7 +9809,7 @@ async def _handle_advise_models_mcp(
     if routing_client is None:
         return _mcp_tool_result(rpc_id, json.dumps({"router_on": False, "recommendations": []}))
 
-    from omnigent.model_catalog import spec_harness
+    from omnigent.models.model_catalog import spec_harness
     from omnigent.server.smart_routing import _WORKER_NAME_TO_HARNESS, fetch_runner_models
 
     # Fetch live model catalog from the runner once; used below to populate

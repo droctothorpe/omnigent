@@ -3362,6 +3362,30 @@ def _parse_policy_base_fields(
     if is_function:
         # ``on:`` is ignored for function policies — the callable self-selects
         # which events to handle by returning ALLOW for events it doesn't act on.
+        # Silently discarding an authored output-phase binding misleads the
+        # bundle author into believing an output gate is bound when nothing
+        # ever restricts the callable to (or guarantees it sees) that phase —
+        # say so. Scoped to the output phases (``response`` /
+        # ``llm_response``): an unenforced output gate is a policy hole,
+        # while the common ``on: [tool_call]`` annotation is harmless
+        # documentation on a callable that self-filters anyway.
+        raw_on = data.get("on")
+        if isinstance(raw_on, str):
+            entries: list[object] = [raw_on]
+        elif isinstance(raw_on, list):
+            entries = raw_on
+        else:
+            entries = []
+        if any(entry in ("response", "llm_response") for entry in entries):
+            _log.warning(
+                "policy %r: `on: %r` is ignored for type: function policies — "
+                "the callable self-selects which event types it handles at "
+                "runtime. If this policy is meant to gate the assistant's "
+                "output, filter inside the callable instead (e.g. "
+                "make_fixed_action_callable's on_phases=['response']).",
+                name,
+                raw_on,
+            )
         on_value = None
     else:
         on_value = _parse_on(data.get("on", ["request", "response"]), policy_name=name)
@@ -3384,6 +3408,14 @@ def _parse_function_policy(
     """
     Parse a ``type: function`` policy block.
 
+    The callable path comes from ``function:`` or its ``handler:``
+    alias. Factory arguments may be given inline as
+    ``function: {path, arguments}`` or via a sibling
+    ``factory_params:`` mapping (the ``handler`` + ``factory_params``
+    shape shared with the runtime Policy entity and the
+    ``/v1/policies`` API). The two argument sources are mutually
+    exclusive.
+
     :param name: Enclosing policy name (error messages +
         recorded on the spec).
     :param data: Raw YAML mapping for this policy.
@@ -3391,8 +3423,10 @@ def _parse_function_policy(
         policy types (``name``, ``on``, ``condition``,
         ``ask_timeout``).
     :returns: A populated :class:`FunctionPolicySpec`.
-    :raises OmnigentError: On missing ``function:`` field
-        or malformed ``action`` / ``set_labels`` values.
+    :raises OmnigentError: On missing ``function:`` field,
+        malformed ``set_labels`` / ``config`` values, a
+        non-mapping ``factory_params``, or arguments supplied via
+        both ``function.arguments`` and ``factory_params``.
     """
     # Accept both ``function:`` and ``handler:`` for the callable path.
     # ``handler`` is the proto/service-policies convention; ``function``
@@ -3414,9 +3448,30 @@ def _parse_function_policy(
             f"policy {name!r}: 'config' must be a dict, got {type(config).__name__}",
             code=ErrorCode.INVALID_INPUT,
         )
+    function = _parse_function_ref(function_raw, policy_name=name)
+    # ``factory_params:`` is a sibling-key alias for ``function.arguments`` —
+    # the ``handler:`` + ``factory_params:`` shape used by the runtime Policy
+    # entity, the ``/v1/policies`` API, and the docs. Fold it into the
+    # FunctionRef so the same block works in a spec bundle and the server
+    # ``--config``, not just the single-file omnigent loader.
+    factory_params = data.get("factory_params")
+    if factory_params is not None:
+        if not isinstance(factory_params, dict):
+            raise OmnigentError(
+                f"policy {name!r}: `factory_params` must be a mapping (or omitted), "
+                f"got {type(factory_params).__name__}",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if function.arguments is not None:
+            raise OmnigentError(
+                f"policy {name!r}: set factory arguments via `function.arguments` or a "
+                f"sibling `factory_params:`, not both.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        function = FunctionRef(path=function.path, arguments=factory_params)
     return FunctionPolicySpec(
         **base_kwargs,
-        function=_parse_function_ref(function_raw, policy_name=name),
+        function=function,
         set_labels=set_labels,
         config=config,
     )
