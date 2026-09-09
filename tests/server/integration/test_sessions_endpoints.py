@@ -4650,6 +4650,11 @@ async def test_post_external_session_status_failed_forwards_persisted_assistant_
     must attach it so the parent inbox shows it instead of the generic
     "Error: native sub-agent turn failed", and surface it as the session's
     typed error under the harness-neutral ``native_turn_error`` code.
+
+    The typed error labels the backfilled text as the transcript's own
+    message rather than presenting it verbatim: the same backfill would
+    otherwise publish a successful turn's own reply as the failure reason.
+    The parent-inbox forward still carries the raw text.
     """
     from omnigent.server.routes import sessions as sessions_module
 
@@ -4744,6 +4749,10 @@ async def test_post_external_session_status_failed_forwards_persisted_assistant_
     assert error is not None
     assert error["code"] == "native_turn_error"
     assert "selected model" in error["message"]
+    # Store-enriched text is labelled, never republished as the error
+    # verbatim -- a successful reply must not read as the failure reason.
+    assert error["message"] != detail
+    assert error["message"].startswith("The turn failed without a reported reason;")
 
 
 @pytest.mark.parametrize(
