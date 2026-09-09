@@ -5263,6 +5263,64 @@ def test_post_connect_auth_rejection_escalates_without_going_fatal(
     assert host._auth_retry_streak == _AUTH_REJECT_ESCALATE_ATTEMPTS
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_rejected_upgrade_drops_latched_credentials(
+    status: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An auth-rejected upgrade must un-latch the token factory.
+
+    The factory caches resolved Databricks SDK auth (a ``~/.databrickscfg``
+    PAT is pinned at resolution time), so redialing through the latched
+    factory sends the same stale bearer forever. After a 401/403 the next
+    reconnect must re-resolve credentials from disk — that is what lets a
+    user heal the daemon with a re-login instead of a restart.
+    """
+    import omnigent.runner._entry as entry_mod
+
+    monkeypatch.delenv("OMNIGENT_HOST_TOKEN", raising=False)
+    host = _make_host_process()
+    host._ever_connected = True
+    host._auth_token_factory = lambda: "stale-token"
+    host._auth_token_factory_resolved = True
+
+    assert host._classify_http_status(status) is None
+    assert host._auth_token_factory is None
+    assert host._auth_token_factory_resolved is False
+
+    # The next dial rebuilds the factory and dials with the fresh credential.
+    monkeypatch.setattr(
+        entry_mod,
+        "_make_auth_token_factory",
+        lambda *, server_url=None: (lambda: "fresh-token"),
+    )
+    assert host._current_auth_token() == "fresh-token"
+    capsys.readouterr()
+
+
+def test_login_redirect_drops_latched_credentials(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A login-page bounce must un-latch the token factory too.
+
+    Behind an OAuth proxy a stale credential surfaces as a redirect to the
+    login page rather than a 4xx; the retrying daemon must likewise pick up
+    a re-login on its next dial.
+    """
+    from websockets.exceptions import InvalidURI
+
+    host = _make_host_process()
+    host._ever_connected = True
+    host._auth_token_factory = lambda: "stale-token"
+    host._auth_token_factory_resolved = True
+
+    assert host._fatal_upgrade_error(InvalidURI("http://x/login", "redirected to login")) is None
+    assert host._auth_token_factory is None
+    assert host._auth_token_factory_resolved is False
+    capsys.readouterr()
+
+
 async def test_launch_harness_probe_runs_off_the_event_loop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

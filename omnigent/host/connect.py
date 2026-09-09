@@ -1419,6 +1419,10 @@ class HostProcess:
             # fails loud instead of looping silently while the
             # only diagnostics land in the log file.
             self._login_redirect_streak += 1
+            # A login-page bounce is the OAuth-proxy flavor of a credential
+            # rejection: re-resolve credentials on the next dial so a re-login
+            # is picked up without a restart.
+            self._invalidate_auth_token_factory()
             cause = (
                 "Authentication failed: the server redirected the host "
                 "tunnel to a login page instead of accepting it, so no "
@@ -1484,6 +1488,11 @@ class HostProcess:
         if status in (401, 403):
             # Fresh hosts can race OAuth refresh; connected hosts preserve active sessions.
             self._auth_retry_streak += 1
+            # The rejected bearer may simply be stale (the user re-authenticated
+            # after it lapsed): drop the latched credential chain so the next
+            # reconnect re-resolves it from disk instead of redialing the same
+            # in-process token forever.
+            self._invalidate_auth_token_factory()
             cause = f"Connection refused (HTTP {status}): the host tunnel was rejected."
             should_retry = self._ever_connected or (
                 self._auth_retry_streak < _MAX_CONSECUTIVE_AUTH_ERRORS
@@ -1502,8 +1511,8 @@ class HostProcess:
                         f"{self._auth_retry_streak} times in a row — this is no "
                         "longer a transient network blip. If it persists, the "
                         "stored credential is likely no longer valid: run "
-                        f"`{cli_invocation()} login {self._login_hint_url()}` and restart the "
-                        "host. Still retrying."
+                        f"`{cli_invocation()} login {self._login_hint_url()}` and the host "
+                        "will pick up the fresh credential automatically. Still retrying."
                     )
                     _logger.warning("%s", escalated)
                     print(f"⚠ {escalated}", file=sys.stderr, flush=True)
@@ -3789,6 +3798,19 @@ class HostProcess:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers
+
+    def _invalidate_auth_token_factory(self) -> None:
+        """Drop the latched credential chain so the next dial re-resolves it.
+
+        The factory built by :meth:`_current_auth_token` caches the resolved
+        Databricks SDK auth for its lifetime (and a ``~/.databrickscfg`` PAT
+        is pinned at resolution time), so a credential refreshed on disk by a
+        re-login is invisible to it. Called when the tunnel upgrade is
+        rejected for auth reasons, so the daemon picks up the fresh
+        credential on the next reconnect instead of requiring a restart.
+        """
+        self._auth_token_factory = None
+        self._auth_token_factory_resolved = False
 
     def _current_auth_token(self, *, initialize: bool = True) -> str | None:
         """Return a bearer from the host's retained refreshable auth context.
