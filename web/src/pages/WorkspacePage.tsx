@@ -293,7 +293,9 @@ function WorkspaceLeafView({
     <div
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background",
-        leafCount > 1 && focused && "ring-1 ring-inset ring-primary/40",
+        leafCount > 1 &&
+          focused &&
+          "after:pointer-events-none after:absolute after:inset-0 after:z-50 after:ring-1 after:ring-inset after:ring-primary/40",
       )}
       data-testid={`workspace-pane-${node.id}`}
       data-workspace-pane-id={node.id}

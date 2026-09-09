@@ -264,14 +264,22 @@ describe("WorkspacePage", () => {
     const focusedPane = container.querySelector('[data-workspace-pane-id][data-focused="true"]');
     expect(unfocusedPane).not.toBeNull();
     expect(focusedPane).not.toBeNull();
-    expect(unfocusedPane).not.toHaveClass("ring-1", "ring-inset", "ring-primary/40");
-    expect(focusedPane).toHaveClass("ring-1", "ring-inset", "ring-primary/40");
+    expect(unfocusedPane).not.toHaveClass("after:ring-1", "after:ring-primary/40");
+    expect(focusedPane).toHaveClass(
+      "after:pointer-events-none",
+      "after:absolute",
+      "after:inset-0",
+      "after:z-50",
+      "after:ring-1",
+      "after:ring-inset",
+      "after:ring-primary/40",
+    );
 
     fireEvent.pointerDown(unfocusedPane!);
     await waitFor(() => {
       expect(unfocusedPane).toHaveAttribute("data-focused", "true");
-      expect(unfocusedPane).toHaveClass("ring-1", "ring-inset", "ring-primary/40");
-      expect(focusedPane).not.toHaveClass("ring-1", "ring-inset", "ring-primary/40");
+      expect(unfocusedPane).toHaveClass("after:ring-1", "after:ring-primary/40");
+      expect(focusedPane).not.toHaveClass("after:ring-1", "after:ring-primary/40");
     });
 
     expect(unfocusedPane?.closest(".pt-14")).toBeNull();
