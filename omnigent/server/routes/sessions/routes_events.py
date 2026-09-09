@@ -242,6 +242,14 @@ _TRANSIENT_AUDIT_EVENT_TYPES = frozenset(
 )
 
 
+# Stand-in detail for a native ``failed`` status edge that carries no output.
+# The harness genuinely reported nothing, but a failure the user cannot read is
+# worse than a vague one, so point them at the log that does have the reason.
+_NATIVE_FAILURE_WITHOUT_DETAIL = (
+    "The turn failed but the agent reported no detail. See the runner log for details."
+)
+
+
 def _retry_recovery_lock(session_id: str) -> asyncio.Lock:
     """Return the process-local lock coordinating one session's retry."""
     lock = _retry_recovery_locks.get(session_id)
@@ -1274,7 +1282,12 @@ def register_events_routes(
             # last_task_error, not only the sub-agent parent-inbox path.
             output = data.get("output")
             status_error: ErrorDetail | None = None
-            if status == "failed" and isinstance(output, str) and output.strip():
+            if status == "failed":
+                # A detail-less failed edge still has to carry a message: the
+                # web only renders an error block when the status edge has one,
+                # so dropping it flips the session to "failed" with nothing in
+                # the transcript to explain why.
+                detail = output.strip() if isinstance(output, str) and output.strip() else ""
                 status_error = ErrorDetail(
                     code=(
                         "codex_reauth_required"
@@ -1285,7 +1298,7 @@ def register_events_routes(
                             "codex_turn_error" if body.data.get("output") else "native_turn_error"
                         )
                     ),
-                    message=output.strip(),
+                    message=detail or _NATIVE_FAILURE_WITHOUT_DETAIL,
                 )
             if status_error is not None:
                 await _persist_session_status_error_labels(

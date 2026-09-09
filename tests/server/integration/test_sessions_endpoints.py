@@ -4582,6 +4582,78 @@ async def test_post_external_session_status_failed_forwards_persisted_assistant_
     assert "selected model" in error["message"]
 
 
+async def test_post_external_session_status_failed_without_detail_still_carries_a_message(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A ``failed`` edge with no wire ``output`` and nothing persisted to enrich
+    from must still publish a typed error.
+
+    The web only appends an error block when the status edge carries one, so
+    an ``error: null`` failure flips the session to "failed" and leaves the
+    transcript with nothing explaining why.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+    from omnigent.server.routes.sessions.routes_events import (
+        _NATIVE_FAILURE_WITHOUT_DETAIL,
+    )
+
+    published: list[tuple[str, dict[str, Any]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        """
+        Accept whatever is forwarded to the fake runner.
+
+        :param request: Request sent to the fake runner.
+        :returns: Accepted response.
+        """
+        del request
+        return httpx.Response(204)
+
+    fake_runner = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        base_url="http://runner",
+    )
+
+    async def _fake_get_runner_client(
+        session_id: str,
+        runner_router: object,
+    ) -> httpx.AsyncClient:
+        """
+        Resolve the session to the fake runner client.
+
+        :param session_id: Session id being routed.
+        :param runner_router: Real app runner router, unused here.
+        :returns: The fake runner client.
+        """
+        del session_id, runner_router
+        return fake_runner
+
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _fake_get_runner_client)
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.session_stream.publish",
+        lambda session_id, event: published.append((session_id, event)),
+    )
+    try:
+        agent = await create_test_agent(client)
+        session = await _create_session(client, agent["id"])
+        status_resp = await client.post(
+            f"/v1/sessions/{session['id']}/events",
+            json={"type": "external_session_status", "data": {"status": "failed"}},
+        )
+    finally:
+        await fake_runner.aclose()
+
+    assert status_resp.status_code == 202, status_resp.text
+    failed_events = [ev for _sid, ev in published if ev.get("status") == "failed"]
+    assert failed_events, f"no failed status was published: {published}"
+    error = failed_events[0]["error"]
+    assert error is not None, "a failed status edge was published with no error detail"
+    assert error["code"] == "native_turn_error"
+    assert error["message"] == _NATIVE_FAILURE_WITHOUT_DETAIL
+
+
 async def test_post_external_session_status_failed_keeps_wire_output_and_codex_code(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
