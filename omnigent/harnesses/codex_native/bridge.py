@@ -664,7 +664,7 @@ def _upsert_top_level_config_key(
         written.
     """
     import tomlkit
-    from tomlkit.exceptions import ParseError
+    from tomlkit.exceptions import TOMLKitError
 
     try:
         existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -680,8 +680,17 @@ def _upsert_top_level_config_key(
             mutate_document(document)
             output = tomlkit.dumps(document)
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(output, encoding="utf-8")
-    except (OSError, UnicodeDecodeError, ParseError):
+        # Atomic replace, like this file's other writers: codex itself reads
+        # this config, and a torn write would hand it malformed TOML.
+        fd, tmp_name = tempfile.mkstemp(prefix="config.toml.", dir=str(config_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(output)
+            os.replace(tmp_name, config_path)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+    except (OSError, UnicodeDecodeError, TOMLKitError):
         return False
     return True
 
