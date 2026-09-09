@@ -22,6 +22,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -35,7 +36,9 @@ from omnigent.host.frames import (
     HostFsResultFrame,
     HostHarnessReadinessFrame,
     HostHelloFrame,
+    HostImportedLocalSession,
     HostImportLocalDoneFrame,
+    HostImportLocalSessionChunkFrame,
     HostImportLocalSessionFrame,
     HostInstallHarnessResultFrame,
     HostLaunchRunnerResultFrame,
@@ -48,6 +51,7 @@ from omnigent.host.frames import (
     HostStatResultFrame,
     HostStopRunnerResultFrame,
     HostStoreSecretResultFrame,
+    ImportLocalSessionChunkAssembler,
     decode_host_frame,
     encode_host_frame,
 )
@@ -483,6 +487,18 @@ async def _sender_loop(ws: WebSocket, conn: HostConnection) -> None:
         await ws.send_text(data)
 
 
+def _import_session_queue_payload(total: int, session: HostImportedLocalSession) -> dict[str, Any]:
+    """Build the pending-import queue payload for one streamed session."""
+    return {
+        "total": total,
+        "external_session_id": session.external_session_id,
+        "workspace": session.workspace,
+        "items": session.items,
+        "title": session.title,
+        "source": session.source,
+    }
+
+
 async def _receive_loop(
     ws: WebSocket,
     conn: HostConnection,
@@ -510,6 +526,9 @@ async def _receive_loop(
     :param on_host_update: Callback fired after readiness changes persist;
         ``None`` skips it.
     """
+    # Per-request reassembly of chunked import sessions; buffers die with the
+    # connection, so a tunnel drop can never leak a partial session.
+    import_chunk_assemblers: dict[str, ImportLocalSessionChunkAssembler] = {}
     while True:
         message = await ws.receive()
         if message["type"] == "websocket.disconnect":
@@ -769,22 +788,37 @@ async def _receive_loop(
         if isinstance(frame, HostImportLocalSessionFrame):
             queue = conn.pending_import_local.get(frame.request_id)
             if queue is not None:
-                s = frame.session
                 queue.put_nowait(
-                    (
-                        "session",
-                        {
-                            "total": frame.total,
-                            "external_session_id": s.external_session_id,
-                            "workspace": s.workspace,
-                            "items": s.items,
-                            "title": s.title,
-                            "source": s.source,
-                        },
-                    )
+                    ("session", _import_session_queue_payload(frame.total, frame.session))
                 )
             continue
+        if isinstance(frame, HostImportLocalSessionChunkFrame):
+            assembler = import_chunk_assemblers.setdefault(
+                frame.request_id, ImportLocalSessionChunkAssembler()
+            )
+            try:
+                session = assembler.add(frame)
+            except ValueError as exc:
+                _logger.warning(
+                    "Host %s sent an unusable chunked import session: %s",
+                    host_id,
+                    exc,
+                )
+                # A payload with no external_session_id makes the import loop
+                # count one failed session and continue, keeping the stream
+                # (and the rest of the batch) alive.
+                queue = conn.pending_import_local.get(frame.request_id)
+                if queue is not None:
+                    queue.put_nowait(("session", {"total": frame.total}))
+                continue
+            if session is None:
+                continue
+            queue = conn.pending_import_local.get(frame.request_id)
+            if queue is not None:
+                queue.put_nowait(("session", _import_session_queue_payload(frame.total, session)))
+            continue
         if isinstance(frame, HostImportLocalDoneFrame):
+            import_chunk_assemblers.pop(frame.request_id, None)
             queue = conn.pending_import_local.get(frame.request_id)
             if queue is not None:
                 queue.put_nowait(

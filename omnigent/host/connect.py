@@ -58,7 +58,6 @@ from omnigent.host.frames import (
     HostImportLocalByIdFrame,
     HostImportLocalDoneFrame,
     HostImportLocalFrame,
-    HostImportLocalSessionFrame,
     HostInstallHarnessFrame,
     HostInstallHarnessResultFrame,
     HostLaunchRunnerFrame,
@@ -83,6 +82,7 @@ from omnigent.host.frames import (
     HostStoreSecretResultFrame,
     decode_host_frame,
     encode_host_frame,
+    encode_import_local_session_frames,
 )
 from omnigent.host.git_worktree import (
     WorktreeError,
@@ -2313,13 +2313,11 @@ class HostProcess:
                     # it on the done frame so the server's counts stay honest.
                     load_failed += 1
                     continue
-                await ws.send(
-                    encode_host_frame(
-                        HostImportLocalSessionFrame(
-                            request_id=frame.request_id, total=total, session=session
-                        )
-                    )
-                )
+                # Oversized sessions are sliced into chunk frames; a single
+                # whole-session frame past the tunnel's message cap would
+                # drop the host connection and kill the rest of the batch.
+                for text in encode_import_local_session_frames(frame.request_id, total, session):
+                    await ws.send(text)
             await ws.send(
                 encode_host_frame(
                     HostImportLocalDoneFrame(
