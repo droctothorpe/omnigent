@@ -3071,9 +3071,7 @@ def test_discovered_codex_models_roundtrip_and_tolerate_bad_state(
             "recorded_at": int(time.time()) - 8 * 24 * 60 * 60,
         }
     }
-    (tmp_path / "state" / "discovered-models.json").write_text(
-        json.dumps(stale), encoding="utf-8"
-    )
+    (tmp_path / "state" / "discovered-models.json").write_text(json.dumps(stale), encoding="utf-8")
     assert read_discovered_codex_models("https://h.example.com") == ()
 
 
