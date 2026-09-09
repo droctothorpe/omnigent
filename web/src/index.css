@@ -301,6 +301,51 @@
   line-height: 20px;
 }
 
+.composer-agent-menu :is([role="menuitem"], [role="menuitemcheckbox"]) {
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 4px 12px 4px 8px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.composer-agent-menu [role="menuitem"].composer-agent-choice {
+  padding-right: 0;
+}
+
+.composer-agent-menu [role="menuitem"].composer-agent-edit {
+  padding: 0 12px;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.composer-agent-menu [role="menuitemcheckbox"] {
+  padding-right: 32px;
+}
+
+.composer-agent-config-menu :is([role="menuitem"], [role="menuitemcheckbox"]) {
+  min-height: 28px;
+}
+
+.composer-agent-menu [role="menuitem"] > svg:last-child {
+  margin-left: 0;
+}
+
+.composer-reference-surface {
+  border-color: color(srgb 0.129412 0 0.0509804 / 0.1);
+  background-color: rgba(255, 255, 255, 0.8);
+  background-image: none;
+}
+
+.dark .composer-reference-surface {
+  border-width: 0.5px;
+  border-color: color(srgb 0.960784 0.960784 0.956863 / 0.04);
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
 /* Fixed default icon geometry: a 14px glyph centered in a 16px SVG box. */
 .ui-icon {
   box-sizing: border-box;

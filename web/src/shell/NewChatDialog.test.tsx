@@ -11,6 +11,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import {
   composeSandboxWorkspace,
+  composerWorktreeHeaderState,
   deriveHomeDir,
   deriveRepoName,
   describeCreateError,
@@ -515,6 +516,199 @@ describe("sandbox repository helpers", () => {
   ])("worktreePathTail(%j) === %j", (path, expected) => {
     expect(worktreePathTail(path)).toBe(expected);
   });
+
+  it.each([
+    {
+      name: "existing linked worktree",
+      workspace: "/Volumes/worktrees/auth-refresh",
+      worktrees: [
+        { path: "/Users/corey/projects/alpha", branch: "main", is_main: true, detached: false },
+        {
+          path: "/Volumes/worktrees/auth-refresh",
+          branch: "auth-refresh",
+          is_main: false,
+          detached: false,
+        },
+      ],
+      worktreesResolved: true,
+      branchName: "auth-refresh",
+      autoSeededBranch: "",
+      prefilledBranch: "auth-refresh",
+      expected: {
+        repositoryLabel: "alpha",
+        branchLabel: "auth-refresh",
+        branchDescription: "Existing worktree branch: auth-refresh",
+      },
+    },
+    {
+      name: "proposed branch from an existing worktree",
+      workspace: "/Volumes/worktrees/auth-refresh",
+      worktrees: [
+        { path: "/Users/corey/projects/alpha", branch: "main", is_main: true, detached: false },
+        {
+          path: "/Volumes/worktrees/auth-refresh",
+          branch: "auth-refresh",
+          is_main: false,
+          detached: false,
+        },
+      ],
+      worktreesResolved: true,
+      branchName: "feature/new-ui",
+      autoSeededBranch: "",
+      prefilledBranch: "auth-refresh",
+      expected: {
+        repositoryLabel: "alpha",
+        branchLabel: "feature/new-ui",
+        branchDescription: "New worktree branch: feature/new-ui",
+      },
+    },
+    {
+      name: "auto-seeded branch",
+      workspace: "/Users/corey/projects/alpha",
+      worktrees: [
+        { path: "/Users/corey/projects/alpha", branch: "main", is_main: true, detached: false },
+      ],
+      worktreesResolved: true,
+      branchName: "worktree-1234abcd",
+      autoSeededBranch: "worktree-1234abcd",
+      prefilledBranch: "",
+      expected: {
+        repositoryLabel: "alpha",
+        branchLabel: "worktree-1234abcd",
+        branchDescription: "New auto-generated worktree branch: worktree-1234abcd",
+      },
+    },
+    {
+      name: "main repository",
+      workspace: "/Users/corey/projects/alpha",
+      worktrees: [
+        { path: "/Users/corey/projects/alpha", branch: "main", is_main: true, detached: false },
+      ],
+      worktreesResolved: true,
+      branchName: "",
+      autoSeededBranch: "",
+      prefilledBranch: "",
+      expected: {
+        repositoryLabel: "alpha",
+        branchLabel: "New worktree",
+        branchDescription: "Create or select a worktree from main repository branch: main",
+      },
+    },
+    {
+      name: "detached linked worktree",
+      workspace: "/Volumes/worktrees/review",
+      worktrees: [
+        { path: "/Users/corey/projects/alpha", branch: "main", is_main: true, detached: false },
+        {
+          path: "/Volumes/worktrees/review",
+          branch: null,
+          is_main: false,
+          detached: true,
+        },
+      ],
+      worktreesResolved: true,
+      branchName: "",
+      autoSeededBranch: "",
+      prefilledBranch: "",
+      expected: {
+        repositoryLabel: "alpha",
+        branchLabel: "Detached HEAD",
+        branchDescription: "Existing detached worktree: /Volumes/worktrees/review",
+      },
+    },
+    {
+      name: "plain directory with no worktree state",
+      workspace: "/Users/corey/Documents",
+      worktrees: [],
+      worktreesResolved: true,
+      branchName: "",
+      autoSeededBranch: "",
+      prefilledBranch: "",
+      expected: {
+        repositoryLabel: "Documents",
+        branchLabel: "Worktree",
+        branchDescription: "Create or select a worktree",
+      },
+    },
+    {
+      name: "resolved data awaiting stale prefill cleanup",
+      workspace: "/Users/corey/current-repo",
+      worktrees: [
+        {
+          path: "/Users/corey/current-repo",
+          branch: "main",
+          is_main: true,
+          detached: false,
+        },
+      ],
+      worktreesResolved: true,
+      branchName: "legacy-branch",
+      autoSeededBranch: "",
+      prefilledBranch: "legacy-branch",
+      expected: {
+        repositoryLabel: "current-repo",
+        branchLabel: "Worktree",
+        branchDescription: "Worktree status updating",
+      },
+    },
+  ])("describes $name without inventing repository or branch state", (input) => {
+    expect(composerWorktreeHeaderState(input)).toEqual(input.expected);
+  });
+
+  it.each([
+    {
+      name: "stale placeholder data",
+      workspace: "/Users/corey/current-repo",
+      worktrees: [
+        { path: "/Users/corey/old-repo", branch: "main", is_main: true, detached: false },
+        {
+          path: "/Users/corey/current-repo",
+          branch: "old-branch",
+          is_main: false,
+          detached: false,
+        },
+      ],
+      worktreesResolved: false,
+      branchName: "old-branch",
+      autoSeededBranch: "",
+      prefilledBranch: "old-branch",
+      expected: {
+        repositoryLabel: "current-repo",
+        branchLabel: "Worktree",
+        branchDescription: "Worktree status loading",
+      },
+    },
+    {
+      name: "explicit branch request while worktrees load",
+      workspace: "/Users/corey/current-repo",
+      worktrees: [],
+      worktreesResolved: false,
+      branchName: "feature/new-ui",
+      autoSeededBranch: "",
+      prefilledBranch: "old-branch",
+      expected: {
+        repositoryLabel: "current-repo",
+        branchLabel: "feature/new-ui",
+        branchDescription: "New worktree branch: feature/new-ui",
+      },
+    },
+    {
+      name: "auto-seeded branch request while worktrees load",
+      workspace: "/Users/corey/current-repo",
+      worktrees: [],
+      worktreesResolved: false,
+      branchName: "worktree-1234abcd",
+      autoSeededBranch: "worktree-1234abcd",
+      prefilledBranch: "",
+      expected: {
+        repositoryLabel: "current-repo",
+        branchLabel: "worktree-1234abcd",
+        branchDescription: "New auto-generated worktree branch: worktree-1234abcd",
+      },
+    },
+  ])("describes $name without trusting another query's worktrees", (input) => {
+    expect(composerWorktreeHeaderState(input)).toEqual(input.expected);
+  });
 });
 
 // deriveHomeDir resolves the working-directory default for a first-ever
@@ -897,9 +1091,15 @@ function selectUnconfiguredAgent(agentId: string): void {
 function openAgentConfig(agentId: string): void {
   const picker = screen.getByTestId("new-chat-landing-agent-select");
   fireEvent.pointerDown(picker, { button: 0 });
+  if (screen.queryByTestId(`new-chat-landing-agent-${agentId}`) == null) {
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+  }
   if (screen.queryByTestId(`new-chat-landing-agent-config-${agentId}`) == null) {
     fireEvent.click(screen.getByTestId(`new-chat-landing-agent-${agentId}`));
     fireEvent.pointerDown(picker, { button: 0 });
+    if (screen.queryByTestId(`new-chat-landing-agent-${agentId}`) == null) {
+      fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+    }
   }
   fireEvent.click(screen.getByTestId(`new-chat-landing-agent-config-${agentId}`));
   fireEvent.click(screen.getByTestId("new-chat-landing-config-gear"));
@@ -1195,9 +1395,11 @@ describe("NewChatLandingScreen", () => {
 
     const composer = screen.getByTestId("new-chat-landing-composer");
     expect(composer).toHaveClass(
-      "border-border",
+      "composer-reference-surface",
+      "border",
       "has-[textarea:focus]:shadow-[var(--composer-shadow-focus)]",
     );
+    expect(composer).not.toHaveClass("bg-card", "dark:bg-card-solid");
     expect(composer).not.toHaveClass("shadow-[var(--composer-shadow)]");
     expect(composer.className).not.toContain("has-[textarea:focus]:border-");
   });
@@ -1221,21 +1423,27 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
 
     expect(screen.getByTestId("new-chat-landing-input")).toHaveClass(
-      "block",
-      "min-h-[52px]",
-      "max-h-[200px]",
+      "min-h-[42px]",
+      "max-h-[180px]",
       "overflow-y-auto",
-      "px-4",
-      "pt-3",
-      "pb-1",
+      "p-0",
+      "text-[13px]",
+      "leading-[20.8px]",
       "[scrollbar-width:none]",
       "[&::-webkit-scrollbar]:hidden",
     );
+    expect(screen.getByTestId("new-chat-landing-input")).not.toHaveClass("block");
     expect(screen.getByTestId("new-chat-landing-input").parentElement).toHaveClass(
       "overflow-hidden",
+      "px-3",
+      "pt-3",
+      "pb-1",
+      "text-[13px]",
+      "leading-[20.8px]",
     );
     const composer = screen.getByTestId("new-chat-landing-composer");
     const composerSurface = screen.getByTestId("new-chat-landing-composer-surface");
+    const workspaceControls = screen.getByTestId("new-chat-landing-workspace-controls");
     const notices = screen.getByTestId("new-chat-landing-notices");
     const workspace = screen.getByTestId("new-chat-landing-workspace-chip");
     const actions = screen.getByTestId("new-chat-landing-actions");
@@ -1243,13 +1451,29 @@ describe("NewChatLandingScreen", () => {
 
     expect(screen.getByTestId("new-chat-landing")).toHaveClass("pb-24");
     expect(landingContent).toHaveClass("max-w-[800px]", "md:px-10");
-    expect(composerSurface.firstElementChild).toBe(workspace);
-    expect(workspace.nextElementSibling).toBe(composer);
+    expect(composerSurface.firstElementChild).toBe(workspaceControls);
+    expect(workspaceControls).toContainElement(workspace);
+    expect(workspaceControls.nextElementSibling).toBe(composer);
     expect(composerSurface).toHaveClass("gap-0");
-    expect(workspace).toHaveClass("h-8", "mx-4", "-mb-px");
+    expect(workspaceControls).toHaveClass(
+      "mx-3",
+      "-mb-px",
+      "h-[37px]",
+      "min-w-0",
+      "items-start",
+      "gap-2",
+      "rounded-t-2xl",
+      "border",
+      "border-b-0",
+      "bg-muted/70",
+      "px-2",
+      "pt-1.5",
+    );
+    expect(workspace).toHaveClass("h-6", "gap-1", "rounded-md", "px-1", "text-xs", "leading-4");
     expect(composer).toHaveClass("min-h-[105px]");
     expect(composer).toContainElement(actions);
-    expect(actions).toHaveClass("mt-2", "justify-between", "gap-2", "px-2", "pt-1", "pb-0");
+    expect(actions).toHaveClass("justify-between", "gap-2", "px-2", "pt-1", "pb-2");
+    expect(actions).not.toHaveClass("mt-2");
     const attach = screen.getByTestId("new-chat-landing-attach");
     const hostChip = screen.getByTestId("new-chat-landing-host-chip");
     const permission = screen.getByTestId("new-chat-landing-permission-chip");
@@ -1289,20 +1513,25 @@ describe("NewChatLandingScreen", () => {
       "md:block",
     );
     expect(worktree).toHaveClass(
-      "size-8",
-      "justify-center",
-      "rounded-lg",
+      "h-6",
+      "max-w-[180px]",
+      "gap-1",
+      "rounded-md",
       "bg-transparent",
-      "p-0",
-      "md:h-7",
-      "md:w-11",
-      "md:gap-1",
+      "px-1",
+      "text-xs",
+      "leading-4",
     );
-    expect(worktree).toHaveAccessibleName("Worktree: None");
-    expect(worktree).toHaveAttribute("title", "Worktree: None");
-    expect(worktree).not.toHaveTextContent("Worktree");
-    expect(worktree.querySelectorAll("svg")[0]).toHaveClass("size-3.5");
-    expect(worktree.querySelectorAll("svg")[1]).toHaveClass("hidden", "size-4", "md:block");
+    expect(worktree).toHaveAccessibleName(
+      "Create or select a worktree from main repository branch: main",
+    );
+    expect(worktree).toHaveAttribute(
+      "title",
+      "Create or select a worktree from main repository branch: main",
+    );
+    expect(worktree).toHaveTextContent("New worktree");
+    expect(worktree.querySelectorAll("svg")[0]).toHaveClass("size-3");
+    expect(worktree.querySelectorAll("svg")[1]).toHaveClass("size-3");
     expect(harness).toHaveClass(
       "h-8",
       "min-w-0",
@@ -1328,13 +1557,23 @@ describe("NewChatLandingScreen", () => {
     expect(leftControls).not.toHaveClass("overflow-hidden", "shrink-0", "absolute");
     expect(rightControls).toHaveClass("flex", "shrink-0", "items-center", "gap-1");
     expect(rightControls).not.toHaveClass("ml-auto", "flex-1");
-    for (const control of [attach, hostChip, permission, worktree]) {
+    for (const control of [attach, hostChip, permission]) {
       expect(leftControls).toContainElement(control);
     }
+    expect(workspaceControls).toContainElement(worktree);
     for (const control of [harness, voice, submit]) {
       expect(rightControls).toContainElement(control);
     }
-    const orderedControls = [attach, hostChip, permission, worktree, harness, voice, submit];
+    const orderedControls = [
+      workspace,
+      worktree,
+      attach,
+      hostChip,
+      permission,
+      harness,
+      voice,
+      submit,
+    ];
     for (const [index, control] of orderedControls.entries()) {
       const nextControl = orderedControls[index + 1];
       if (nextControl) {
@@ -1358,6 +1597,20 @@ describe("NewChatLandingScreen", () => {
     expect(notices.parentElement).toBe(composerSurface.parentElement);
   });
 
+  it("keeps the worktree selector beside the directory for a non-git workspace", () => {
+    useHostWorktreesMock.mockReturnValue({
+      data: [],
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostWorktrees>);
+    renderLanding();
+
+    const header = screen.getByTestId("new-chat-landing-workspace-controls");
+    const worktree = screen.getByTestId("new-chat-landing-branch-chip");
+    expect(header).toContainElement(screen.getByTestId("new-chat-landing-workspace-chip"));
+    expect(header).toContainElement(worktree);
+    expect(worktree).toBeDisabled();
+  });
+
   it("renders structured model and effort details in the harness picker", () => {
     mockClaudeModels([
       {
@@ -1375,7 +1628,10 @@ describe("NewChatLandingScreen", () => {
     expect(picker).not.toHaveTextContent("Default");
     expect(picker).toHaveAccessibleName("Claude Code, Model Opus 4.8, Effort Default");
     expect(picker).toHaveAttribute("title", "Claude Code, Model Opus 4.8, Effort Default");
-    expect(screen.getByTestId("new-chat-landing-agent-icon")).toHaveClass("size-3.5");
+    const productIcon = screen.getByTestId("new-chat-landing-agent-icon").querySelector("img");
+    expect(screen.getByTestId("new-chat-landing-agent-icon")).toHaveClass("size-4");
+    expect(productIcon).toHaveClass("size-4");
+    expect(decodeURIComponent(productIcon?.getAttribute("src") ?? "")).toContain("#D87757");
     expect(screen.getByTestId("new-chat-landing-agent-config-value")).toHaveClass(
       "inline-flex",
       "min-w-0",
@@ -1395,15 +1651,20 @@ describe("NewChatLandingScreen", () => {
 
     fireEvent.pointerDown(picker, { button: 0 });
     const [rootMenu] = screen.getAllByRole("menu");
-    expect(rootMenu).toHaveClass("w-[17.25rem]", "min-w-0");
+    expect(rootMenu).toHaveClass("w-[17.5rem]", "min-w-0", "composer-agent-menu");
+    expect(screen.getByTestId("new-chat-landing-agent-a1").querySelector("img")).toHaveAttribute(
+      "src",
+      productIcon?.getAttribute("src"),
+    );
+    const editConfig = screen.getByTestId("new-chat-landing-agent-config-a1");
+    expect(editConfig).toHaveTextContent(/^Edit$/);
+    expect(editConfig).toHaveAttribute("aria-label", "Edit Claude Code configuration");
+    expect(editConfig).toHaveClass("composer-agent-edit");
+    expect(screen.getByTestId("new-chat-landing-agent-summary-a1")).toHaveClass("text-left");
+    expect(screen.getByTestId("new-chat-landing-agent-a1")).not.toContainElement(editConfig);
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-config-a1"));
     const menus = screen.getAllByRole("menu");
-    expect(menus.at(-1)).toHaveClass(
-      "w-[13.625rem]",
-      "min-w-0",
-      "[&_[role=menuitem]]:min-h-6",
-      "[&_[role=menuitem]]:py-0.5",
-    );
+    expect(menus.at(-1)).toHaveClass("w-[13.75rem]", "min-w-0", "composer-agent-config-menu");
     expect(screen.getByTestId("new-chat-landing-agent-models")).toHaveTextContent("Opus 4.8");
     expect(screen.getByTestId("new-chat-landing-agent-models")).toHaveTextContent("Sonnet 4.6");
     expect(screen.getByTestId("new-chat-landing-agent-models").textContent).not.toContain("`");
@@ -1582,6 +1843,88 @@ describe("NewChatLandingScreen", () => {
     expect(within(hostTrigger).getByTestId("new-chat-landing-host-icon")).toBeTruthy();
     expect(within(workspaceTrigger).getByText("repo")).toHaveClass("truncate");
     expect(screen.getByTestId("new-chat-landing-branch-chip")).toBeVisible();
+  });
+
+  it("keeps placeholder worktrees from relabeling the selected directory", async () => {
+    let worktreeResult = {
+      data: [
+        { path: "/Users/corey/legacy", branch: "main", is_main: true, detached: false },
+        {
+          path: "/Users/corey/repo",
+          branch: "legacy-branch",
+          is_main: false,
+          detached: false,
+        },
+      ],
+      isPlaceholderData: true,
+    } as unknown as ReturnType<typeof useHostWorktrees>;
+    useHostWorktreesMock.mockImplementation(() => worktreeResult);
+    renderLanding();
+
+    const workspaceTrigger = screen.getByTestId("new-chat-landing-workspace-chip");
+    const worktreeTrigger = screen.getByTestId("new-chat-landing-branch-chip");
+    await waitFor(() =>
+      expect(worktreeTrigger).toHaveAttribute("title", "Worktree status loading"),
+    );
+    expect(workspaceTrigger).toHaveTextContent("repo");
+    expect(workspaceTrigger).not.toHaveTextContent("legacy");
+    expect(workspaceTrigger).toHaveAttribute("title", "/Users/corey/repo");
+
+    worktreeResult = {
+      data: [{ path: "/Users/corey/repo", branch: "main", is_main: true, detached: false }],
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostWorktrees>;
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "rerender with resolved worktrees" },
+    });
+
+    await waitFor(() =>
+      expect(worktreeTrigger).toHaveAttribute(
+        "title",
+        "Create or select a worktree from main repository branch: main",
+      ),
+    );
+    expect(workspaceTrigger).toHaveTextContent("repo");
+    expect(workspaceTrigger).toHaveAttribute("title", "/Users/corey/repo");
+  });
+
+  it("dismisses sibling popovers and restores each trigger's focus on Escape", async () => {
+    renderLanding();
+    const workspaceTrigger = screen.getByTestId("new-chat-landing-workspace-chip");
+    const worktreeTrigger = screen.getByTestId("new-chat-landing-branch-chip");
+
+    fireEvent.click(workspaceTrigger);
+    expect(screen.getByTestId("new-chat-landing-workspace-open-folder")).toBeVisible();
+
+    fireEvent.click(worktreeTrigger);
+    expect(await screen.findByTestId("new-chat-landing-branch-input")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.queryByTestId("new-chat-landing-workspace-open-folder")).toBeNull(),
+    );
+
+    closeMenu();
+    await waitFor(() => expect(screen.queryByTestId("new-chat-landing-branch-input")).toBeNull());
+    expect(worktreeTrigger).toHaveFocus();
+
+    fireEvent.click(worktreeTrigger);
+    expect(await screen.findByTestId("new-chat-landing-branch-input")).toBeVisible();
+    fireEvent.click(workspaceTrigger);
+    expect(screen.getByTestId("new-chat-landing-workspace-open-folder")).toBeVisible();
+    await waitFor(() => expect(screen.queryByTestId("new-chat-landing-branch-input")).toBeNull());
+
+    closeMenu();
+    await waitFor(() =>
+      expect(screen.queryByTestId("new-chat-landing-workspace-open-folder")).toBeNull(),
+    );
+    expect(workspaceTrigger).toHaveFocus();
+
+    fireEvent.click(worktreeTrigger);
+    expect(await screen.findByTestId("new-chat-landing-branch-input")).toBeVisible();
+    const hostTrigger = screen.getByTestId("new-chat-landing-host-chip");
+    fireEvent.pointerDown(hostTrigger, { button: 0 });
+    fireEvent.click(hostTrigger);
+    expect(await screen.findByTestId("new-chat-landing-host-host_1")).toBeVisible();
+    await waitFor(() => expect(screen.queryByTestId("new-chat-landing-branch-input")).toBeNull());
   });
 
   it("keeps the responsive sandbox repository trigger accessibly named", () => {
@@ -1822,34 +2165,30 @@ describe("NewChatLandingScreen", () => {
     ]);
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
-    // Only the fully supported harnesses lead, in rank order, ahead of the
-    // Agents group.
     const claude = screen.getByTestId("new-chat-landing-agent-a_claude");
+    const cursor = screen.getByTestId("new-chat-landing-agent-a_cursor");
     const codex = screen.getByTestId("new-chat-landing-agent-a_codex");
     const polly = screen.getByTestId("new-chat-landing-agent-a_polly");
-    expect(claude.compareDocumentPosition(codex) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(claude.compareDocumentPosition(cursor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(cursor.compareDocumentPosition(codex) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(cursor.querySelector("img")).toHaveClass("size-4", "dark:invert");
+    expect(decodeURIComponent(codex.querySelector("img")?.getAttribute("src") ?? "")).toContain(
+      "#B1A7FF",
+    );
     expect(codex.compareDocumentPosition(polly) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // Every other harness folds into "More", even though all are configured
-    // here — support level, not host readiness, decides the split.
-    for (const id of ["a_cursor", "a_pi", "a_kiro"]) {
+    for (const id of ["a_pi", "a_kiro"]) {
       expect(screen.queryByTestId(`new-chat-landing-agent-${id}`)).toBeNull();
     }
     fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
     const morePi = screen.getByTestId("new-chat-landing-agent-a_pi");
-    const moreCursor = screen.getByTestId("new-chat-landing-agent-a_cursor");
     const moreKiro = screen.getByTestId("new-chat-landing-agent-a_kiro");
-    // "More" keeps the same rank ordering: Cursor (30) → Pi (40) → Kiro (50).
-    expect(
-      moreCursor.compareDocumentPosition(morePi) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(morePi.querySelector("img")).toHaveClass("size-4", "dark:invert");
     expect(
       morePi.compareDocumentPosition(moreKiro) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
-  it("pins a not-fully-supported harness inline once it is the selected pick", () => {
-    // Pi isn't fully supported, so a fresh picker never leads with it — but
-    // selecting it must pin it inline so the active pick is never buried.
+  it("keeps the selected secondary harness in Other", () => {
     mockAgents([
       {
         id: "a_claude",
@@ -1871,7 +2210,8 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
     selectUnconfiguredAgent("a_pi");
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
-    // Now selected → inline, no drill-down needed.
+    expect(screen.queryByTestId("new-chat-landing-agent-a_pi")).toBeNull();
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
     expect(screen.getByTestId("new-chat-landing-agent-a_pi")).toBeTruthy();
   });
 
@@ -1905,16 +2245,11 @@ describe("NewChatLandingScreen", () => {
     ]);
   }
 
-  it("keeps unconfigured harnesses in the 'More' submenu by default (opt-in preference off)", () => {
-    // With the preference untouched the picker keeps offering harnesses that
-    // aren't set up on the host: they stay in "More" (badged, not hidden), so
-    // users can still discover and configure them.
+  it("keeps primary harnesses visible when unconfigured and hiding is off", () => {
     mockHostWithHarnessReadiness();
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
     expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
-    expect(screen.queryByTestId("new-chat-landing-agent-a_cursor")).toBeNull();
-    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
     expect(screen.getByTestId("new-chat-landing-agent-a_cursor")).toBeTruthy();
   });
 
@@ -2004,8 +2339,6 @@ describe("NewChatLandingScreen", () => {
     expect(screen.queryByTestId("new-chat-landing-harness-copilot")).toBeNull();
   });
 
-  // Harnesses the user has actually launched are promoted out of "More" into
-  // the primary list, so a regular Pi / Cursor user gets theirs one click away.
   function mockClaudeAndPi() {
     mockAgents([
       {
@@ -2027,15 +2360,15 @@ describe("NewChatLandingScreen", () => {
     ]);
   }
 
-  it("promotes a previously-launched harness into the primary list", () => {
+  it("keeps a previously-launched secondary harness in Other", () => {
     localStorage.setItem("omnigent:recent-harnesses", JSON.stringify(["pi-native"]));
     mockClaudeAndPi();
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
-    // Pi isn't fully supported, but the user has launched it → inline, and with
-    // nothing left to group the "More" trigger disappears entirely.
+    expect(screen.queryByTestId("new-chat-landing-agent-a_pi")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-harness-more")).toHaveTextContent("Other...");
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
     expect(screen.getByTestId("new-chat-landing-agent-a_pi")).toBeTruthy();
-    expect(screen.queryByTestId("new-chat-landing-harness-more")).toBeNull();
   });
 
   it("leaves an unused harness under 'More'", () => {
@@ -2049,13 +2382,13 @@ describe("NewChatLandingScreen", () => {
     expect(screen.getByTestId("new-chat-landing-agent-a_pi")).toBeTruthy();
   });
 
-  it("matches a stored reversed harness alias against its canonical spec", () => {
-    // Older entries (and the server's reversed spelling) store "native-pi";
-    // it must still promote the canonical pi-native row.
+  it("keeps the same grouping for a stored reversed harness alias", () => {
     localStorage.setItem("omnigent:recent-harnesses", JSON.stringify(["native-pi"]));
     mockClaudeAndPi();
     renderLanding();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    expect(screen.queryByTestId("new-chat-landing-agent-a_pi")).toBeNull();
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
     expect(screen.getByTestId("new-chat-landing-agent-a_pi")).toBeTruthy();
   });
 
@@ -2391,7 +2724,14 @@ describe("NewChatLandingScreen", () => {
     const workspaceLabel = screen
       .getByTestId("new-chat-landing-workspace-chip")
       .querySelector("span.truncate");
-    expect(workspaceLabel).toHaveClass("min-w-0", "flex-1", "text-sm");
+    expect(workspaceLabel).toHaveClass("min-w-0", "truncate", "text-left");
+    expect(screen.getByTestId("new-chat-landing-workspace-chip")).toHaveClass(
+      "h-6",
+      "gap-1",
+      "px-1",
+      "text-xs",
+      "leading-4",
+    );
     expect(screen.getByTestId("new-chat-landing-host-chip")).toHaveClass(
       "h-8",
       "gap-1",
@@ -2674,6 +3014,10 @@ describe("NewChatLandingScreen", () => {
     // existing-worktree dropdown, and select the one linked worktree.
     fireEvent.click(screen.getByTestId("new-chat-landing-branch-chip"));
     fireEvent.focus(screen.getByTestId("new-chat-landing-branch-input"));
+    const worktreeList = screen.getByTestId("new-chat-landing-worktree-dropdown");
+    expect(worktreeList).not.toHaveClass("absolute", "top-full");
+    expect(worktreeList).toHaveClass("max-h-40", "overflow-y-auto");
+    expect(worktreeList.closest('[data-slot="popover-content"]')).toHaveClass("overflow-y-auto");
     const options = screen.getAllByTestId("new-chat-landing-worktree-option");
     expect(options).toHaveLength(1); // main tree excluded
     expect(options[0].textContent).toContain("feature/x");
@@ -2760,6 +3104,57 @@ describe("NewChatLandingScreen", () => {
     // A new worktree for the edited branch name is requested — this is a
     // create, not a bind, so `existing_worktree` is not set.
     expect(body.git?.branch_name).toBe("feature/y");
+    expect(body.git?.existing_worktree).toBeUndefined();
+  });
+
+  it("announces and creates a new worktree branch from a detached worktree", async () => {
+    localStorage.setItem(
+      RECENT_KEY,
+      JSON.stringify({ host_1: ["/Users/corey/repo-worktrees/review"] }),
+    );
+    useHostWorktreesMock.mockReturnValue({
+      data: [
+        { path: "/Users/corey/repo", branch: "main", is_main: true, detached: false },
+        {
+          path: "/Users/corey/repo-worktrees/review",
+          branch: null,
+          is_main: false,
+          detached: true,
+        },
+      ],
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostWorktrees>);
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding();
+
+    const worktreeTrigger = screen.getByTestId("new-chat-landing-branch-chip");
+    await waitFor(() =>
+      expect(worktreeTrigger).toHaveAttribute(
+        "title",
+        "Existing detached worktree: /Users/corey/repo-worktrees/review",
+      ),
+    );
+
+    fireEvent.click(worktreeTrigger);
+    fireEvent.change(screen.getByTestId("new-chat-landing-branch-input"), {
+      target: { value: "feature/from-detached" },
+    });
+    expect(worktreeTrigger).toHaveAttribute("title", "New worktree branch: feature/from-detached");
+
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "branch from detached" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      git?: { branch_name: string; existing_worktree?: boolean };
+    };
+    expect(body.git?.branch_name).toBe("feature/from-detached");
     expect(body.git?.existing_worktree).toBeUndefined();
   });
 
@@ -3745,6 +4140,8 @@ describe("NewChatLandingScreen attachments", () => {
     // Dragging over the composer lifts the drop-target overlay.
     fireEvent.dragOver(composer, { dataTransfer: fileDrag() });
     expect(screen.getByText("Drop files here")).toBeTruthy();
+    expect(composer).toHaveClass("ring-2", "ring-ring", "ring-inset");
+    expect(composer).toHaveClass("has-[textarea:focus]:shadow-[var(--composer-shadow-focus)]");
     // Dropping a file attaches it (chip proves it reached state) and clears
     // the overlay.
     const file = new File(["hello"], "dropped.txt", { type: "text/plain" });
@@ -4358,9 +4755,7 @@ describe("NewChatLandingScreen agent picker (mobile drill-in)", () => {
     expect(screen.queryByTestId("new-chat-landing-agent-ag_custom")).toBeNull();
   });
 
-  it("drills into the More page for harnesses outside the supported set", () => {
-    // cursor-native isn't fully supported → folded into "More" (Claude Code and
-    // Codex lead inline), so touch gets a drill-in page with a Back row.
+  it("drills into the Other page for secondary harnesses", () => {
     mockAgents([
       {
         id: "a1",
@@ -4371,19 +4766,23 @@ describe("NewChatLandingScreen agent picker (mobile drill-in)", () => {
         skills: [],
       },
       {
-        id: "a_cursor",
-        name: "cursor-native-ui",
-        display_name: "Cursor",
+        id: "a_opencode",
+        name: "opencode-native-ui",
+        display_name: "OpenCode",
         description: null,
-        harness: "cursor-native",
+        harness: "opencode-native",
         skills: [],
       },
     ]);
     renderLanding();
     openPicker();
-    expect(screen.queryByTestId("new-chat-landing-agent-a_cursor")).toBeNull();
+    expect(screen.queryByTestId("new-chat-landing-agent-a_opencode")).toBeNull();
     fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
-    expect(screen.getByTestId("new-chat-landing-agent-a_cursor")).toBeTruthy();
+    const opencode = screen.getByTestId("new-chat-landing-agent-a_opencode");
+    expect(opencode.querySelector("img")).toHaveClass("size-4", "dark:invert");
+    expect(decodeURIComponent(opencode.querySelector("img")?.getAttribute("src") ?? "")).toContain(
+      "M16 6H8v12h8V6zm4 16H4V2h16v20z",
+    );
     fireEvent.click(screen.getByTestId("new-chat-landing-page-back"));
     expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
   });
@@ -4972,17 +5371,22 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     renderLanding({ smart_routing_enabled: true });
     openPicker();
     const row = screen.getByTestId(SMART_ROUTING_ROW);
-    // Plain label only — no helper blurb beside it.
-    expect(row.textContent).toBe("Smart Routing");
+    expect(row.textContent).toBe("Smart RoutingHarness + model");
     // The row leads the menu, above the "Harnesses" heading and its rows.
     const heading = screen.getByText("Harnesses");
     expect(row.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("hides the row when the server flag is off", () => {
+  it("keeps routing visible but disabled when the server flag is off", () => {
     renderLanding({ smart_routing_enabled: false });
     openPicker();
-    expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+    const row = screen.getByTestId(SMART_ROUTING_ROW);
+    expect(row).toHaveAttribute("data-disabled");
+    expect(row).toHaveAttribute("aria-description", expect.stringContaining("enabled routing"));
+    fireEvent.click(row);
+    expect(screen.getByTestId("new-chat-landing-agent-select").textContent).not.toContain(
+      "Smart Routing",
+    );
     // The ordinary harness rows are still there, so this isn't vacuous.
     expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
   });
@@ -4991,11 +5395,11 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     ["codex not installed", { "claude-native": true, "codex-native": false }],
     ["claude not installed", { "claude-native": false, "codex-native": true }],
     ["codex needs auth", { "claude-native": true, "codex-native": "needs-auth" }],
-  ])("hides the row when %s — a one-armed router is just that arm", (_case, configured) => {
+  ])("disables the row when %s", (_case, configured) => {
     mockHosts([{ ...host("online"), configured_harnesses: configured } as Host]);
     renderLanding({ smart_routing_enabled: true });
     openPicker();
-    expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
   });
 
   it("shows the row when the host reports both native CLIs ready", () => {
@@ -5016,11 +5420,11 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     ["codex isn't gateway-backed", { "claude-native": true, "codex-native": false }],
     ["claude isn't gateway-backed", { "claude-native": false, "codex-native": true }],
     ["neither is gateway-backed", { "claude-native": false, "codex-native": false }],
-  ])("hides the row when %s", (_case, gateway) => {
+  ])("disables the row when %s", (_case, gateway) => {
     mockHosts([{ ...host("online"), gateway_inference: gateway } as Host]);
     renderLanding({ smart_routing_enabled: true });
     openPicker();
-    expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
     expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
   });
 
@@ -5042,14 +5446,14 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     ["codex isn't gateway-backed", { "claude-native": true, "codex-native": false }],
     ["claude isn't gateway-backed", { "claude-native": false, "codex-native": true }],
     ["neither is gateway-backed", { "claude-native": false, "codex-native": false }],
-  ] as const)("hides the row when the judge is configured and %s", (_case, gateway) => {
+  ] as const)("disables the row when the judge is configured and %s", (_case, gateway) => {
     mockHosts([{ ...host("online"), gateway_inference: gateway } as Host]);
     renderLanding({
       smart_routing_enabled: true,
       smart_routing_sources: { external: true, oss: true },
     });
     openPicker();
-    expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
     expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
   });
 
@@ -5058,14 +5462,14 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
   it.each([
     ["both families gateway-backed", { "claude-native": true, "codex-native": true }],
     ["the host reports nothing", undefined],
-  ] as const)("hides the row on a judge-only server with %s", (_case, gateway) => {
+  ] as const)("disables the row on a judge-only server with %s", (_case, gateway) => {
     mockHosts([{ ...host("online"), gateway_inference: gateway } as Host]);
     renderLanding({
       smart_routing_enabled: true,
       smart_routing_sources: { external: false, oss: true },
     });
     openPicker();
-    expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
     expect(screen.getByTestId("new-chat-landing-agent-a1")).toBeTruthy();
   });
 
@@ -5088,7 +5492,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
   });
 
   // Neither source: the row goes, same as judge-only.
-  it("hides the row when the server reports neither source", () => {
+  it("disables the row when the server reports neither source", () => {
     mockHosts([
       {
         ...host("online"),
@@ -5100,7 +5504,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       smart_routing_sources: { external: false, oss: false },
     });
     openPicker();
-    expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
   });
 
   it("announces the gateway as the cause when a host switch takes the row away", async () => {
@@ -5127,7 +5531,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     );
   });
 
-  it("hides the row when only one native wrapper agent is registered", () => {
+  it("disables the row when only one native wrapper agent is registered", () => {
     mockAgents([
       {
         id: "a1",
@@ -5140,7 +5544,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     ]);
     renderLanding({ smart_routing_enabled: true });
     openPicker();
-    expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+    expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
   });
 
   it("reads 'Smart Routing' on the composer chip and highlights only its own row", () => {
@@ -5309,11 +5713,9 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       const chip = screen.getByTestId("new-chat-landing-agent-select");
       expect(chip.textContent).not.toContain("Smart Routing");
       expect(chip).toHaveAccessibleName("Claude Code, Model Default, Effort Default");
-      // Silent: the user did nothing this visit to lose routing, and the row
-      // the notice would talk about isn't in the picker either.
       expect(screen.queryByTestId("new-chat-landing-smart-routing-dropped")).toBeNull();
       openPicker();
-      expect(screen.queryByTestId(SMART_ROUTING_ROW)).toBeNull();
+      expect(screen.getByTestId(SMART_ROUTING_ROW)).toHaveAttribute("data-disabled");
       // The arm may come back, so the pick stays remembered.
       expect(JSON.parse(localStorage.getItem(LAST_HARNESS_KEY) ?? "{}")).toEqual({
         a1: "auto-native",

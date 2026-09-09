@@ -638,11 +638,12 @@ describe("NewChatLandingScreen project prefill", () => {
     setProjectConfig({ host_id: "host_1" });
     renderLanding();
 
-    await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain(
-        "feature-x",
-      ),
-    );
+    const workspaceTrigger = screen.getByTestId("new-chat-landing-workspace-chip");
+    const worktreeTrigger = screen.getByTestId("new-chat-landing-branch-chip");
+    await waitFor(() => expect(workspaceTrigger).toHaveAttribute("title", LINKED_WORKTREE));
+    expect(workspaceTrigger).toHaveTextContent("gamma");
+    expect(worktreeTrigger).toHaveTextContent("feature/x");
+    expect(worktreeTrigger).toHaveAttribute("title", "Existing worktree branch: feature/x");
     const body = await submitAndReadBody();
     // Bound straight to the worktree dir; the worktree's branch rides along and
     // no base branch is set (it's a bind, not a fork).
@@ -893,10 +894,10 @@ describe("NewChatLandingScreen project prefill", () => {
 const ALWAYS_WORKTREE_KEY = "omnigent:always-use-worktree";
 
 describe("NewChatLandingScreen global always-use-worktree default", () => {
-  // The compact icon-only chip exposes branch state through its accessible name.
+  // The compact header exposes the visible branch/request label separately
+  // from its state-specific accessible description.
   function branchLabel(): string {
-    const label = screen.getByTestId("new-chat-landing-branch-chip").getAttribute("aria-label");
-    return label === "Worktree: None" ? "Worktree" : (label?.replace(/^Worktree: /, "") ?? "");
+    return screen.getByTestId("new-chat-landing-branch-chip").textContent ?? "";
   }
 
   it("seeds a worktree in a plain (non-project) git workspace when the global default is on", async () => {
@@ -1015,7 +1016,7 @@ describe("NewChatLandingScreen global always-use-worktree default", () => {
     localStorage.removeItem(ALWAYS_WORKTREE_KEY);
     render(<NewChatLandingScreen />, { wrapper: Wrapper });
 
-    await waitFor(() => expect(branchLabel()).toContain("Worktree"));
+    await waitFor(() => expect(branchLabel()).toBe("New worktree"));
     const body = await submitAndReadBody();
     expect(body.workspace).toBe(REPO);
     expect(body.git).toBeUndefined();
