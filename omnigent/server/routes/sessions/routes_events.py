@@ -1409,15 +1409,20 @@ def register_events_routes(
                 # so dropping it flips the session to "failed" with nothing in
                 # the transcript to explain why.
                 detail = output.strip() if isinstance(output, str) and output.strip() else ""
+                wire_output = body.data.get("output")
+                wire_detail = wire_output.strip() if isinstance(wire_output, str) else ""
                 status_error = ErrorDetail(
                     code=(
+                        # Forwarders attach a non-empty output alongside
+                        # reauth today; the fallback message covers a latent
+                        # detail-less reauth.
                         "codex_reauth_required"
                         if data.get("reauth_required") is True
                         # The store-enriched detail keeps a harness-neutral
-                        # code; a forwarder-sent detail keeps codex's.
-                        else (
-                            "codex_turn_error" if body.data.get("output") else "native_turn_error"
-                        )
+                        # code; a forwarder-sent detail keeps codex's. Both
+                        # normalize whitespace, so a blank wire output
+                        # classifies as detail-less rather than codex-sent.
+                        else ("codex_turn_error" if wire_detail else "native_turn_error")
                     ),
                     message=detail or _NATIVE_FAILURE_WITHOUT_DETAIL,
                 )

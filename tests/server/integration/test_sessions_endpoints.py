@@ -4746,13 +4746,27 @@ async def test_post_external_session_status_failed_forwards_persisted_assistant_
     assert "selected model" in error["message"]
 
 
+@pytest.mark.parametrize(
+    ("extra_data", "expected_code"),
+    [
+        # No wire output at all: harness-neutral fallback.
+        ({}, "native_turn_error"),
+        # Whitespace-only wire output classifies as detail-less too, not as a
+        # codex-sent detail.
+        ({"output": "   "}, "native_turn_error"),
+        # A detail-less reauth keeps its reauth code with the fallback message.
+        ({"reauth_required": True}, "codex_reauth_required"),
+    ],
+)
 async def test_post_external_session_status_failed_without_detail_still_carries_a_message(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    extra_data: dict[str, Any],
+    expected_code: str,
 ) -> None:
     """
-    A ``failed`` edge with no wire ``output`` and nothing persisted to enrich
-    from must still publish a typed error.
+    A ``failed`` edge with no usable wire ``output`` and nothing persisted to
+    enrich from must still publish a typed error.
 
     The web only appends an error block when the status edge carries one, so
     an ``error: null`` failure flips the session to "failed" and leaves the
@@ -4804,7 +4818,10 @@ async def test_post_external_session_status_failed_without_detail_still_carries_
         session = await _create_session(client, agent["id"])
         status_resp = await client.post(
             f"/v1/sessions/{session['id']}/events",
-            json={"type": "external_session_status", "data": {"status": "failed"}},
+            json={
+                "type": "external_session_status",
+                "data": {"status": "failed", **extra_data},
+            },
         )
     finally:
         await fake_runner.aclose()
@@ -4814,7 +4831,7 @@ async def test_post_external_session_status_failed_without_detail_still_carries_
     assert failed_events, f"no failed status was published: {published}"
     error = failed_events[0]["error"]
     assert error is not None, "a failed status edge was published with no error detail"
-    assert error["code"] == "native_turn_error"
+    assert error["code"] == expected_code
     assert error["message"] == _NATIVE_FAILURE_WITHOUT_DETAIL
 
 
