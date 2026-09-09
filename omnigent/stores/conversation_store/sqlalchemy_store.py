@@ -255,6 +255,7 @@ def _to_conversation(
             else None
         ),
         pending_elicitation_count=meta.pending_elicitation_count if meta else None,
+        runner_last_seen=meta.runner_last_seen if meta else None,
         project_id=meta.project_id if meta else None,
     )
 
