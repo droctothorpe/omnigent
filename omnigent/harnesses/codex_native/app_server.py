@@ -2369,11 +2369,14 @@ def _resolve_databricks_codex_model(host: str, profile: str, requested: str | No
     An explicit model is matched against the servable ids, so a legacy
     ``model_override`` persisted before this change still launches; one the
     workspace does not serve passes through untouched, because the gateway's
-    error beats a silent substitution. A pin the cached ucode listing already
-    carries verbatim resolves to itself without credentials or a live
-    listing — the round-trip could only echo it back. The cache is never
-    trusted to *respell* a pin (it may predate the gateway's spelling
-    migration); only the live listing may do that.
+    error beats a silent substitution. One shortcut: a pin carried verbatim
+    by the served listing a previous live discovery persisted resolves to
+    itself without credentials or a new listing — the round-trip could only
+    echo it back. Only that listing may confirm a pin, because only it is
+    known to carry the served spelling; externally-written ucode state has
+    no authority over a pin's spelling (its vocabulary may predate the
+    gateway's spelling migration) and is consulted only after live
+    discovery fails, as before.
 
     :param host: Workspace origin, e.g. ``"https://example.com"``.
     :param profile: Databricks CLI profile backing the launch.
@@ -2381,17 +2384,24 @@ def _resolve_databricks_codex_model(host: str, profile: str, requested: str | No
         servable one.
     :returns: The model id to pin on the codex launch.
     """
+    from omnigent.harnesses.codex_native.state import (
+        read_discovered_codex_models,
+        write_discovered_codex_models,
+    )
     from omnigent.models.databricks_model_discovery import (
         discover_databricks_codex_models,
         select_servable_model,
     )
 
-    if requested and select_servable_model(requested, _cached_codex_models(host)) == requested:
-        # The cached workspace listing already carries this exact pin, so the
-        # credential + live listing round-trip below could only echo it back.
-        # A missing or differently-spelled cache entry keeps the full path:
-        # only the live listing may respell a pin.
-        return requested
+    if requested:
+        served = read_discovered_codex_models(host)
+        if select_servable_model(requested, served) == requested:
+            # A listing this code previously fetched live from the workspace
+            # carries the exact pin, so the credential + live listing
+            # round-trip below could only echo it back. Anything less — a
+            # missing record, or a hit under a different spelling — keeps the
+            # full path: only a live listing may respell a pin.
+            return requested
 
     servable: tuple[str, ...] = ()
     try:
@@ -2406,6 +2416,9 @@ def _resolve_databricks_codex_model(host: str, profile: str, requested: str | No
         # simply fails the listing and drops to the ucode-state fallback below,
         # which is already keyed by ``host``.
         servable = discover_databricks_codex_models(host, creds.token)
+        # Record the served listing so later pinned launches can skip this
+        # round-trip; only a live listing has trustworthy spelling.
+        write_discovered_codex_models(host, servable)
     except Exception:  # noqa: BLE001 — cached ucode state is the launch fallback
         _logger.warning(
             "native-codex: live Databricks model discovery failed for profile %r; "

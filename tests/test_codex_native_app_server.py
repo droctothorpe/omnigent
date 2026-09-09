@@ -2889,8 +2889,8 @@ def test_resolve_databricks_codex_model_matches_servable_ids() -> None:
     An unset model takes the newest servable id; a legacy ``databricks-``
     override resolves to the served ``system.ai.`` id for that same model; and a
     model the workspace does not serve passes through untouched (the gateway's
-    error beats a silent substitution). Cached ucode state is absent here, so
-    every pin keeps the live resolution path.
+    error beats a silent substitution). No listing is persisted here, so every
+    pin keeps the live resolution path.
     """
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2907,6 +2907,11 @@ def test_resolve_databricks_codex_model_matches_servable_ids() -> None:
             "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
             return_value=servable,
         ),
+        patch(
+            "omnigent.harnesses.codex_native.state.read_discovered_codex_models",
+            return_value=(),
+        ),
+        patch("omnigent.harnesses.codex_native.state.write_discovered_codex_models"),
         patch("omnigent.onboarding.ucode_state.read_ucode_state", return_value=None),
     ):
         assert (
@@ -2925,14 +2930,13 @@ def test_resolve_databricks_codex_model_matches_servable_ids() -> None:
         )
 
 
-def test_resolve_databricks_codex_model_cache_confirmed_pin_skips_discovery() -> None:
-    """A pin the cached workspace listing already carries resolves offline.
+def test_resolve_databricks_codex_model_discovered_pin_skips_discovery() -> None:
+    """A pin the persisted live-discovered listing carries resolves offline.
 
-    The live round-trip could only echo such a pin back, so the resolver
-    answers from the cache alone — no credential acquisition, no listing —
-    and a slow workspace cannot stall the launch.
+    That listing is written only from a successful workspace listing, so a
+    verbatim hit means the live round-trip could only echo the pin back —
+    no credential acquisition, no listing, no stall on a slow workspace.
     """
-    from types import SimpleNamespace
     from unittest.mock import patch
 
     from omnigent.harnesses.codex_native.app_server import _resolve_databricks_codex_model
@@ -2943,8 +2947,8 @@ def test_resolve_databricks_codex_model_cache_confirmed_pin_skips_discovery() ->
             "omnigent.models.databricks_model_discovery.discover_databricks_codex_models"
         ) as discovery,
         patch(
-            "omnigent.onboarding.ucode_state.read_ucode_state",
-            return_value=SimpleNamespace(codex_models=["system.ai.gpt-5-6-sol"]),
+            "omnigent.harnesses.codex_native.state.read_discovered_codex_models",
+            return_value=("system.ai.gpt-5-6-sol",),
         ),
     ):
         assert (
@@ -2957,14 +2961,14 @@ def test_resolve_databricks_codex_model_cache_confirmed_pin_skips_discovery() ->
     discovery.assert_not_called()
 
 
-def test_resolve_databricks_codex_model_never_respells_a_pin_from_the_cache() -> None:
-    """A cache spelled differently than the pin cannot rewrite the pin offline.
+def test_resolve_databricks_codex_model_ucode_state_never_confirms_or_respells_a_pin() -> None:
+    """Externally-written ucode state has no authority over a pin's spelling.
 
-    Cached ucode state is written by an external CLI and may predate the
-    gateway's spelling migration. When it spells the pinned model
-    differently, resolving from the cache would downgrade a routable pin to
-    a spelling the gateway no longer serves — so only the live listing may
-    respell a pin.
+    Its vocabulary may predate the gateway's spelling migration, so trusting
+    it either way is wrong: confirming a legacy pin verbatim would skip the
+    live translation that keeps the launch routable, and respelling a
+    canonical pin from it would downgrade the pin to an id the gateway no
+    longer serves. Both pins must reach the live listing.
     """
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2981,15 +2985,77 @@ def test_resolve_databricks_codex_model_never_respells_a_pin_from_the_cache() ->
             return_value=("system.ai.gpt-5-5",),
         ) as discovery,
         patch(
+            "omnigent.harnesses.codex_native.state.read_discovered_codex_models",
+            return_value=(),
+        ),
+        patch("omnigent.harnesses.codex_native.state.write_discovered_codex_models"),
+        patch(
             "omnigent.onboarding.ucode_state.read_ucode_state",
             return_value=SimpleNamespace(codex_models=["databricks-gpt-5-5"]),
         ),
     ):
+        # A canonical pin is echoed by the live listing, never downgraded.
         assert (
             _resolve_databricks_codex_model("https://h.example.com", "prof", "system.ai.gpt-5-5")
             == "system.ai.gpt-5-5"
         )
-    discovery.assert_called_once()
+        # A legacy pin still gets its live translation.
+        assert (
+            _resolve_databricks_codex_model(
+                "https://h.example.com", "prof", "databricks-gpt-5-5"
+            )
+            == "system.ai.gpt-5-5"
+        )
+    assert discovery.call_count == 2
+
+
+def test_resolve_databricks_codex_model_persists_the_live_listing() -> None:
+    """A successful live listing is recorded for later pinned launches."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from omnigent.harnesses.codex_native.app_server import _resolve_databricks_codex_model
+
+    servable = ("system.ai.gpt-5-6-sol",)
+    with (
+        patch(
+            "omnigent.runtime.credentials.databricks.resolve_databricks_workspace",
+            return_value=SimpleNamespace(token="tok"),
+        ),
+        patch(
+            "omnigent.models.databricks_model_discovery.discover_databricks_codex_models",
+            return_value=servable,
+        ),
+        patch("omnigent.harnesses.codex_native.state.write_discovered_codex_models") as write,
+    ):
+        assert (
+            _resolve_databricks_codex_model("https://h.example.com", "prof", None)
+            == "system.ai.gpt-5-6-sol"
+        )
+    write.assert_called_once_with("https://h.example.com", servable)
+
+
+def test_discovered_codex_models_roundtrip_and_tolerate_bad_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The persisted served listing round-trips per host and reads bad state as empty."""
+    from omnigent.harnesses.codex_native.state import (
+        read_discovered_codex_models,
+        write_discovered_codex_models,
+    )
+
+    monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(tmp_path / "state"))
+    assert read_discovered_codex_models("https://h.example.com") == ()
+
+    write_discovered_codex_models("https://h.example.com/", ["system.ai.gpt-5-6-sol"])
+    write_discovered_codex_models("https://other.example.com", ["system.ai.gpt-5-5"])
+    # Keyed by host, trailing-slash-insensitive; other hosts stay intact.
+    assert read_discovered_codex_models("https://h.example.com") == ("system.ai.gpt-5-6-sol",)
+    assert read_discovered_codex_models("https://other.example.com") == ("system.ai.gpt-5-5",)
+
+    (tmp_path / "state" / "discovered-models.json").write_text("not json", encoding="utf-8")
+    assert read_discovered_codex_models("https://h.example.com") == ()
 
 
 def test_probe_codex_home_bridges_provider_tables_and_credential(

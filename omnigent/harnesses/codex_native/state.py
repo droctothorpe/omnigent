@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from omnigent.process_logging import data_dir
 _STATE_ROOT_ENV_VAR = "OMNIGENT_CODEX_NATIVE_STATE_DIR"
 _logger = logging.getLogger(__name__)
 _LAUNCH_FILE = "launch.json"
+_DISCOVERED_MODELS_FILE = "discovered-models.json"
 _ID_HASH_CHARS = 32
 
 
@@ -161,3 +163,57 @@ def read_launch_state(conversation_id: str) -> CodexNativeLaunchState | None:
     if not isinstance(working_directory, str) or not working_directory:
         return None
     return CodexNativeLaunchState(working_directory=working_directory)
+
+
+def read_discovered_codex_models(host: str) -> tuple[str, ...]:
+    """Codex ids a live workspace listing previously reported for *host*.
+
+    Written only from a successful Unity Catalog listing, so unlike
+    externally-written ucode state the ids carry the spelling the workspace
+    actually serves. Missing, unreadable, or malformed state reads as empty.
+
+    :param host: Workspace origin, e.g. ``"https://example.com"``.
+    :returns: The persisted served ids, or ``()`` when none are recorded.
+    """
+    target = _codex_native_state_root() / _DISCOVERED_MODELS_FILE
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ()
+    except (OSError, json.JSONDecodeError):
+        _logger.warning("discovered codex models read failed for %s", host, exc_info=True)
+        return ()
+    if not isinstance(raw, dict):
+        return ()
+    models = raw.get(host.rstrip("/"))
+    if not isinstance(models, list):
+        return ()
+    return tuple(str(model) for model in models)
+
+
+def write_discovered_codex_models(host: str, models: Iterable[str]) -> None:
+    """Record the codex ids a live listing reported for *host*.
+
+    Best-effort: the record is an optimization for later pinned launches, so
+    failures are logged and swallowed rather than failing this launch.
+
+    :param host: Workspace origin, e.g. ``"https://example.com"``.
+    :param models: Served ids exactly as the listing reported them.
+    :returns: None.
+    """
+    root = _codex_native_state_root()
+    target = root / _DISCOVERED_MODELS_FILE
+    try:
+        try:
+            raw = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        raw[host.rstrip("/")] = list(models)
+        root.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(raw, separators=(",", ":")) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        _logger.warning("discovered codex models write failed for %s", host, exc_info=True)
