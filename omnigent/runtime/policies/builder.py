@@ -554,10 +554,10 @@ def build_policy_engine(
     # suggested root inherited another tree's guardrails.
     if root_conversation_id != conversation_id:
         root_policy_specs = _load_session_policy_specs(root_conversation_id, policy_store)
-        # Deduplicate: skip root policies already present on the child
-        # (keyed by policy name) to avoid double-evaluation.
-        child_names = {p.name for p in session_policy_specs}
-        root_policy_specs = [p for p in root_policy_specs if p.name not in child_names]
+        # Skip only exact duplicates (avoids double-evaluation). A same-named
+        # but different child policy must not shadow the root's — both run and
+        # DENY short-circuits — so name-squatting cannot neutralize a guardrail.
+        root_policy_specs = [p for p in root_policy_specs if p not in session_policy_specs]
         session_policy_specs = root_policy_specs + session_policy_specs
         all_policy_specs = (
             session_policy_specs
