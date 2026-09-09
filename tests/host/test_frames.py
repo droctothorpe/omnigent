@@ -257,6 +257,39 @@ def test_chunk_assembler_enforces_size_cap() -> None:
         )
 
 
+def test_chunk_assembler_abort_frees_buffer_and_fails_final_slice() -> None:
+    """``abort`` frees the in-flight buffer; the final slice reports failure.
+
+    The tunnel route aborts an assembler when the connection-wide reassembly
+    budget is exceeded; the buffered memory must drop immediately and the
+    session must still resolve to one counted failure on its last slice.
+    """
+    assembler = ImportLocalSessionChunkAssembler()
+    assert assembler.pending is False
+    assert (
+        assembler.add(
+            HostImportLocalSessionChunkFrame(
+                request_id="r", total=1, seq=0, last=False, data="x" * 8
+            )
+        )
+        is None
+    )
+    assert assembler.buffered_chars == 8
+    assert assembler.pending is True
+
+    assembler.abort("budget exceeded")
+
+    assert assembler.buffered_chars == 0
+    assert assembler.pending is True  # still owed a failure on the final slice
+    with pytest.raises(ValueError, match="budget exceeded"):
+        assembler.add(
+            HostImportLocalSessionChunkFrame(request_id="r", total=1, seq=1, last=True, data="x")
+        )
+    # The failed session fully reset the assembler for the next one.
+    assert assembler.pending is False
+    assert assembler.buffered_chars == 0
+
+
 def test_model_options_frames_round_trip() -> None:
     """Pre-launch model catalogs survive both directions of the host tunnel."""
     request = decode_host_frame(

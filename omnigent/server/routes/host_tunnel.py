@@ -29,6 +29,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from omnigent.db.db_models import InvalidUuidError, uuid_to_bytes
 from omnigent.debug_logging import debug_event, set_current_user_id
 from omnigent.host.frames import (
+    IMPORT_SESSION_MAX_REASSEMBLED_CHARS,
     HostConnectionErrorFrame,
     HostCreateDirResultFrame,
     HostCreateWorktreeResultFrame,
@@ -793,9 +794,28 @@ async def _receive_loop(
                 )
             continue
         if isinstance(frame, HostImportLocalSessionChunkFrame):
+            queue = conn.pending_import_local.get(frame.request_id)
+            if queue is None:
+                # request_id is host-controlled: never buffer slices for a
+                # request this server has no pending import for, or a
+                # misbehaving host could hold server memory under arbitrary
+                # ids. Also drops the leftover buffer of a request that just
+                # ended.
+                import_chunk_assemblers.pop(frame.request_id, None)
+                _logger.warning(
+                    "Host %s sent an import chunk for no pending import request",
+                    host_id,
+                )
+                continue
             assembler = import_chunk_assemblers.setdefault(
                 frame.request_id, ImportLocalSessionChunkAssembler()
             )
+            # Concurrent import requests share one connection-wide reassembly
+            # allowance, so parallel chunked sessions can't multiply the
+            # per-session cap into unbounded server memory.
+            buffered = sum(a.buffered_chars for a in import_chunk_assemblers.values())
+            if buffered + len(frame.data) > IMPORT_SESSION_MAX_REASSEMBLED_CHARS:
+                assembler.abort("connection-wide chunk reassembly budget exceeded")
             try:
                 session = assembler.add(frame)
             except ValueError as exc:
@@ -807,20 +827,25 @@ async def _receive_loop(
                 # A payload with no external_session_id makes the import loop
                 # count one failed session and continue, keeping the stream
                 # (and the rest of the batch) alive.
-                queue = conn.pending_import_local.get(frame.request_id)
-                if queue is not None:
-                    queue.put_nowait(("session", {"total": frame.total}))
+                queue.put_nowait(("session", {}))
                 continue
             if session is None:
+                # Mid-assembly slice: nothing to hand over yet, but each slice
+                # proves the host is alive, so let the import request re-arm
+                # its per-frame stall timeout while a big session streams.
+                queue.put_nowait(("progress", {}))
                 continue
-            queue = conn.pending_import_local.get(frame.request_id)
-            if queue is not None:
-                queue.put_nowait(("session", _import_session_queue_payload(frame.total, session)))
+            queue.put_nowait(("session", _import_session_queue_payload(frame.total, session)))
             continue
         if isinstance(frame, HostImportLocalDoneFrame):
-            import_chunk_assemblers.pop(frame.request_id, None)
+            assembler = import_chunk_assemblers.pop(frame.request_id, None)
             queue = conn.pending_import_local.get(frame.request_id)
             if queue is not None:
+                if assembler is not None and assembler.pending:
+                    # The final slice of a chunked session never arrived;
+                    # count it as one failed item instead of dropping it
+                    # from the tally.
+                    queue.put_nowait(("session", {}))
                 queue.put_nowait(
                     (
                         "done",

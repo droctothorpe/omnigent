@@ -57,7 +57,12 @@ def test_import_command_loads_local_session_and_posts_normalized_items(tmp_path:
         )
     )
 
-    with patch("omnigent.cli._resolve_attach_server", return_value=_BASE):
+    with (
+        patch("omnigent.cli._resolve_attach_server", return_value=_BASE),
+        # This machine may genuinely be a host (identity file / env override);
+        # pin "not a host" so the asserted payload is machine-independent.
+        patch("omnigent.host.identity.load_host_identity_if_present", return_value=None),
+    ):
         result = CliRunner().invoke(
             cli,
             ["import", "--harness", "claude", "--session", session_id],
@@ -77,6 +82,7 @@ def test_import_command_loads_local_session_and_posts_normalized_items(tmp_path:
         "workspace": "/repo",
         "title": None,
         "force": False,
+        "host_id": None,
         "items": [
             {
                 "type": "message",
@@ -88,6 +94,41 @@ def test_import_command_loads_local_session_and_posts_normalized_items(tmp_path:
             }
         ],
     }
+
+
+@respx.mock
+def test_import_command_sends_this_machines_host_identity(tmp_path: Path) -> None:
+    """An import from a machine with a host identity claims it in the request.
+
+    The server binds the imported session to that host (when the caller owns
+    it), so resume defaults to the machine the workspace lives on — the same
+    binding the web's host-mediated import records.
+    """
+    from omnigent.host.identity import HostIdentity
+
+    session_id = "a1b2c3d4-1234-5678-9abc-def012345680"
+    _write_claude_transcript(tmp_path, session_id, text="inspect TODO.md")
+    route = respx.post(f"{_BASE}/v1/imports").mock(
+        return_value=httpx.Response(
+            201,
+            json={"session_id": "conv_bound", "status": "imported", "item_count": 1},
+        )
+    )
+
+    identity = HostIdentity(host_id="0123456789abcdef0123456789abcdef", name="my-laptop")
+    with (
+        patch("omnigent.cli._resolve_attach_server", return_value=_BASE),
+        patch("omnigent.host.identity.load_host_identity_if_present", return_value=identity),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            ["import", "--harness", "claude", "--session", session_id],
+            env={"HOME": str(tmp_path)},
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(route.calls.last.request.content)
+    assert payload["host_id"] == "0123456789abcdef0123456789abcdef"
 
 
 @respx.mock

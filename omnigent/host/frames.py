@@ -1552,6 +1552,26 @@ class ImportLocalSessionChunkAssembler:
         self._next_seq = 0
         self._corrupt: str | None = None
 
+    @property
+    def buffered_chars(self) -> int:
+        """Characters currently buffered for the in-flight session."""
+        return self._chars
+
+    @property
+    def pending(self) -> bool:
+        """Whether a session is mid-assembly (slices seen, no final slice yet)."""
+        return self._next_seq > 0 or self._corrupt is not None
+
+    def abort(self, reason: str) -> None:
+        """Poison the in-flight session and free its buffer.
+
+        The session's final slice then raises :class:`ValueError` from
+        :meth:`add`, so the caller counts one failed session as usual.
+        """
+        self._corrupt = reason
+        self._parts.clear()
+        self._chars = 0
+
     def add(self, frame: HostImportLocalSessionChunkFrame) -> HostImportedLocalSession | None:
         """Fold in one slice; return the session on its final slice.
 
@@ -1562,15 +1582,13 @@ class ImportLocalSessionChunkAssembler:
         """
         if self._corrupt is None:
             if frame.seq != self._next_seq:
-                self._corrupt = f"slice out of order (got seq {frame.seq}, want {self._next_seq})"
-                self._parts.clear()
+                self.abort(f"slice out of order (got seq {frame.seq}, want {self._next_seq})")
             else:
                 self._next_seq += 1
-                self._chars += len(frame.data)
-                if self._chars > self._max_chars:
-                    self._corrupt = f"chunked session exceeds {self._max_chars} characters"
-                    self._parts.clear()
+                if self._chars + len(frame.data) > self._max_chars:
+                    self.abort(f"chunked session exceeds {self._max_chars} characters")
                 else:
+                    self._chars += len(frame.data)
                     self._parts.append(frame.data)
         if not frame.last:
             return None

@@ -94,6 +94,10 @@ class ImportSessionRequest(BaseModel):
     title: str | None = Field(default=None, max_length=512)
     force: bool = False
     project_id: str | None = None
+    # The importing machine's own host identity, when it has one. Honored only
+    # when that host is registered here and owned by the caller (and the
+    # transcript records a workspace); anything else imports unbound.
+    host_id: str | None = Field(default=None, max_length=128)
     items: list[ImportItemInput] = Field(min_length=1, max_length=_MAX_IMPORT_ITEMS)
 
     @field_validator("external_session_id")
@@ -236,8 +240,10 @@ async def _stream_local_sessions_from_host(
     Sends a recent or exact import frame and drains the per-request queue the
     tunnel fills: each ``host.import_local_session`` frame yields one session
     dict (``{total, external_session_id, workspace, items, title, source}``); the
-    terminal ``host.import_local_done`` ends the stream. The caller persists each
-    session as it arrives, so a large batch never buffers in one frame.
+    terminal ``host.import_local_done`` ends the stream. Slices of a chunked
+    oversized session arrive as ``progress`` events, which only re-arm the
+    per-frame timeout. The caller persists each session as it arrives, so a
+    large batch never buffers in one frame.
 
     :raises OmnigentError: If the host connection drops, a frame times out, or
         the host reports a read failure.
@@ -274,6 +280,11 @@ async def _stream_local_sessions_from_host(
                 ) from exc
             if kind == "session":
                 yield data
+            elif kind == "progress":
+                # A slice of a chunked oversized session landed: nothing to
+                # yield yet, but the host is alive, so the per-frame timeout
+                # re-arms instead of tripping mid-transfer.
+                continue
             else:  # "done"
                 if data.get("status") != "ok":
                     raise OmnigentError(
@@ -403,6 +414,31 @@ def create_imports_router(
             raise
         return conversation.id, title
 
+    async def _bindable_import_host_id(user_id: str | None, host_id: str | None) -> str | None:
+        """Resolve a claimed importing-machine host to one the caller may bind.
+
+        The CLI sends its machine's host identity so its imports (like the
+        web's host-mediated flow) default resume to the machine the workspace
+        lives on. The claim is honored only when that host is registered on
+        this server and owned by the caller; an unknown, malformed, or foreign
+        id imports unbound rather than failing the import or binding another
+        user's host.
+        """
+        if host_id is None or host_store is None:
+            return None
+        from omnigent.db.db_models import InvalidUuidError, uuid_to_bytes
+
+        try:
+            # Normalize before the store call: a malformed id must read as
+            # "not a registered host", not surface as a DB bind error.
+            normalized = uuid_to_bytes(host_id).hex()
+        except InvalidUuidError:
+            return None
+        host = await asyncio.to_thread(host_store.get_host, normalized)
+        if host is None or (user_id is not None and host.user_id != user_id):
+            return None
+        return host.host_id
+
     @router.post(
         "/imports",
         response_model=ImportSessionResponse,
@@ -433,10 +469,15 @@ def create_imports_router(
                 conversation_store,
             )
             if not body.force:
-                raise OmnigentError(
-                    f"This {body.source} session has already been imported as {existing.id}",
-                    code=ErrorCode.CONFLICT,
-                )
+                detail = f"This {body.source} session has already been imported as {existing.id}"
+                if existing.archived:
+                    # Re-importing is how a user asks for this session back;
+                    # an archived prior import would otherwise stay invisible.
+                    await asyncio.to_thread(
+                        conversation_store.update_conversation, existing.id, archived=False
+                    )
+                    detail += " (it was archived; restored it to your session list)"
+                raise OmnigentError(detail, code=ErrorCode.CONFLICT)
 
         if existing is not None:
             await conversation_store.delete_conversation(existing.id)
@@ -449,6 +490,7 @@ def create_imports_router(
             user_id=user_id,
             native_title=body.title,
             project_id=body.project_id,
+            host_id=await _bindable_import_host_id(user_id, body.host_id),
         )
 
         response.status_code = 201
@@ -545,6 +587,23 @@ def create_imports_router(
             )
             if existing is not None:
                 counts["already_imported"] += 1
+                if existing.archived:
+                    # Re-importing is how a user asks for this session back;
+                    # an archived prior import would otherwise stay invisible.
+                    # Restore it only for a caller who owns it.
+                    try:
+                        await require_access(
+                            user_id,
+                            existing.id,
+                            LEVEL_OWNER,
+                            permission_store,
+                            conversation_store,
+                        )
+                    except OmnigentError:
+                        continue
+                    await asyncio.to_thread(
+                        conversation_store.update_conversation, existing.id, archived=False
+                    )
                 continue
             try:
                 items = [ImportItemInput.model_validate(raw).to_item() for raw in raw_items]

@@ -709,3 +709,335 @@ async def test_import_local_offline_host_is_conflict(db_uri: str) -> None:
         )
     assert res.status_code == 409
     assert res.json()["error"]["code"] == ErrorCode.CONFLICT
+
+
+def _one_message_payload_items() -> list[dict[str, object]]:
+    """A minimal valid imported-items list for focused import tests."""
+    return [
+        {
+            "type": "message",
+            "response_id": "claude:turn-1",
+            "data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "inspect TODO.md"}],
+            },
+        }
+    ]
+
+
+async def test_reimport_of_archived_session_restores_it_and_conflicts(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """Re-importing an archived prior import unarchives it.
+
+    Re-importing is how a user asks for the session back; without the
+    restore, the "already been imported" rejection leaves the session
+    invisible in the archive with no way to recover it via import.
+    """
+    _seed_claude_agent(db_uri)
+    store = SqlAlchemyConversationStore(db_uri)
+    payload = {
+        "source": "claude",
+        "external_session_id": "claude-archived-1",
+        "workspace": "/repo",
+        "items": _one_message_payload_items(),
+    }
+
+    created = await client.post("/v1/imports", json=payload)
+    assert created.status_code == 201
+    session_id = created.json()["session_id"]
+    store.update_conversation(session_id, archived=True)
+
+    repeated = await client.post("/v1/imports", json=payload)
+
+    assert repeated.status_code == 409
+    assert "restored it to your session list" in repeated.text
+    conversation = store.get_conversation(session_id)
+    assert conversation is not None
+    assert conversation.archived is False
+
+
+async def test_local_reimport_of_archived_session_resurfaces_it(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host-mediated re-import of an archived prior import unarchives it.
+
+    The web's Settings > Import flow counts the session "already imported"
+    either way; the archived row must come back to the visible session list
+    instead of staying hidden with no recovery path.
+    """
+    from fastapi import FastAPI
+
+    from omnigent.server.routes import imports as imports_module
+
+    _seed_claude_agent(db_uri)
+    conversation_store = SqlAlchemyConversationStore(db_uri)
+
+    async def _fake_stream(**_kwargs: object):
+        yield {
+            "external_session_id": "claude-rearchive-1",
+            "workspace": "/repo/on/host",
+            "items": _one_message_payload_items(),
+            "title": "Archived thread",
+            "source": "claude",
+        }
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+
+    host_conn = SimpleNamespace(
+        host_id="host_0123456789abcdef0123456789abcdef", pending_import_local={}
+    )
+    app = FastAPI()
+    app.include_router(
+        imports_module.create_imports_router(
+            conversation_store,
+            SqlAlchemyAgentStore(db_uri),
+            host_registry=SimpleNamespace(get=lambda _host_id: host_conn),  # type: ignore[arg-type]
+            host_store=SimpleNamespace(  # type: ignore[arg-type]
+                get_host=lambda _host_id: SimpleNamespace(user_id=None)
+            ),
+        ),
+        prefix="/v1",
+    )
+    request_body = {
+        "host_id": "host_0123456789abcdef0123456789abcdef",
+        "source": "claude",
+        "limit": 5,
+    }
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        first = await c.post("/v1/imports/local", json=request_body)
+        assert first.status_code == 200
+        assert first.json()["imported"] == 1
+        session_id = first.json()["sessions"][0]["session_id"]
+        conversation_store.update_conversation(session_id, archived=True)
+
+        second = await c.post("/v1/imports/local", json=request_body)
+
+    assert second.status_code == 200
+    assert second.json()["already_imported"] == 1
+    conversation = conversation_store.get_conversation(session_id)
+    assert conversation is not None
+    assert conversation.archived is False
+
+
+async def test_local_import_counts_unassembled_chunk_sentinel_as_failed(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tunnel's empty failure sentinel counts as exactly one failed item.
+
+    A chunked session that never reassembled (corrupt slices, budget abort,
+    or a missing final slice at done) reaches the import loop as an empty
+    payload; the batch must tally one failure and keep going.
+    """
+    from fastapi import FastAPI
+
+    from omnigent.server.routes import imports as imports_module
+
+    _seed_claude_agent(db_uri)
+
+    async def _fake_stream(**_kwargs: object):
+        yield {}
+        yield {
+            "external_session_id": "claude-after-failure",
+            "workspace": None,
+            "items": _one_message_payload_items(),
+            "title": "Survivor",
+            "source": "claude",
+        }
+
+    monkeypatch.setattr(imports_module, "_stream_local_sessions_from_host", _fake_stream)
+
+    host_conn = SimpleNamespace(
+        host_id="host_0123456789abcdef0123456789abcdef", pending_import_local={}
+    )
+    app = FastAPI()
+    app.include_router(
+        imports_module.create_imports_router(
+            SqlAlchemyConversationStore(db_uri),
+            SqlAlchemyAgentStore(db_uri),
+            host_registry=SimpleNamespace(get=lambda _host_id: host_conn),  # type: ignore[arg-type]
+            host_store=SimpleNamespace(  # type: ignore[arg-type]
+                get_host=lambda _host_id: SimpleNamespace(user_id=None)
+            ),
+        ),
+        prefix="/v1",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.post(
+            "/v1/imports/local",
+            json={
+                "host_id": "host_0123456789abcdef0123456789abcdef",
+                "source": "claude",
+                "limit": 5,
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["failed"] == 1
+    assert body["imported"] == 1
+    assert [ref["title"] for ref in body["sessions"]] == ["Survivor"]
+
+
+async def test_stream_local_sessions_treats_progress_as_liveness_only() -> None:
+    """Chunk-arrival heartbeats re-arm the stall timeout without yielding."""
+    conn = SimpleNamespace(host_id="h1", pending_import_local={})
+
+    class _Reg:
+        def send_text(self, host_conn: object, frame: str) -> None:
+            (queue,) = conn.pending_import_local.values()
+            queue.put_nowait(("progress", {}))
+            queue.put_nowait(("progress", {}))
+            queue.put_nowait(
+                (
+                    "session",
+                    {
+                        "external_session_id": "c1",
+                        "workspace": None,
+                        "items": [],
+                        "title": "one",
+                        "source": "claude",
+                        "total": 1,
+                    },
+                )
+            )
+            queue.put_nowait(("done", {"status": "ok", "error": None}))
+
+    got = [
+        session
+        async for session in _stream_local_sessions_from_host(
+            host_registry=_Reg(),  # type: ignore[arg-type]
+            host_conn=conn,  # type: ignore[arg-type]
+            source="claude",
+            limit=5,
+        )
+    ]
+
+    assert [s["external_session_id"] for s in got] == ["c1"]
+    assert conn.pending_import_local == {}
+
+
+class _StubAuth:
+    """Auth provider double that reports a fixed caller for every request."""
+
+    def __init__(self, user_id: str) -> None:
+        self._user_id = user_id
+
+    def get_user_id(self, _request: object) -> str:
+        return self._user_id
+
+
+def _imports_app_with_hosts(db_uri: str, hosts: dict[str, SimpleNamespace]) -> FastAPI:
+    """A focused /v1/imports app whose host registrations come from *hosts*."""
+    from omnigent.server.routes import imports as imports_module
+
+    app = FastAPI()
+    app.include_router(
+        imports_module.create_imports_router(
+            SqlAlchemyConversationStore(db_uri),
+            SqlAlchemyAgentStore(db_uri),
+            auth_provider=_StubAuth("alice@example.com"),  # type: ignore[arg-type]
+            host_registry=SimpleNamespace(get=lambda _host_id: None),  # type: ignore[arg-type]
+            host_store=SimpleNamespace(get_host=lambda host_id: hosts.get(host_id)),  # type: ignore[arg-type]
+        ),
+        prefix="/v1",
+    )
+    return app
+
+
+@pytest.mark.parametrize(
+    ("claimed_host_id", "expected_bound"),
+    [
+        # The caller's own registered machine: bind, normalized to bare hex.
+        ("host_0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef"),
+        # Registered to another user: import unbound rather than 403 the import.
+        ("fedcba9876543210fedcba9876543210", None),
+        # Never registered on this server: import unbound.
+        ("11112222333344445555666677778888", None),
+        # Malformed id: not a registered host, never a DB bind error.
+        ("not-a-uuid", None),
+    ],
+)
+async def test_import_binds_host_only_for_callers_registered_host(
+    db_uri: str,
+    claimed_host_id: str,
+    expected_bound: str | None,
+) -> None:
+    """A claimed importing-machine host binds only when the caller owns it.
+
+    The CLI sends its machine's host identity so an import resumes on the
+    machine the workspace lives on (parity with the web's host-mediated
+    import); a host the server doesn't know, someone else's host, or a
+    malformed id must leave the session unbound without failing the import.
+    """
+    _seed_claude_agent(db_uri)
+    store = SqlAlchemyConversationStore(db_uri)
+    hosts = {
+        "0123456789abcdef0123456789abcdef": SimpleNamespace(
+            user_id="alice@example.com", host_id="0123456789abcdef0123456789abcdef"
+        ),
+        "fedcba9876543210fedcba9876543210": SimpleNamespace(
+            user_id="bob@example.com", host_id="fedcba9876543210fedcba9876543210"
+        ),
+    }
+    app = _imports_app_with_hosts(db_uri, hosts)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        created = await c.post(
+            "/v1/imports",
+            json={
+                "source": "claude",
+                "external_session_id": f"claude-hostbind-{claimed_host_id[:12]}",
+                "workspace": "/repo",
+                "host_id": claimed_host_id,
+                "items": _one_message_payload_items(),
+            },
+        )
+
+    assert created.status_code == 201, created.text
+    conversation = store.get_conversation(created.json()["session_id"])
+    assert conversation is not None
+    assert conversation.host_id == expected_bound
+    assert conversation.workspace == "/repo"
+
+
+async def test_import_without_workspace_ignores_claimed_host(db_uri: str) -> None:
+    """A transcript with no recorded workspace imports unbound.
+
+    ``host_id`` requires a workspace (check constraint): binding is about
+    resuming where the workspace lives, so without one the claim is moot.
+    """
+    _seed_claude_agent(db_uri)
+    store = SqlAlchemyConversationStore(db_uri)
+    hosts = {
+        "0123456789abcdef0123456789abcdef": SimpleNamespace(
+            user_id="alice@example.com", host_id="0123456789abcdef0123456789abcdef"
+        ),
+    }
+    app = _imports_app_with_hosts(db_uri, hosts)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        created = await c.post(
+            "/v1/imports",
+            json={
+                "source": "claude",
+                "external_session_id": "claude-hostbind-no-workspace",
+                "host_id": "host_0123456789abcdef0123456789abcdef",
+                "items": _one_message_payload_items(),
+            },
+        )
+
+    assert created.status_code == 201, created.text
+    conversation = store.get_conversation(created.json()["session_id"])
+    assert conversation is not None
+    assert conversation.host_id is None
+    assert conversation.workspace is None

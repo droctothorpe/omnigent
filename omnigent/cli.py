@@ -6268,6 +6268,7 @@ def import_session_command(
 
     from omnigent.chat import _remote_headers
     from omnigent.conversation_browser import conversation_url
+    from omnigent.host.identity import load_host_identity_if_present
     from omnigent.session_import import (
         ImportSource,
         SessionImportNotFoundError,
@@ -6320,6 +6321,13 @@ def import_session_command(
         base_url = ensure_local_omnigent_server().url
     base_url = base_url.rstrip("/")
 
+    # This machine's host identity, when it has one: the server binds the
+    # imported session to it (if this machine is a registered host the caller
+    # owns), so resume defaults to the machine the workspace lives on — same
+    # as the web's host-mediated import.
+    host_identity = load_host_identity_if_present()
+    machine_host_id = host_identity.host_id if host_identity is not None else None
+
     def _import_one(target: tuple[ImportSource, str]) -> _SessionImportResult:
         # Each target carries its own harness so an "all" batch can span them.
         current_source, sid = target
@@ -6336,6 +6344,7 @@ def import_session_command(
             "workspace": imported.workspace,
             "title": imported.native_title,
             "force": force,
+            "host_id": machine_host_id,
             "items": [
                 {
                     "type": item.type,
