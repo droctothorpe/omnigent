@@ -16,6 +16,7 @@ import asyncio
 import json
 import math
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ from omnigent.server.routes._sessions.helpers import (
     _NativeTerminalEnsureOutcome,
     _RunnerForwardResult,
 )
+from omnigent.session_event_batch import MAX_SESSION_EVENT_REQUEST_BYTES
 from omnigent.spec.types import SkillSpec
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
@@ -1162,6 +1164,168 @@ async def test_external_subagent_start_mints_child_session(
     # Description is preserved on the row's labels for surfaces that
     # want it; the rail's row UI ignores ``session_name``.
     assert child["labels"]["omnigent.claude_native.description"] == "Trace the auth flow"
+
+
+async def test_session_event_batch_is_ordered_and_idempotent(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retried child batch persists and publishes each source item once."""
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.session_stream.publish",
+        lambda _session_id, event: published.append(event),
+    )
+    agent = await create_test_agent(client)
+    parent = await _create_session(
+        client,
+        agent["id"],
+        labels={"omnigent.wrapper": "claude-code-native-ui"},
+    )
+    start = await client.post(
+        f"/v1/sessions/{parent['id']}/events",
+        json={
+            "type": "external_subagent_start",
+            "data": {
+                "subagent_id": "batch-child",
+                "agent_type": "Explore",
+                "description": "Drain historical output",
+                "tool_use_id": "toolu_batch_child",
+            },
+        },
+    )
+    child_id = start.json()["child_session_id"]
+    batch = [
+        {
+            "type": "external_conversation_item",
+            "data": {
+                "source_id": "child-user:0:message",
+                "item_type": "message",
+                "response_id": "resp_child_user",
+                "item_data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "inspect logs"}],
+                },
+            },
+        },
+        {
+            "type": "external_conversation_item",
+            "data": {
+                "source_id": "child-assistant:0:message",
+                "item_type": "message",
+                "response_id": "resp_child_assistant",
+                "item_data": {
+                    "role": "assistant",
+                    "agent": "claude-native-ui",
+                    "content": [{"type": "output_text", "text": "found it"}],
+                },
+            },
+        },
+    ]
+
+    first = await client.post(f"/v1/sessions/{child_id}/events", json=batch)
+    assert first.status_code == 202, first.text
+    first_items = first.json()
+    assert len(first_items) == 2
+    published_after_first = len(published)
+
+    retry = await client.post(f"/v1/sessions/{child_id}/events", json=batch)
+    assert retry.status_code == 202, retry.text
+    retry_items = retry.json()
+    assert [item["item_id"] for item in retry_items] == [item["item_id"] for item in first_items]
+    assert len(published) == published_after_first
+
+    items = (await client.get(f"/v1/sessions/{child_id}/items")).json()["data"]
+    assert [item["content"][0]["text"] for item in items] == [
+        "inspect logs",
+        "found it",
+    ]
+
+
+async def test_session_event_batch_rejects_body_over_ten_mib(
+    client: httpx.AsyncClient,
+) -> None:
+    """The server independently enforces the exact encoded request limit."""
+    assert MAX_SESSION_EVENT_REQUEST_BYTES == 10 * 1024 * 1024
+    agent = await create_test_agent(client)
+    parent = await _create_session(
+        client,
+        agent["id"],
+        labels={"omnigent.wrapper": "claude-code-native-ui"},
+    )
+    start = await client.post(
+        f"/v1/sessions/{parent['id']}/events",
+        json={
+            "type": "external_subagent_start",
+            "data": {
+                "subagent_id": "large-batch-child",
+                "agent_type": "Explore",
+                "description": "Large output",
+                "tool_use_id": "toolu_large_batch_child",
+            },
+        },
+    )
+    child_id = start.json()["child_session_id"]
+    response = await client.post(
+        f"/v1/sessions/{child_id}/events",
+        json=[
+            {
+                "type": "external_conversation_item",
+                "data": {
+                    "source_id": "oversized:0:output",
+                    "item_type": "function_call_output",
+                    "response_id": "resp_oversized",
+                    "item_data": {
+                        "call_id": "toolu_oversized",
+                        "output": "x" * MAX_SESSION_EVENT_REQUEST_BYTES,
+                    },
+                },
+            }
+        ],
+    )
+    assert response.status_code == 400
+    assert "10 MiB" in response.text
+
+
+async def test_session_event_body_limit_applies_without_content_length(
+    client: httpx.AsyncClient,
+) -> None:
+    """Chunked bodies are bounded before JSON or Pydantic parsing."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    chunk = b"x" * (1024 * 1024)
+
+    async def oversized_invalid_json() -> AsyncIterator[bytes]:
+        yield b'{"type":"interrupt","padding":"'
+        for _ in range(11):
+            yield chunk
+
+    response = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        content=oversized_invalid_json(),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert "10 MiB" in response.text
+
+
+async def test_session_event_batch_rejects_empty_or_more_than_100_events(
+    client: httpx.AsyncClient,
+) -> None:
+    """Event arrays have explicit non-empty and count bounds."""
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+
+    empty = await client.post(f"/v1/sessions/{session['id']}/events", json=[])
+    assert empty.status_code == 400
+    assert "must not be empty" in empty.text
+
+    too_many = await client.post(
+        f"/v1/sessions/{session['id']}/events",
+        json=[{"type": "interrupt"} for _ in range(101)],
+    )
+    assert too_many.status_code == 400
+    assert "100-event limit" in too_many.text
 
 
 async def test_external_acp_subagent_start_mints_child_without_a_vendor_wrapper(
