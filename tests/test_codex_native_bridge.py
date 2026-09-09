@@ -277,6 +277,57 @@ def test_write_codex_config_effort_creates_missing_file(bridge_dir: Path) -> Non
     assert read_codex_config_effort(bridge_dir) == "high"
 
 
+def test_write_codex_config_effort_replaces_key_after_multiline_array(bridge_dir: Path) -> None:
+    """A top-level multiline array must not end the top-level scan early.
+
+    Its continuation lines can begin with ``[`` (nested arrays); mistaking one
+    for a table header would miss the existing effort key below the array and
+    insert a duplicate at the top — invalid TOML that ``tomllib`` (and codex
+    itself) reject, corrupting the mirror rather than just staling it.
+    """
+    # The continuation line sits at column 0 — valid TOML, and the shape a
+    # naive ``startswith("[")`` break mistakes for a table header.
+    _write_config(
+        bridge_dir,
+        "notify = [\n"
+        '["notify-send", "Codex"],\n'
+        "]\n"
+        'model = "gpt-5.5"\n'
+        'model_reasoning_effort = "medium"\n',
+    )
+
+    assert write_codex_config_effort(bridge_dir, "high") is True
+    assert read_codex_config_effort(bridge_dir) == "high"
+    body = (codex_home_for_bridge_dir(bridge_dir) / "config.toml").read_text()
+    assert body.count("model_reasoning_effort") == 1
+
+
+def test_write_codex_config_model_replaces_key_after_multiline_array(bridge_dir: Path) -> None:
+    """The model writer shares the array-aware scan (same duplicate-key hazard)."""
+    _write_config(
+        bridge_dir,
+        "notify = [\n"
+        '["notify-send", "Codex"],\n'
+        "]\n"
+        'model = "databricks-gpt-5-5"\n',
+    )
+
+    assert write_codex_config_model(bridge_dir, "gpt-5.6-luna") is True
+    assert read_codex_config_model(bridge_dir) == "gpt-5.6-luna"
+    body = (codex_home_for_bridge_dir(bridge_dir) / "config.toml").read_text()
+    assert len([line for line in body.splitlines() if line.startswith("model =")]) == 1
+
+
+def test_write_codex_config_effort_false_on_undecodable_file(bridge_dir: Path) -> None:
+    """Undecodable bytes → ``False`` (the promised best-effort), not a raise."""
+    home = codex_home_for_bridge_dir(bridge_dir)
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_bytes(b"\xff\xfe\x00broken")
+
+    assert write_codex_config_effort(bridge_dir, "high") is False
+    assert write_codex_config_model(bridge_dir, "gpt-5.6-luna") is False
+
+
 def test_policy_hook_config_round_trips(bridge_dir: Path) -> None:
     """
     Written Omnigent coordinates read back verbatim for the policy hook.

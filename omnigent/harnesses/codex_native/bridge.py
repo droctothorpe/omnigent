@@ -10,7 +10,7 @@ import re
 import secrets
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -585,36 +585,24 @@ def write_codex_config_model(bridge_dir: Path, model: str) -> bool:
     """
     from omnigent.util.reasoning_effort import clamp_effort_for_model
 
-    config_path = codex_home_for_bridge_dir(bridge_dir) / "config.toml"
-    pin_line = f"model = {json.dumps(model)}"
-    try:
-        existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-        lines = existing.splitlines()
-        replaced = False
-        for i, line in enumerate(lines):
-            # Only the top-level table: stop at the first [section] header.
-            if line.startswith("["):
-                break
-            if re.match(r"^model\s*=", line):
-                lines[i] = pin_line
-                replaced = True
-                continue
-            # The config keeps the launch model's effort (e.g. the user's
-            # xhigh default), which the switched-to model may reject (GLM has
-            # no xhigh). Clamp it to a value the new model accepts so the next
-            # turn does not 400 on reasoning.effort.
-            effort_match = _EFFORT_KEY_RE.match(line)
-            if effort_match:
-                clamped = clamp_effort_for_model(effort_match.group(2), model)
-                if clamped and clamped != effort_match.group(2):
-                    lines[i] = f"{effort_match.group(1)}{clamped}{effort_match.group(3)}"
-        if not replaced:
-            lines.insert(0, pin_line)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    except OSError:
-        return False
-    return True
+    def _clamp_stale_effort(line: str) -> str | None:
+        # The config keeps the launch model's effort (e.g. the user's xhigh
+        # default), which the switched-to model may reject (GLM has no xhigh).
+        # Clamp it to a value the new model accepts so the next turn does not
+        # 400 on reasoning.effort.
+        effort_match = _EFFORT_KEY_RE.match(line)
+        if effort_match:
+            clamped = clamp_effort_for_model(effort_match.group(2), model)
+            if clamped and clamped != effort_match.group(2):
+                return f"{effort_match.group(1)}{clamped}{effort_match.group(3)}"
+        return None
+
+    return _upsert_top_level_config_key(
+        codex_home_for_bridge_dir(bridge_dir) / "config.toml",
+        _MODEL_TOP_KEY_RE,
+        f"model = {json.dumps(model)}",
+        rewrite_other_line=_clamp_stale_effort,
+    )
 
 
 def write_codex_config_effort(bridge_dir: Path, effort: str) -> bool:
@@ -642,24 +630,81 @@ def write_codex_config_effort(bridge_dir: Path, effort: str) -> bool:
     :param effort: Reasoning effort to record, e.g. ``"high"``.
     :returns: ``True`` when the file was updated.
     """
-    config_path = codex_home_for_bridge_dir(bridge_dir) / "config.toml"
-    pin_line = f"model_reasoning_effort = {json.dumps(effort)}"
+    return _upsert_top_level_config_key(
+        codex_home_for_bridge_dir(bridge_dir) / "config.toml",
+        _EFFORT_TOP_KEY_RE,
+        f"model_reasoning_effort = {json.dumps(effort)}",
+    )
+
+
+# Top-level key assignments the config writers upsert, tolerating leading
+# whitespace (valid TOML) like _EFFORT_KEY_RE does.
+_MODEL_TOP_KEY_RE = re.compile(r"^\s*model\s*=")
+_EFFORT_TOP_KEY_RE = re.compile(r"^\s*model_reasoning_effort\s*=")
+
+
+def _upsert_top_level_config_key(
+    config_path: Path,
+    key_re: re.Pattern[str],
+    pin_line: str,
+    *,
+    rewrite_other_line: Callable[[str], str | None] | None = None,
+) -> bool:
+    """
+    Upsert one top-level key in a ``config.toml``, best-effort.
+
+    Shared engine of :func:`write_codex_config_model` /
+    :func:`write_codex_config_effort`. The scan must only consider top-level
+    STATEMENT lines, and "the first line starting with ``[``" is not a reliable
+    end-of-top-level marker: a top-level multiline array value's continuation
+    lines may begin with ``[`` (nested arrays). Breaking there would miss an
+    existing key after the array and insert a duplicate at the top — invalid
+    TOML that every reader (``tomllib`` and codex itself) rejects. So array
+    nesting is tracked with the same bracket-counting heuristic proven in
+    ``codex_executor._normalize_copied_codex_effort``: a ``[`` at statement
+    position is a real table header (top-level keys end there); inside an
+    unclosed array, lines are only counted, never matched.
+
+    :param config_path: The ``config.toml`` to rewrite (created if missing).
+    :param key_re: Matches the top-level assignment lines to replace.
+    :param pin_line: Replacement/insert line, e.g. ``model = "gpt-5.6-luna"``.
+    :param rewrite_other_line: Optional rewrite for other top-level statement
+        lines (returns the new line, or ``None`` to keep it); used by the
+        model writer to clamp a stale effort line.
+    :returns: ``True`` when the file was updated; ``False`` when it could not
+        be read (including undecodable bytes) or written.
+    """
     try:
         existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
         lines = existing.splitlines()
         replaced = False
+        array_depth = 0  # net unclosed '[' from a top-level multiline array value
         for i, line in enumerate(lines):
-            # Only the top-level table: stop at the first [section] header.
-            if line.startswith("["):
-                break
-            if re.match(r"^model_reasoning_effort\s*=", line):
-                lines[i] = pin_line
-                replaced = True
+            if array_depth == 0:
+                # At statement position a leading '[' is a real table header
+                # ([table] / [[array-of-tables]]) -- top-level keys end here.
+                if line.lstrip().startswith("["):
+                    break
+                if key_re.match(line):
+                    lines[i] = pin_line
+                    replaced = True
+                    continue  # the pinned line opens no array
+                if rewrite_other_line is not None:
+                    rewritten = rewrite_other_line(line)
+                    if rewritten is not None:
+                        lines[i] = rewritten
+                        continue  # rewritten lines (effort clamp) open no array
+            # Track array nesting (a bracket-counting heuristic, not a full
+            # TOML parser, but sufficient for this narrow config shape) so
+            # bracketed array content is not mistaken for a table header.
+            array_depth += line.count("[") - line.count("]")
+            if array_depth < 0:
+                array_depth = 0
         if not replaced:
             lines.insert(0, pin_line)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return False
     return True
 
