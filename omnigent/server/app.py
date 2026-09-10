@@ -2854,7 +2854,10 @@ def create_app(
         runner_session_initializer.invalidate_runner(runner_id)
         # Graceful disconnect: clear the persisted liveness stamp so other
         # replicas flip offline immediately rather than after the TTL.
-        session_live_state.clear_runner_liveness(runner_id)
+        if shutdown_state.server_shutting_down():
+            session_live_state.touch_runner_liveness([runner_id])
+        else:
+            session_live_state.clear_runner_liveness(runner_id)
 
         # Replace any pending timer so a rapid drop-reconnect-drop gives
         # each outage a full grace window.
