@@ -3300,6 +3300,59 @@ async def test_session_agent_terminals_follow_selected_host(
     assert custom_response.json()["terminals"] == ["zsh"]
 
 
+async def test_host_shell_inventory_miss_returns_wrong_replica(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_uri: str,
+) -> None:
+    """Replica-local shell metadata must not fall back before re-addressing."""
+    host_id = "7b9c07bfb42f687d53af44f018adebee"
+    HostStore(db_uri).upsert_on_connect(host_id, "remote-host", "owner@example.com")
+    native_agent = await create_test_agent(
+        client,
+        name=CLAUDE_NATIVE_AGENT_NAME,
+        terminals={
+            "zsh": {
+                "command": "zsh",
+                "os_env": {"type": "caller_process", "cwd": "."},
+            }
+        },
+    )
+    session = await _create_session(client, native_agent["id"])
+    SqlAlchemyConversationStore(db_uri).set_host_id(
+        session["id"], host_id=host_id, workspace="/tmp/native"
+    )
+
+    agent_response = await client.get(f"/v1/sessions/{session['id']}/agent")
+    terminal_response = await client.post(
+        f"/v1/sessions/{session['id']}/resources/terminals",
+        json={"terminal": "zsh", "session_key": "shell-1"},
+    )
+
+    assert agent_response.status_code == 400
+    assert agent_response.json()["error"]["code"] == "wrong_replica"
+    assert terminal_response.status_code == 400
+    assert terminal_response.json()["error"]["code"] == "wrong_replica"
+
+    custom_agent = await create_test_agent(
+        client,
+        name="custom-remote-agent",
+        terminals={
+            "zsh": {
+                "command": "zsh",
+                "os_env": {"type": "caller_process", "cwd": "."},
+            }
+        },
+    )
+    custom_session = await _create_session(client, custom_agent["id"])
+    SqlAlchemyConversationStore(db_uri).set_host_id(
+        custom_session["id"], host_id=host_id, workspace="/tmp/custom"
+    )
+    custom_response = await client.get(f"/v1/sessions/{custom_session['id']}/agent")
+    assert custom_response.status_code == 200
+    assert custom_response.json()["terminals"] == ["zsh"]
+
+
 async def test_claude_native_session_discoverable_with_terminal_metadata(
     client: httpx.AsyncClient,
 ) -> None:

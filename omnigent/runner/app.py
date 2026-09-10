@@ -44,6 +44,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from omnigent._platform import normalize_interactive_shells
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
 from omnigent.debug_logging import runner_primary_session_id
 from omnigent.entities.session_resources import (
@@ -74,6 +75,7 @@ from omnigent.llms.summarize import (
     extract_summary_text,
 )
 from omnigent.native.native_coding_agents import (
+    native_coding_agent_for_agent_name,
     native_coding_agent_for_harness,
     native_coding_agent_for_terminal_name,
 )
@@ -9340,9 +9342,28 @@ def create_runner_app(
         agent_os_env = getattr(agent_spec, "os_env", None) if agent_spec is not None else None
 
         declared_terminal = None
+        terminals_map = {}
         if agent_spec is not None:
             terminals_map = getattr(agent_spec, "terminals", None) or {}
             declared_terminal = terminals_map.get(terminal_name)
+
+        if (
+            declared_terminal is None
+            and native_coding_agent_for_agent_name(getattr(agent_spec, "name", None)) is not None
+            and normalize_interactive_shells([terminal_name])
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": ErrorCode.INVALID_INPUT,
+                        "message": (
+                            f"Shell {terminal_name!r} is not available on this host. "
+                            f"Available shells: {list(terminals_map) or 'none'}."
+                        ),
+                    }
+                },
+            )
 
         if declared_terminal is not None:
             from omnigent.tools.builtins.sys_terminal import (

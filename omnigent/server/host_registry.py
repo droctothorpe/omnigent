@@ -407,6 +407,8 @@ class HostRegistry:
                 self._interactive_shells[host_id] = normalize_interactive_shells(
                     hello.interactive_shells
                 )
+            else:
+                self._interactive_shells.pop(host_id, None)
         return conn
 
     def deregister(

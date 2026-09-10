@@ -249,8 +249,9 @@ _INTERACTIVE_SHELL_DIRS = ("/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/
 def _resolve_interactive_shell(name: str) -> str | None:
     """Resolve an interactive-shell basename to an executable, off ``PATH`` too.
 
-    Tries ``PATH`` (:func:`shutil.which`) first, then the well-known absolute
-    shell dirs (:data:`_INTERACTIVE_SHELL_DIRS`). This survives the host
+    Accepts known basenames only. A matching executable absolute ``$SHELL``
+    wins, followed by ``PATH`` and the well-known absolute shell dirs
+    (:data:`_INTERACTIVE_SHELL_DIRS`). This survives the host
     daemon's frozen/stripped ``PATH`` — the driver of the "only bash offered"
     bug on GUI/launchd-launched hosts — where the shells exist on disk but not
     on the daemon's ``PATH``.
@@ -259,6 +260,18 @@ def _resolve_interactive_shell(name: str) -> str | None:
     :returns: An executable path, or ``None`` when the shell isn't installed.
     """
     import shutil
+
+    if name not in _KNOWN_INTERACTIVE_SHELLS or os.path.basename(name) != name:
+        return None
+
+    login_shell = os.environ.get("SHELL", "").strip()
+    if (
+        os.path.isabs(login_shell)
+        and os.path.basename(login_shell) == name
+        and os.path.isfile(login_shell)
+        and os.access(login_shell, os.X_OK)
+    ):
+        return login_shell
 
     on_path = shutil.which(name)
     if on_path is not None:
@@ -277,9 +290,8 @@ def default_interactive_shell() -> str:
     Reads ``$SHELL`` and keeps its basename when it names a known shell that
     resolves — trusting ``$SHELL``'s own absolute path, then ``PATH``, then the
     standard shell dirs (:func:`_resolve_interactive_shell`); otherwise falls
-    back to ``"bash"``. Returns a basename (not the absolute ``$SHELL`` path) so
-    it stays PATH-resolvable when the terminal launches under a runner on a
-    different host than the one that read the env.
+    back to ``"bash"``. Returns a basename for the host inventory; the runner
+    on that host resolves the launch path and honors the same ``$SHELL``.
 
     :returns: A shell basename such as ``"zsh"``, ``"fish"``, or ``"bash"``.
     """
@@ -293,7 +305,7 @@ def default_interactive_shell() -> str:
         # ``$SHELL`` is already an absolute executable path — trust it directly
         # rather than re-resolving its basename against a ``PATH`` that may be
         # stripped, so the login shell is honored even on a frozen-PATH daemon.
-        if os.path.isabs(shell) and os.access(shell, os.X_OK):
+        if os.path.isabs(shell) and os.path.isfile(shell) and os.access(shell, os.X_OK):
             return name
         if _resolve_interactive_shell(name):
             return name

@@ -24,7 +24,6 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
-from omnigent._platform import normalize_interactive_shells
 from omnigent.entities import (
     Conversation,
     StoredFile,
@@ -67,6 +66,7 @@ from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.routes._sessions.common import (
     _logger,
     get_server_runner_router,
+    host_interactive_shells_for_request,
     set_server_runner_router,
 )
 from omnigent.server.routes._sessions.helpers import (
@@ -1235,8 +1235,10 @@ def register_resources_routes(
                 and host_registry is not None
                 and native_coding_agent_for_agent_name(spec.name) is not None
             ):
-                reported = normalize_interactive_shells(
-                    host_registry.interactive_shells(conv.host_id)
+                reported = host_interactive_shells_for_request(
+                    conv.host_id,
+                    host_registry=host_registry,
+                    runner_router=runner_router or get_server_runner_router(),
                 )
                 if reported:
                     declared = reported

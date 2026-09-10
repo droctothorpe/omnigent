@@ -121,6 +121,34 @@ def test_default_interactive_shell_trusts_shell_absolute_path_off_path(
     assert _platform.default_interactive_shell() == "zsh"
 
 
+@pytest.mark.posix_only
+def test_resolve_interactive_shell_uses_matching_absolute_login_shell(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Nix-style login shell remains executable under a stripped PATH."""
+    fish = tmp_path / "profiles" / "default" / "bin" / "fish"
+    fish.parent.mkdir(parents=True)
+    fish.write_text("#!/bin/sh\n")
+    fish.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fish))
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setattr(_platform, "_INTERACTIVE_SHELL_DIRS", ())
+
+    assert _platform.default_interactive_shell() == "fish"
+    assert _platform._resolve_interactive_shell("fish") == str(fish)
+
+
+@pytest.mark.parametrize("name", ["/bin/bash", "../bash", "unknown"])
+def test_resolve_interactive_shell_rejects_paths_and_unknown_names(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolver accepts allowlisted basenames only."""
+    monkeypatch.setattr("shutil.which", lambda value: pytest.fail(f"resolved {value}"))
+    assert _platform._resolve_interactive_shell(name) is None
+
+
 def _fake_resolver(installed: set[str]):
     """A ``_resolve_interactive_shell`` stand-in: resolve only *installed*.
 

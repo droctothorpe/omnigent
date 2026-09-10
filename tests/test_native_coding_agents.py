@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from omnigent._wrapper_labels import (
@@ -113,15 +115,21 @@ def test_public_agent_name_passes_through_regular_names() -> None:
 
 
 @pytest.mark.posix_only
-def test_native_shell_terminal_spec_offers_host_shells_default_first() -> None:
-    """One terminal per host shell, keyed by name, with its default first.
+def test_native_shell_terminal_spec_offers_installed_shells_default_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One terminal per installed shell, keyed by name, ``$SHELL`` first.
 
     Every native wrapper declares this so "+ New shell" opens the user's login
     shell by default while still offering the other installed shells. Each entry
     is keyed and commanded by its basename and is an unsandboxed caller-process
     shell with cwd override allowed.
     """
-    spec = native_shell_terminal_spec(["fish", "bash", "zsh"])
+    monkeypatch.setattr(
+        "omnigent.native.native_coding_agents.installed_interactive_shells",
+        lambda: ["fish", "bash", "zsh"],
+    )
+    spec = native_shell_terminal_spec()
     assert list(spec) == ["fish", "bash", "zsh"]
     for name, entry in spec.items():
         assert entry["command"] == name
@@ -133,8 +141,14 @@ def test_native_shell_terminal_spec_offers_host_shells_default_first() -> None:
         }
 
 
-def test_native_shell_terminal_spec_falls_back_to_bash() -> None:
-    """Generated bundles carry a portable bash fallback before host binding."""
+def test_native_shell_terminal_spec_falls_back_to_bash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The materialized spec retains discovery's non-empty bash fallback."""
+    monkeypatch.setattr(
+        "omnigent.native.native_coding_agents.installed_interactive_shells",
+        lambda: ["bash"],
+    )
     spec = native_shell_terminal_spec()
     assert list(spec) == ["bash"]
     assert spec["bash"]["command"] == "bash"
@@ -157,3 +171,22 @@ def test_native_shell_terminal_specs_builds_runtime_specs(
     assert spec["zsh"].os_env.cwd == "."
     assert spec["zsh"].os_env.sandbox is not None
     assert spec["zsh"].os_env.sandbox.type == "none"
+
+
+@pytest.mark.posix_only
+def test_native_shell_terminal_specs_preserves_login_shell_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Runtime specs launch a nonstandard absolute login-shell executable."""
+    fish = tmp_path / "nix-profile" / "bin" / "fish"
+    fish.parent.mkdir(parents=True)
+    fish.write_text("#!/bin/sh\n")
+    fish.chmod(0o755)
+    monkeypatch.setenv("SHELL", str(fish))
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setattr("omnigent._platform._INTERACTIVE_SHELL_DIRS", ())
+
+    spec = native_shell_terminal_specs(["fish"])
+
+    assert spec["fish"].command == str(fish)

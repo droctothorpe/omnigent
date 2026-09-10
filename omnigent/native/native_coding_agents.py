@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from omnigent._platform import installed_interactive_shells
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.harness_plugins import (
     ANTIGRAVITY_NATIVE_CODING_AGENT,
@@ -95,19 +96,22 @@ def native_coding_agent_for_terminal_name(name: str | None) -> NativeCodingAgent
     return _BY_TERMINAL_NAME.get(name or "")
 
 
-def native_shell_terminal_spec(
-    shells: list[str] | tuple[str, ...] = ("bash",),
-) -> dict[str, dict[str, object]]:
+def native_shell_terminal_spec() -> dict[str, dict[str, object]]:
     """The user-shell terminals every native wrapper declares.
 
     Native sessions expose the web UI's "+ New shell" affordance, which lets a
-    user open an interactive shell. The host supplies its ordered shell
-    inventory at runtime; generated bundles use the portable ``bash`` default
-    until a host-bound runner replaces it. ``caller_process`` / no sandbox
-    matches the native CLI's own unsandboxed stance on the user's workspace.
+    user open an interactive shell. We declare one terminal per installed shell
+    (:func:`omnigent._platform.installed_interactive_shells`), keyed and
+    commanded by the shell basename (``zsh``/``bash``/``fish``), with the user's
+    ``$SHELL`` first so the UI can treat it as the click default and offer the
+    rest behind a picker. Host-bound runners replace these declarations with the
+    selected host's inventory. ``caller_process`` / no sandbox matches the
+    native CLI's own unsandboxed stance on the user's workspace. The block is
+    always non-empty, which is also what gates the MCP relay's
+    ``sys_terminal_*`` advertisement.
 
     :returns: A ``terminals:`` mapping, e.g. ``{"zsh": {...}, "bash": {...}}``,
-        with the host's login shell first.
+        with the user's login shell first.
     """
     return {
         shell: {
@@ -119,14 +123,18 @@ def native_shell_terminal_spec(
                 "sandbox": {"type": "none"},
             },
         }
-        for shell in shells
+        for shell in installed_interactive_shells()
     }
 
 
 def native_shell_terminal_specs(
     shells: list[str] | tuple[str, ...],
 ) -> dict[str, TerminalEnvSpec]:
-    """Build parsed terminal specs for a host's ordered shell inventory."""
+    """Build parsed terminal specs for a host's ordered shell inventory.
+
+    Resolution runs in the host-launched runner and honors a matching absolute
+    ``$SHELL`` path, including login shells outside the standard directories.
+    """
     from omnigent._platform import _resolve_interactive_shell
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec, TerminalEnvSpec
 
