@@ -893,16 +893,7 @@ class SessionsNamespace:
         )
         raise_for_status(resp.status_code, response_body(resp))
         body = require_json_object(resp, "GET /v1/sessions/{session_id}/items")
-        raw_data = body.get("data", [])
-        data = raw_data if isinstance(raw_data, list) else []
-        first_id_raw = body.get("first_id")
-        last_id_raw = body.get("last_id")
-        return PaginatedList(
-            data=data,
-            has_more=bool(body.get("has_more", False)),
-            first_id=str(first_id_raw) if first_id_raw is not None else None,
-            last_id=str(last_id_raw) if last_id_raw is not None else None,
-        )
+        return PaginatedList.from_dict(body)
 
     async def child_sessions(
         self,
@@ -941,16 +932,7 @@ class SessionsNamespace:
         )
         raise_for_status(resp.status_code, response_body(resp))
         body = require_json_object(resp, "GET /v1/sessions/{session_id}/child_sessions")
-        raw_data = body.get("data", [])
-        data = raw_data if isinstance(raw_data, list) else []
-        first_id_raw = body.get("first_id")
-        last_id_raw = body.get("last_id")
-        return PaginatedList(
-            data=data,
-            has_more=bool(body.get("has_more", False)),
-            first_id=str(first_id_raw) if first_id_raw is not None else None,
-            last_id=str(last_id_raw) if last_id_raw is not None else None,
-        )
+        return PaginatedList.from_dict(body)
 
     async def child_sessions_tree(
         self,
