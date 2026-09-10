@@ -637,6 +637,12 @@ def test_composer_model_label_never_shows_the_previous_sessions_model(
     page.wait_for_url(re.compile(rf"/c/{re.escape(claude_session)}"))
     expect(label).to_contain_text("Sonnet 5", timeout=15_000)
 
+    page.wait_for_function(
+        """sessionId => window.__modelLabelLog.some(entry =>
+            entry.path === `/c/${sessionId}` && entry.text.includes("Sonnet 5")
+        )""",
+        arg=claude_session,
+    )
     log = page.evaluate("window.__modelLabelLog")
     claude_labels = [e["text"] for e in log if e["path"] == f"/c/{claude_session}"]
     # Guard against a no-op run: the held snapshot must have produced at least
