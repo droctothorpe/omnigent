@@ -92,6 +92,7 @@ from omnigent.server.routes._sessions.common import (
     _EXTERNAL_ACP_SUBAGENT_START_TYPE,
     _EXTERNAL_ANTIGRAVITY_SUBAGENT_START_TYPE,
     _EXTERNAL_ASSISTANT_MESSAGE_TYPE,
+    _EXTERNAL_BTW_DISMISS_TYPE,
     _EXTERNAL_BTW_SIDECHAT_TYPE,
     _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
     _EXTERNAL_CODEX_COLLABORATION_MODE_CHANGE_TYPE,
@@ -1343,6 +1344,18 @@ def register_events_routes(
                 question=question,
                 answer=answer,
                 truncated=bool(body.data.get("truncated")),
+            )
+            return {"queued": False}
+        if body.type == _EXTERNAL_BTW_DISMISS_TYPE:
+            # The reader closed the web /btw overlay; forward an Escape to the
+            # pane so the terminal's own overlay closes in lockstep. Transient
+            # and best-effort: nothing is persisted, and the pane overlay also
+            # auto-dismisses on the next injected message, so a runner that is
+            # unreachable (or a non-claude-native harness that no-ops) is fine.
+            await _forward_session_change_to_runner(
+                session_id,
+                runner_router,
+                {"type": "btw_dismiss"},
             )
             return {"queued": False}
         if body.type == _EXTERNAL_ELICITATION_RESOLVED_TYPE:

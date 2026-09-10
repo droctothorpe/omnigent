@@ -4099,6 +4099,41 @@ def _btw_overlay_from_pane(pane: str) -> BtwOverlay | None:
     return BtwOverlay(question=question, answer=answer, truncated=truncated)
 
 
+def _btw_overlay_present(pane: str) -> bool:
+    """
+    Report whether a ``/btw`` overlay is currently on screen.
+
+    Broader than :func:`_btw_overlay_from_pane` (which only matches a
+    *settled* exchange): this also matches a multi-turn overlay and one
+    still generating, since dismissing should work in any of those states.
+    It is deliberately specific to the ``/btw`` footer so
+    :func:`dismiss_btw_overlay` never spends an Escape on a bare composer
+    (where Escape would cancel an in-flight turn).
+
+    :param pane: Captured pane text from :func:`_capture_pane`.
+    :returns: True when the ``/btw`` overlay is visible.
+    """
+    lines = pane.splitlines()
+    footer_idx = next(
+        (i for i in range(len(lines) - 1, -1, -1) if _BTW_FOOTER_CLOSE_HINT in lines[i]),
+        None,
+    )
+    if footer_idx is None:
+        return False
+    if not any(_BTW_OVERLAY_BORDER_GLYPH in line for line in lines[:footer_idx]):
+        return False
+    footer = lines[footer_idx]
+    # The /btw footer offers copy+fork (single, settled), switch (multi-turn),
+    # or the region shows the answering spinner (still generating). Requiring
+    # one of these keeps a model picker / confirm dialog (other "Esc to close"
+    # surfaces) from matching.
+    if all(hint in footer for hint in _BTW_FOOTER_COMPLETE_HINTS):
+        return True
+    if "to switch" in footer:
+        return True
+    return any(_BTW_ANSWERING_HINT in line for line in lines[:footer_idx])
+
+
 def _dedent_overlay_lines(overlay_lines: list[str]) -> str:
     """
     Strip the common leading indent from captured overlay lines.
@@ -6286,6 +6321,35 @@ def read_btw_overlay(bridge_dir: Path) -> BtwOverlay | None:
     if not isinstance(socket_path, str) or not isinstance(tmux_target, str):
         return None
     return _btw_overlay_from_pane(_capture_pane(socket_path, tmux_target))
+
+
+def dismiss_btw_overlay(bridge_dir: Path) -> bool:
+    """
+    Close a visible ``/btw`` overlay in the pane by sending Escape.
+
+    Called from the runner when the reader dismisses the web-side overlay,
+    so the two views close in lockstep. Escape is sent ONLY when the
+    ``/btw`` overlay is verifiably on screen (:func:`_btw_overlay_present`)
+    — a blind Escape on the bare composer would cancel an in-flight turn.
+    Runs in the runner (the pane's writer), so it does not race the
+    executor's injections. Best-effort: a no-op when the overlay is not
+    shown, since the next injected message dismisses it anyway.
+
+    :param bridge_dir: Bridge directory path, e.g.
+        ``/tmp/omnigent/claude-native/<digest>``.
+    :returns: True when an Escape was sent, False when no overlay was shown.
+    """
+    payload = _read_json_file(bridge_dir / _TMUX_FILE)
+    if not isinstance(payload, dict):
+        return False
+    socket_path = payload.get("socket_path")
+    tmux_target = payload.get("tmux_target")
+    if not isinstance(socket_path, str) or not isinstance(tmux_target, str):
+        return False
+    if not _btw_overlay_present(_capture_pane(socket_path, tmux_target)):
+        return False
+    _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Escape")
+    return True
 
 
 def read_claude_status_model(bridge_dir: Path) -> str | None:

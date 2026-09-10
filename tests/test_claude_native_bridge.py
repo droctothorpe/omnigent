@@ -10035,6 +10035,46 @@ def test_btw_overlay_preserves_relative_indentation() -> None:
     assert overlay.answer == "- top\n  - nested"
 
 
+def test_btw_overlay_present_matches_settled_multiturn_and_generating() -> None:
+    """The dismiss guard matches every /btw overlay state, settled or not."""
+    settled = _btw_pane(
+        "    /btw q",
+        "",
+        "      A",
+        "",
+        "    ↑/↓ to scroll · c to copy · f to fork · Esc to close",
+    )
+    multiturn = _btw_pane(
+        "    /btw q1",
+        "    /btw q2",
+        "",
+        "      A",
+        "    ←/→ to switch · c to copy · f to fork · x to clear history · Esc to close",
+    )
+    generating = _btw_pane(
+        "    /btw q",
+        "      ✻ Answering…",
+        "    ←/→ to switch · x to clear history · Esc to close",
+    )
+    assert claude_native_bridge._btw_overlay_present(settled) is True
+    assert claude_native_bridge._btw_overlay_present(multiturn) is True
+    assert claude_native_bridge._btw_overlay_present(generating) is True
+
+
+def test_btw_overlay_present_false_on_bare_composer() -> None:
+    """No /btw footer → no Escape (a blind Escape would cancel a turn)."""
+    pane = "\n".join(
+        [
+            "some transcript output",
+            "─" * 80,
+            "❯ ",
+            "─" * 80,
+            "  Opus 4.8 (1M) │ high │ 0/1M $0.00 │ git:main",
+        ]
+    )
+    assert claude_native_bridge._btw_overlay_present(pane) is False
+
+
 # ---------------------------------------------------------------------------
 # Bridge HTTP server bind/advertise behavior.
 #
