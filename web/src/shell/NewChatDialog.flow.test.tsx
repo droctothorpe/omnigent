@@ -271,7 +271,19 @@ function selectAgent(agentId: string): void {
  * harness) live in this modal, not the picker dropdown.
  */
 function openAgentConfig(agentId: string): void {
-  selectAgent(agentId);
+  const picker = screen.getByTestId("new-chat-landing-agent-select");
+  fireEvent.pointerDown(picker, { button: 0 });
+  if (screen.queryByTestId(`new-chat-landing-agent-${agentId}`) == null) {
+    fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+  }
+  if (screen.queryByTestId(`new-chat-landing-agent-config-${agentId}`) == null) {
+    fireEvent.click(screen.getByTestId(`new-chat-landing-agent-${agentId}`));
+    fireEvent.pointerDown(picker, { button: 0 });
+    if (screen.queryByTestId(`new-chat-landing-agent-${agentId}`) == null) {
+      fireEvent.click(screen.getByTestId("new-chat-landing-harness-more"));
+    }
+  }
+  fireEvent.click(screen.getByTestId(`new-chat-landing-agent-config-${agentId}`));
   fireEvent.click(screen.getByTestId("new-chat-landing-config-gear"));
 }
 

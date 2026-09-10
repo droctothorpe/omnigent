@@ -281,7 +281,7 @@ async def _drive_smart_routing_model_option(base_url: str, session_id: str) -> N
             await browser.close()
 
 
-def test_start_session_hides_smart_routing_when_server_disables_it(
+def test_start_session_disables_smart_routing_when_server_disables_it(
     seeded_session: tuple[str, str],
 ) -> None:
     """Routing off on the server withholds both Smart Routing surfaces.
@@ -314,16 +314,19 @@ async def _drive_smart_routing_disabled(base_url: str, session_id: str) -> None:
             )
 
             await page.get_by_test_id("new-chat-landing-agent-select").click()
-            # The Harnesses group renders, so the picker is populated — only the
-            # routing row is missing.
+            # The routing entry remains visible but cannot be selected.
             await expect(
                 page.get_by_test_id("new-chat-landing-agent-ag_claude_e2e")
             ).to_be_visible()
             await expect(
                 page.get_by_test_id("new-chat-landing-harness-smart-routing")
-            ).to_have_count(0)
+            ).to_be_disabled()
 
-            await page.get_by_test_id("new-chat-landing-agent-ag_claude_e2e").click()
+            await (
+                page.get_by_test_id("new-chat-landing-agent-config-ag_claude_e2e")
+                .get_by_text("Edit", exact=True)
+                .click()
+            )
             await page.get_by_test_id("new-chat-landing-config-gear").click()
             await page.get_by_test_id("new-chat-landing-config-model").click()
             await expect(

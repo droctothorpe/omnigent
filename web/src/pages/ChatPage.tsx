@@ -542,6 +542,7 @@ export function ChatPage() {
   const sessionStatus = useChatStore((s) => s.sessionStatus);
   const backgroundTaskCount = useChatStore((s) => s.backgroundTaskCount);
   const loadingConversation = useChatStore((s) => s.loadingConversation);
+  const activeConversationId = useChatStore((s) => s.conversationId);
   const conversationLoadError = useChatStore((s) => s.conversationLoadError);
   const boundAgentId = useChatStore((s) => s.boundAgentId);
   const boundAgentName = useChatStore((s) => s.boundAgentName);
@@ -1055,7 +1056,7 @@ export function ChatPage() {
   // Loading + error gates for `/c/:id` hydration. Placed after all hooks so the
   // early return can't change the hook order between renders.
   if (urlConvId) {
-    if (loadingConversation) return <HydratingPlaceholder />;
+    if (loadingConversation || activeConversationId !== urlConvId) return <HydratingPlaceholder />;
     if (conversationLoadError) {
       return <ConversationLoadError conversationId={urlConvId} error={conversationLoadError} />;
     }
@@ -4890,7 +4891,9 @@ function SessionHarnessPicker({
     showEffort && !routingOn
       ? formatStatusEffortLabel(selectedEffort, modelPickerKind === "codex")
       : null;
-  const label = routingOn ? SMART_ROUTING_LABEL : (modelLabel ?? harnessLabel ?? "Session");
+  const label = routingOn
+    ? SMART_ROUTING_LABEL
+    : (modelLabel ?? nativeAgent?.displayName ?? harnessLabel ?? "Session");
   const availableEfforts =
     modelPickerKind === "codex"
       ? codexEffortLevelsForModel(codexModelOptions, pickerSelectedModel)

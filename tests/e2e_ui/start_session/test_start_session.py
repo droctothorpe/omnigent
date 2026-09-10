@@ -490,22 +490,19 @@ async def _register_common_routes(
 
 
 async def _open_entry_config(page, agent_id: str) -> None:
-    """Select one agent and open its run-config modal via the composer gear.
-
-    The composer's agent/harness dropdown (``new-chat-landing-agent-select``)
-    only SELECTS the agent now; each agent's run-config (model / effort /
-    permission / approval / brain-harness override) lives in a **modal** opened
-    from the gear icon (``new-chat-landing-config-gear``) beside the picker.
-    Clicking a row commits the agent and closes the dropdown; the gear then
-    opens the selected agent's config modal — the Playwright counterpart of the
-    unit test's ``openAgentConfig`` helper.
-
-    :param page: The Playwright page (the landing picker is already mounted).
-    :param agent_id: The stubbed agent id whose config modal to open, e.g.
-        ``"ag_claude_e2e"``.
-    """
-    await page.get_by_test_id("new-chat-landing-agent-select").click()
-    await page.get_by_test_id(f"new-chat-landing-agent-{agent_id}").click()
+    """Select a harness and open Edit > Advanced settings."""
+    picker = page.get_by_test_id("new-chat-landing-agent-select")
+    await picker.click()
+    await expect(picker).to_have_attribute("aria-expanded", "true")
+    await expect(page.get_by_role("menu").first).to_be_visible()
+    row = page.get_by_test_id(f"new-chat-landing-agent-{agent_id}")
+    if await row.count() == 0:
+        await page.get_by_test_id("new-chat-landing-harness-more").click()
+    await (
+        page.get_by_test_id(f"new-chat-landing-agent-config-{agent_id}")
+        .get_by_text("Edit", exact=True)
+        .click()
+    )
     await page.get_by_test_id("new-chat-landing-config-gear").click()
 
 
@@ -1206,12 +1203,12 @@ async def _drive_remembers_last_picked_host(base_url: str, session_id: str) -> N
 
             chip = page.get_by_test_id("new-chat-landing-host-chip")
             # No stored pick yet → auto-selects the first online host (alpha).
-            await expect(chip).to_contain_text(alpha_name)
+            await expect(chip).to_have_attribute("aria-label", re.compile(alpha_name))
 
             # Explicitly pick the second host.
             await chip.click()
             await page.get_by_test_id(f"new-chat-landing-host-{beta_id}").click()
-            await expect(chip).to_contain_text(beta_name)
+            await expect(chip).to_have_attribute("aria-label", re.compile(beta_name))
 
             # Reload: a full document load resets the in-memory landing draft, so
             # the only thing that can restore the pick is the persisted
@@ -1221,7 +1218,7 @@ async def _drive_remembers_last_picked_host(base_url: str, session_id: str) -> N
                 state="visible", timeout=30_000
             )
             chip = page.get_by_test_id("new-chat-landing-host-chip")
-            await expect(chip).to_contain_text(beta_name)
+            await expect(chip).to_have_attribute("aria-label", re.compile(beta_name))
         finally:
             await browser.close()
 
@@ -1289,7 +1286,7 @@ async def _drive_preserves_unavailable_remembered_host(base_url: str, session_id
             await page.get_by_test_id("new-chat-button").click()
             chip = page.get_by_test_id("new-chat-landing-host-chip")
             await _wait_until(lambda: route_state["requests"] > requests_before_open)
-            await expect(chip).to_contain_text("Choose host")
+            await expect(chip).to_have_attribute("aria-label", re.compile("Choose host"))
 
             # A later host refresh reports the continuously preferred VM again.
             # The empty slot lets that saved choice heal automatically.
@@ -1297,7 +1294,7 @@ async def _drive_preserves_unavailable_remembered_host(base_url: str, session_id
             requests_before_focus = route_state["requests"]
             await page.evaluate("window.dispatchEvent(new Event('visibilitychange'))")
             await _wait_until(lambda: route_state["requests"] > requests_before_focus)
-            await expect(chip).to_contain_text(beta_name)
+            await expect(chip).to_have_attribute("aria-label", re.compile(beta_name))
         finally:
             await browser.close()
 
@@ -1409,12 +1406,12 @@ async def _drive_managed_remembers_host(base_url: str, session_id: str) -> None:
             chip = page.get_by_test_id("new-chat-landing-host-chip")
             # Managed default with no stored pick: the sandbox, labeled by its
             # provider ("Databricks Sandbox").
-            await expect(chip).to_contain_text("Databricks Sandbox")
+            await expect(chip).to_have_attribute("aria-label", re.compile("Databricks Sandbox"))
 
             # Explicitly pick the connected host instead.
             await chip.click()
             await page.get_by_test_id(f"new-chat-landing-host-{host_id}").click()
-            await expect(chip).to_contain_text(host_display_name)
+            await expect(chip).to_have_attribute("aria-label", re.compile(host_display_name))
 
             # Reload: the host must be restored, NOT reverted to the sandbox
             # default — the exact regression this change fixes.
@@ -1423,8 +1420,10 @@ async def _drive_managed_remembers_host(base_url: str, session_id: str) -> None:
                 state="visible", timeout=30_000
             )
             chip = page.get_by_test_id("new-chat-landing-host-chip")
-            await expect(chip).to_contain_text(host_display_name)
-            await expect(chip).not_to_contain_text("Databricks Sandbox")
+            await expect(chip).to_have_attribute("aria-label", re.compile(host_display_name))
+            await expect(chip).not_to_have_attribute(
+                "aria-label", re.compile("Databricks Sandbox")
+            )
         finally:
             await browser.close()
 
@@ -1506,7 +1505,7 @@ async def _drive_managed_multi_provider(base_url: str, session_id: str) -> None:
 
             chip = page.get_by_test_id("new-chat-landing-host-chip")
             # Default is the first launch-capable provider: "Modal Sandbox".
-            await expect(chip).to_contain_text("Modal Sandbox")
+            await expect(chip).to_have_attribute("aria-label", re.compile("Modal Sandbox"))
 
             # Open the picker: one row per provider, the first keeping the
             # original testid and later rows a provider-scoped one.
@@ -1519,7 +1518,7 @@ async def _drive_managed_multi_provider(base_url: str, session_id: str) -> None:
 
             # Pick the non-default provider; the chip reflects it.
             await e2b_row.click()
-            await expect(chip).to_contain_text("E2B Sandbox")
+            await expect(chip).to_have_attribute("aria-label", re.compile("E2B Sandbox"))
 
             # A managed create carries the chosen provider in its body.
             await page.get_by_test_id("new-chat-landing-input").fill("audit the repo")
@@ -1537,7 +1536,7 @@ async def _drive_managed_multi_provider(base_url: str, session_id: str) -> None:
                 state="visible", timeout=30_000
             )
             chip = page.get_by_test_id("new-chat-landing-host-chip")
-            await expect(chip).to_contain_text("E2B Sandbox")
+            await expect(chip).to_have_attribute("aria-label", re.compile("E2B Sandbox"))
         finally:
             await browser.close()
 
@@ -1909,7 +1908,7 @@ async def _drive_agent_picker_pagination_dedupe(base_url: str, session_id: str) 
             )
 
             picker = page.get_by_test_id("new-chat-landing-agent-select")
-            await expect(picker).to_contain_text("Codex")
+            await expect(picker).to_have_attribute("aria-label", re.compile("Codex"))
             await picker.click()
 
             await expect(
@@ -2257,8 +2256,8 @@ async def _drive_pi_native_start(base_url: str, session_id: str) -> None:
             # the raw agent name "Pi-native-ui" when the harness→display
             # mapping was missing.
             agent_chip = page.get_by_test_id("new-chat-landing-agent-select")
-            await expect(agent_chip).to_contain_text("Pi")
-            await expect(agent_chip).not_to_contain_text("native")
+            await expect(agent_chip).to_have_attribute("aria-label", re.compile("Pi"))
+            await expect(agent_chip).not_to_have_attribute("aria-label", re.compile("native"))
 
             await page.get_by_test_id("new-chat-landing-input").fill("explore the repo")
             await page.get_by_test_id("new-chat-landing-submit").click()
@@ -2341,8 +2340,8 @@ async def _drive_antigravity_native_start(base_url: str, session_id: str) -> Non
             # label "Antigravity" — and NOT "...native...": the raw agent name
             # would surface "antigravity-native-ui" without the harness→display map.
             agent_chip = page.get_by_test_id("new-chat-landing-agent-select")
-            await expect(agent_chip).to_contain_text("Antigravity")
-            await expect(agent_chip).not_to_contain_text("native")
+            await expect(agent_chip).to_have_attribute("aria-label", re.compile("Antigravity"))
+            await expect(agent_chip).not_to_have_attribute("aria-label", re.compile("native"))
 
             await page.get_by_test_id("new-chat-landing-input").fill("explore the repo")
             await page.get_by_test_id("new-chat-landing-submit").click()
@@ -2435,8 +2434,8 @@ async def _drive_opencode_native_start(base_url: str, session_id: str) -> None:
             # label "OpenCode" — and crucially NOT "...native...": the raw
             # agent name "opencode-native-ui" must never surface.
             agent_chip = page.get_by_test_id("new-chat-landing-agent-select")
-            await expect(agent_chip).to_contain_text("OpenCode")
-            await expect(agent_chip).not_to_contain_text("native")
+            await expect(agent_chip).to_have_attribute("aria-label", re.compile("OpenCode"))
+            await expect(agent_chip).not_to_have_attribute("aria-label", re.compile("native"))
 
             await page.get_by_test_id("new-chat-landing-input").fill("explore the repo")
             await page.get_by_test_id("new-chat-landing-submit").click()
@@ -2524,8 +2523,8 @@ async def _drive_kimi_native_start(base_url: str, session_id: str) -> None:
             # "Kimi" — and crucially NOT "...native...": the raw agent name
             # "kimi-native-ui" must never surface in the picker.
             agent_chip = page.get_by_test_id("new-chat-landing-agent-select")
-            await expect(agent_chip).to_contain_text("Kimi")
-            await expect(agent_chip).not_to_contain_text("native")
+            await expect(agent_chip).to_have_attribute("aria-label", re.compile("Kimi"))
+            await expect(agent_chip).not_to_have_attribute("aria-label", re.compile("native"))
 
             await page.get_by_test_id("new-chat-landing-input").fill("explore the repo")
             await page.get_by_test_id("new-chat-landing-submit").click()
@@ -2603,6 +2602,7 @@ async def _drive_kimi_picker_dedup(base_url: str, session_id: str) -> None:
             await page.get_by_test_id("new-chat-landing-agent-select").click()
 
             # The native Kimi row is offered...
+            await page.get_by_test_id("new-chat-landing-harness-more").click()
             await expect(
                 page.get_by_test_id("new-chat-landing-agent-ag_kimi_native_e2e")
             ).to_be_visible(timeout=30_000)
@@ -2612,7 +2612,7 @@ async def _drive_kimi_picker_dedup(base_url: str, session_id: str) -> None:
             ).to_have_count(0)
             # Two menu items total: the one native Kimi + the "Create custom
             # agent" action — no second "Kimi" sneaks in via the SDK row.
-            await expect(page.get_by_role("menuitem")).to_have_count(2)
+            await expect(page.locator("[data-harness-menu-row]")).to_have_count(1)
         finally:
             await browser.close()
 
@@ -3311,7 +3311,7 @@ async def _drive_fork_of_fork_dedup(base_url: str, session_id: str) -> None:
             )
             # Top level: the built-in Claude row + the "Custom agents" submenu
             # trigger — no duplicate "Claude Code" sneaks in via a leaked clone.
-            await expect(page.get_by_role("menuitem")).to_have_count(2)
+            await expect(page.locator("[data-harness-menu-row]")).to_have_count(1)
             # The genuinely custom agent survives, inside the Custom agents submenu.
             await page.get_by_test_id("new-chat-landing-custom-agents").click()
             await expect(page.get_by_test_id("new-chat-landing-agent-ag_doc")).to_be_visible()

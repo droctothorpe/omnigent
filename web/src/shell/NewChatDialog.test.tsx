@@ -1446,7 +1446,7 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
 
     const chip = screen.getByTestId("new-chat-landing-host-chip");
-    await waitFor(() => expect(chip).toHaveTextContent("Choose host"));
+    await waitFor(() => expect(chip).toHaveAccessibleName(expect.stringContaining("Choose host")));
 
     // Model the fresh /v1/hosts response. Because the stale Mac never filled
     // selectedHostId, the remembered VM can still win when it appears.
@@ -1455,7 +1455,7 @@ describe("NewChatLandingScreen", () => {
       target: { value: "rerender" },
     });
 
-    await waitFor(() => expect(chip).toHaveTextContent("machine-2"));
+    await waitFor(() => expect(chip).toHaveAccessibleName(expect.stringContaining("machine-2")));
   });
 
   it("does not silently replace an unavailable remembered host", async () => {
@@ -1464,7 +1464,9 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
 
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip")).toHaveTextContent("Choose host"),
+      expect(screen.getByTestId("new-chat-landing-host-chip")).toHaveAccessibleName(
+        expect.stringContaining("Choose host"),
+      ),
     );
   });
 
@@ -1474,7 +1476,9 @@ describe("NewChatLandingScreen", () => {
     renderLanding({ managed_sandboxes_enabled: true });
 
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip")).toHaveTextContent("Choose host"),
+      expect(screen.getByTestId("new-chat-landing-host-chip")).toHaveAccessibleName(
+        expect.stringContaining("Choose host"),
+      ),
     );
   });
 
@@ -1541,7 +1545,7 @@ describe("NewChatLandingScreen", () => {
     expect(landingContent).toHaveClass("max-w-[800px]", "md:px-10");
     expect(composerSurface.firstElementChild).toBe(workspaceControls);
     expect(workspaceControls).toContainElement(workspace);
-    expect(workspaceControls.nextElementSibling).toBe(composer);
+    expect(workspaceControls.nextElementSibling).toBe(composer.closest("form"));
     expect(composerSurface).toHaveClass("gap-0");
     expect(workspaceControls).toHaveClass(
       "mx-3",
@@ -1620,7 +1624,7 @@ describe("NewChatLandingScreen", () => {
       "Create or select a worktree from main repository branch: main",
     );
     expect(worktree).toHaveTextContent("New worktree");
-    expect(worktree.querySelectorAll("svg")[0]).toHaveClass("size-3");
+    expect(worktree.querySelectorAll("svg")[0]).toHaveClass("size-3.5");
     expect(worktree.querySelectorAll("svg")[1]).toHaveClass("size-3");
     expect(harness).toHaveClass(
       "h-8",
@@ -1926,7 +1930,7 @@ describe("NewChatLandingScreen", () => {
     const workspaceTrigger = screen.getByTestId("new-chat-landing-workspace-chip");
     expect(hostTrigger).toHaveAccessibleName("Host: This machine, Online");
     expect(workspaceTrigger).toHaveAccessibleName("Working directory: /Users/corey/repo");
-    expect(within(hostTrigger).getByText("This machine")).toHaveClass("sr-only");
+    expect(hostTrigger).toHaveAttribute("title", "Host: This machine, Online");
     expect(within(hostTrigger).getByTestId("new-chat-landing-host-status")).toHaveClass(
       "bg-success",
     );
@@ -2041,7 +2045,7 @@ describe("NewChatLandingScreen", () => {
     expect(picker).toHaveAccessibleName("Claude Code, Model Default, Effort Default");
 
     selectAgent("a2");
-    expect(picker).toHaveAccessibleName("Codex, Model GPT-5.5");
+    expect(picker).toHaveAccessibleName("Codex, Model GPT-5.5, Effort Default");
   });
 
   it("names Pi model and thinking-level details in the harness trigger", () => {
@@ -2563,9 +2567,9 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
     // The chip reads the empty state…
     const hostChip = screen.getByTestId("new-chat-landing-host-chip");
-    expect(hostChip.textContent).toContain("No hosts");
+    expect(hostChip).toHaveAccessibleName(expect.stringContaining("No hosts"));
     expect(hostChip.querySelector(".bg-success")).toBeNull();
-    expect(hostChip.querySelector(".lucide-monitor")).not.toBeNull();
+    expect(hostChip.querySelector(".lucide-laptop")).not.toBeNull();
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     // …and the connect item is still present, so a fresh user can unblock.
     expect(screen.getByTestId("new-chat-landing-connect-host")).toBeTruthy();
@@ -3488,7 +3492,9 @@ describe("NewChatLandingScreen", () => {
     // regressed to host-first, the chip would read "machine-1".
     renderLanding({ managed_sandboxes_enabled: true });
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("New Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "New Sandbox",
+      ),
     );
     // Sandbox mode chrome comes with the default: repository chip in,
     // workspace/worktree chips out.
@@ -3503,7 +3509,7 @@ describe("NewChatLandingScreen", () => {
     // never reached the UI.
     renderLanding({ managed_sandboxes_enabled: true, sandbox_provider: "modal" });
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain(
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
         "Modal Sandbox",
       ),
     );
@@ -3519,9 +3525,13 @@ describe("NewChatLandingScreen", () => {
     mockHosts([]);
     renderLanding({ managed_sandboxes_enabled: true });
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("New Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "New Sandbox",
+      ),
     );
-    expect(screen.getByTestId("new-chat-landing-host-chip").textContent).not.toContain("No hosts");
+    expect(
+      screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label"),
+    ).not.toContain("No hosts");
   });
 
   it("switching between a host and the sandbox swaps the workspace chrome", async () => {
@@ -3529,7 +3539,9 @@ describe("NewChatLandingScreen", () => {
     // Sandbox is the default; switch to the host first so the test
     // exercises both directions of the toggle.
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("New Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "New Sandbox",
+      ),
     );
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     // The sandbox option is pinned FIRST in the menu, above the host list —
@@ -3543,7 +3555,9 @@ describe("NewChatLandingScreen", () => {
     // worktree chip) — the sandbox default doesn't wedge the normal path.
     fireEvent.click(hostItem);
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).not.toContain("Sandbox"),
+      expect(
+        screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label"),
+      ).not.toContain("Sandbox"),
     );
     expect(screen.getByTestId("new-chat-landing-workspace-chip")).toBeTruthy();
     expect(screen.getByTestId("new-chat-landing-branch-chip")).toBeVisible();
@@ -3553,7 +3567,9 @@ describe("NewChatLandingScreen", () => {
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("New Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "New Sandbox",
+      ),
     );
     expect(screen.queryByTestId("new-chat-landing-workspace-chip")).toBeNull();
     expect(screen.queryByTestId("new-chat-landing-branch-chip")).toBeNull();
@@ -3593,7 +3609,9 @@ describe("NewChatLandingScreen", () => {
 
     renderLanding({ managed_sandboxes_enabled: true, enabled_connections: ["github"] });
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("New Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "New Sandbox",
+      ),
     );
 
     fireEvent.click(screen.getByTestId("new-chat-landing-repo-chip"));
@@ -3621,7 +3639,9 @@ describe("NewChatLandingScreen", () => {
   it("hides the GitHub repo picker when the GitHub App is disabled", async () => {
     renderLanding({ managed_sandboxes_enabled: true, enabled_connections: [] });
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("New Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "New Sandbox",
+      ),
     );
     fireEvent.click(screen.getByTestId("new-chat-landing-repo-chip"));
     // The free-text URL input is present; the connected-account picker is not.
@@ -3941,7 +3961,9 @@ describe("NewChatLandingScreen", () => {
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option-e2b"));
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("E2B Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "E2B Sandbox",
+      ),
     );
     first.unmount();
     resetLandingDraft();
@@ -3953,7 +3975,9 @@ describe("NewChatLandingScreen", () => {
     });
     // The chip reflects the sticky provider, not the default.
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("E2B Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "E2B Sandbox",
+      ),
     );
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     // The e2b row carries the active highlight; modal does not.
@@ -3971,7 +3995,9 @@ describe("NewChatLandingScreen", () => {
     });
     renderLanding({ managed_sandboxes_enabled: true });
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("New Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "New Sandbox",
+      ),
     );
     fireEvent.click(screen.getByTestId("new-chat-landing-repo-chip"));
     const helpButton = screen.getByLabelText("How to set up Databricks git credentials");
@@ -4648,7 +4674,7 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     // Clicking a2 (Codex) commits the pick — the trigger reflects it.
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-a2"));
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
-      "Codex, Model GPT-5.5",
+      "Codex, Model GPT-5.5, Effort Default",
     );
   });
 
@@ -4767,7 +4793,9 @@ describe("NewChatLandingScreen custom-agent sandbox gating", () => {
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "Sandbox",
+      ),
     );
   }
 
@@ -4784,18 +4812,22 @@ describe("NewChatLandingScreen custom-agent sandbox gating", () => {
     // The managed default is the sandbox even with a host present, so switch
     // to the connected host (machine-1) first.
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "Sandbox",
+      ),
     );
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-host-host_1"));
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).not.toContain("Sandbox"),
+      expect(
+        screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label"),
+      ).not.toContain("Sandbox"),
     );
     // With no custom agents yet, the create item is a top-level row (no
     // "Custom agents" submenu to hide it behind) and opens the dialog.
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
     // No custom agents → no "Custom agents" submenu; create must be top-level.
-    expect(screen.queryByTestId("new-chat-landing-custom-agents")).toBeNull();
+    fireEvent.click(screen.getByTestId("new-chat-landing-custom-agents"));
     const createItem = screen.getByTestId("new-chat-landing-create-agent");
     fireEvent.click(createItem);
     await waitFor(() => expect(screen.getByTestId("create-agent-dialog")).toBeTruthy());
@@ -4805,14 +4837,19 @@ describe("NewChatLandingScreen custom-agent sandbox gating", () => {
   // custom agent from the dialog so it becomes the selected agent.
   async function createAndSelectPendingAgentOnHost(): Promise<void> {
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "Sandbox",
+      ),
     );
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-host-host_1"));
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).not.toContain("Sandbox"),
+      expect(
+        screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label"),
+      ).not.toContain("Sandbox"),
     );
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-custom-agents"));
     fireEvent.click(screen.getByTestId("new-chat-landing-create-agent"));
     await waitFor(() => expect(screen.getByTestId("create-agent-dialog")).toBeTruthy());
     fireEvent.change(screen.getByTestId("create-agent-name"), { target: { value: "my-agent" } });
@@ -4833,7 +4870,9 @@ describe("NewChatLandingScreen custom-agent sandbox gating", () => {
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-host-chip"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-sandbox-option"));
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("Sandbox"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "Sandbox",
+      ),
     );
     expect(screen.getByTestId("new-chat-landing-agent-select").textContent).not.toContain(
       "my-agent",
@@ -5687,7 +5726,9 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       .find((el) => el.closest('[role="menuitem"]') !== null);
     fireEvent.click(target!);
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("machine-2"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "machine-2",
+      ),
     );
 
     const notice = await screen.findByTestId("new-chat-landing-smart-routing-dropped");
@@ -5782,7 +5823,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
     );
     selectAgent("a2");
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
-      "Codex, Model GPT-5.5",
+      "Codex, Model GPT-5.5, Effort Default",
     );
   });
 
@@ -5914,7 +5955,9 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       .find((el) => el.closest('[role="menuitem"]') !== null);
     fireEvent.click(target!);
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("machine-2"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "machine-2",
+      ),
     );
     const notice = await screen.findByTestId("new-chat-landing-smart-routing-dropped");
     expect(notice.textContent).toContain("Smart Routing");
@@ -5951,7 +5994,9 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       .find((el) => el.closest('[role="menuitem"]') !== null);
     fireEvent.click(target!);
     await waitFor(() =>
-      expect(screen.getByTestId("new-chat-landing-host-chip").textContent).toContain("machine-2"),
+      expect(screen.getByTestId("new-chat-landing-host-chip").getAttribute("aria-label")).toContain(
+        "machine-2",
+      ),
     );
 
     expect(await screen.findByTestId("new-chat-landing-harness-warning")).toBeTruthy();

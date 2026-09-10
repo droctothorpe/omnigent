@@ -1782,6 +1782,16 @@ export function AgentHarnessPicker({
                       <DropdownMenuSubTrigger
                         data-testid="new-chat-landing-harness-more"
                         className="cursor-pointer items-center"
+                        onPointerLeave={(event) => {
+                          const target = event.relatedTarget;
+                          if (
+                            target instanceof Element &&
+                            target.closest('[role="menu"]')?.getAttribute("aria-labelledby") ===
+                              event.currentTarget.id
+                          ) {
+                            event.preventDefault();
+                          }
+                        }}
                       >
                         <span className="flex-1 text-left">{otherHarnessLabel}</span>
                       </DropdownMenuSubTrigger>

@@ -171,6 +171,7 @@ def _open_model_picker(page: Page, base_url: str, session_id: str) -> None:
     gear = page.get_by_test_id("composer-config-gear")
     expect(gear).to_be_visible(timeout=15_000)
     gear.click()
+    page.get_by_test_id("composer-advanced-settings").click()
     page.get_by_test_id("composer-config-model").click()
 
 

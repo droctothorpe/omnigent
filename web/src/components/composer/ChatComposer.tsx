@@ -102,7 +102,7 @@ export const ComposerSendButton = forwardRef<
         className,
       )}
       aria-label={label}
-      aria-busy={busy || undefined}
+      aria-busy={busy}
       {...props}
     >
       {busy ? (

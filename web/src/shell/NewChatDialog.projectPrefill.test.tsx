@@ -804,7 +804,9 @@ describe("NewChatLandingScreen project prefill", () => {
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-select"));
     fireEvent.click(screen.getByTestId(`new-chat-landing-agent-${CLAUDE_AGENT_ID}`));
-    fireEvent.click(await screen.findByTestId("new-chat-landing-config-gear"));
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId(`new-chat-landing-agent-config-${CLAUDE_AGENT_ID}`));
+    fireEvent.click(screen.getByTestId("new-chat-landing-config-gear"));
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-config-model"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-config-model"));
     fireEvent.click(screen.getByRole("option", { name: "Sonnet" }));
@@ -838,7 +840,9 @@ describe("NewChatLandingScreen project prefill", () => {
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-select"));
     fireEvent.click(screen.getByTestId(`new-chat-landing-agent-${CLAUDE_AGENT_ID}`));
-    fireEvent.click(await screen.findByTestId("new-chat-landing-config-gear"));
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId(`new-chat-landing-agent-config-${CLAUDE_AGENT_ID}`));
+    fireEvent.click(screen.getByTestId("new-chat-landing-config-gear"));
     fireEvent.pointerDown(screen.getByTestId("new-chat-landing-config-model"), { button: 0 });
     fireEvent.click(screen.getByTestId("new-chat-landing-config-model"));
     fireEvent.click(screen.getByRole("option", { name: "Smart Routing" }));
