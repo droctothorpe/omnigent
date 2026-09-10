@@ -52,7 +52,7 @@ from ._child_status import (
     child_summary_busy,
 )
 from ._client import OmnigentClient
-from ._errors import OmnigentError, ToolCallDenied
+from ._errors import OmnigentError, RateLimitedError, ToolCallDenied
 from ._events import MCP_ELICITATION_METHOD, ElicitationRequest
 from ._query import QueryResult, QueryStream
 from ._server import LocalServer
@@ -95,6 +95,7 @@ __all__ = [
     "PaginatedList",
     "QueryResult",
     "QueryStream",
+    "RateLimitedError",
     "ReasoningBlock",
     "ReasoningChunk",
     "ReasoningStartBlock",
