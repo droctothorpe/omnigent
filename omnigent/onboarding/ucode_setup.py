@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import subprocess
+import threading
 from collections.abc import Sequence
 
 import click
 
 from omnigent.onboarding.databricks_config import normalize_workspace_url
 from omnigent.onboarding.ucode_state import read_ucode_state
+
+_logger = logging.getLogger(__name__)
+
+# Sandbox configure is best-effort and off the host's dial-back path; bound it so
+# a hung ucode can't leak a thread for the life of the host.
+_SANDBOX_CONFIGURE_TIMEOUT_S = 120
 
 _UCODE_AGENT_NAMES: tuple[str, ...] = ("claude", "codex", "pi")
 # Pin ucode to a fixed commit so setup is reproducible, rather than tracking
@@ -152,3 +161,84 @@ def find_ucode_command() -> list[str]:
             "  uv tool install uv  # provides uvx"
         )
     return [ucode]
+
+
+def build_ucode_configure_command_for_profile(
+    ucode_command: Sequence[str],
+    *,
+    profile: str,
+    agents: Sequence[str] = _UCODE_AGENT_NAMES,
+    use_pat: bool = False,
+) -> list[str]:
+    """Build a non-interactive ``ucode configure`` against an injected profile.
+
+    The sandbox counterpart to :func:`build_ucode_configure_command`: that one
+    takes ``--workspaces`` and drives an interactive OAuth login, which a headless
+    managed sandbox can't do. Here the workspace is already present as a
+    ``~/.databrickscfg`` profile, so ucode authenticates from it: ``use_pat``
+    reads the profile's PAT (the lakebox control plane injects one), otherwise the
+    caller exports ``DATABRICKS_BEARER_COMMAND`` so the credential broker mints per
+    request (the OSS connect flow, nothing on disk). ``--skip-validate`` /
+    ``--skip-upgrade`` keep host bring-up fast (no gateway round-trip or
+    self-update mid-launch).
+    """
+    argv = [
+        *ucode_command,
+        "configure",
+        "--profiles",
+        profile,
+        "--agents",
+        ",".join(agents),
+        "--skip-validate",
+        "--skip-upgrade",
+    ]
+    if use_pat:
+        argv.append("--use-pat")
+    return argv
+
+
+def configure_ucode_for_sandbox(
+    profile: str,
+    *,
+    agents: Sequence[str] = _UCODE_AGENT_NAMES,
+    use_pat: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> None:
+    """Populate ``~/.ucode/state.json`` at managed-sandbox host boot, in the background.
+
+    Runs ``ucode configure`` for the coding harnesses against an injected profile
+    so the harness launch paths (which already call
+    :func:`omnigent.onboarding.ucode_state.read_ucode_state`) pick up the
+    workspace's base URLs and served models. A daemon thread keeps it off
+    ``omnigent host``'s dial-back path, where a synchronous multi-second run would
+    delay the runner connect; the harness launch falls back to its own hand-built
+    gateway config until ``state.json`` exists, so the eventual-consistency window
+    is safe. Best-effort: when ucode isn't available (a non-managed image) it
+    no-ops rather than raising.
+
+    Shared by both managed-sandbox callers: the OSS connect flow (this runs it
+    from ``omnigent host`` boot with the broker command in ``extra_env``) and the
+    lakebox launcher (``use_pat=True`` against its injected PAT).
+
+    ponytail: fire-and-forget per boot, no resume-skip; configure is idempotent
+    and cheap to repeat. Add a marker gate if warm-resume latency matters.
+    """
+    try:
+        ucode_command = find_ucode_command()
+    except click.ClickException:
+        return  # neither uvx nor ucode present → not a managed-sandbox image
+    argv = build_ucode_configure_command_for_profile(
+        ucode_command, profile=profile, agents=agents, use_pat=use_pat
+    )
+    env = {**os.environ, **(extra_env or {})}
+
+    def _run() -> None:
+        try:
+            result = subprocess.run(
+                argv, capture_output=True, timeout=_SANDBOX_CONFIGURE_TIMEOUT_S, env=env
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        _logger.info("ucode: sandbox configure exit=%s (profile=%s)", result.returncode, profile)
+
+    threading.Thread(target=_run, name="ucode-configure", daemon=True).start()

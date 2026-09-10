@@ -3177,16 +3177,35 @@ def _connect_broker_claude_config() -> ClaudeNativeUcodeConfig | None:
     if not api_key_helper:
         return None  # no broker sidecar → not a managed connect host
     workspace_host = workspace_host.rstrip("/")
-    return ClaudeNativeUcodeConfig(
-        env={
-            _UCODE_CLAUDE_BASE_URL_ENV: f"{workspace_host}/ai-gateway/anthropic",
-            _CLAUDE_CODE_API_KEY_HELPER_TTL_ENV: str(_BROKER_APIKEY_HELPER_TTL_MS),
-            _CLAUDE_CODE_USE_GATEWAY_ENV: "1",
-            _CLAUDE_CODE_CUSTOM_HEADERS_ENV: _DATABRICKS_CODING_AGENT_HEADER,
-        },
-        api_key_helper=api_key_helper,
-        model=_connect_broker_default_model(),
-    )
+
+    # Prefer the gateway config ucode generated at host boot (see
+    # ``omnigent.onboarding.ucode_setup.configure_ucode_for_sandbox``): ucode owns
+    # the base URL/route, coding-agent headers, and the discovered served model.
+    # We still mint the bearer through our own broker ``apiKeyHelper`` and launch
+    # Claude Code ourselves (bridge intact), so this consumes ucode's config
+    # without ucode launching or authenticating the binary. Fall back to a
+    # hand-built config when ucode wrote nothing usable (configure still running,
+    # skipped, or absent).
+    env = {
+        _UCODE_CLAUDE_BASE_URL_ENV: f"{workspace_host}/ai-gateway/anthropic",
+        _CLAUDE_CODE_USE_GATEWAY_ENV: "1",
+        _CLAUDE_CODE_CUSTOM_HEADERS_ENV: _DATABRICKS_CODING_AGENT_HEADER,
+    }
+    model = _connect_broker_default_model()
+
+    from omnigent.onboarding.ucode_state import read_ucode_state
+
+    workspace_state = read_ucode_state(workspace_host)
+    agent_state = workspace_state.agent(_UCODE_CLAUDE_AGENT_NAME) if workspace_state else None
+    if agent_state is not None:
+        ucode_base_url = agent_state.env.get(_UCODE_CLAUDE_BASE_URL_ENV) or agent_state.base_url
+        if ucode_base_url:
+            env = {**env, **agent_state.env, _UCODE_CLAUDE_BASE_URL_ENV: ucode_base_url}
+        if agent_state.model:
+            model = agent_state.model
+
+    env[_CLAUDE_CODE_API_KEY_HELPER_TTL_ENV] = str(_BROKER_APIKEY_HELPER_TTL_MS)
+    return ClaudeNativeUcodeConfig(env=env, api_key_helper=api_key_helper, model=model)
 
 
 def resolve_native_claude_config(
