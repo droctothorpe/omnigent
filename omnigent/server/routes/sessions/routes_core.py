@@ -30,9 +30,6 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from omnigent.codex_approval_modes import (
     CODEX_NATIVE_PERMISSION_VALUES,
 )
-from omnigent.cost_plan import (
-    reserved_cost_control_keys,
-)
 from omnigent.db.utils import generate_agent_id
 from omnigent.debug_logging import add_audit_attrs, debug_event
 from omnigent.entities import (
@@ -42,12 +39,7 @@ from omnigent.entities import (
 )
 from omnigent.entities.permission import SessionPermission
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.model_override import validate_model_override
-from omnigent.reasoning_effort import (
-    EFFORT_CLEAR_VALUES,
-    EFFORT_VALUES,
-    validate_effort,
-)
+from omnigent.models.model_override import validate_model_override
 from omnigent.runner.identity import (
     RUNNER_TUNNEL_TOKEN_HEADER,
 )
@@ -69,6 +61,7 @@ from omnigent.server._elicitation_registry import (
 )
 from omnigent.server.auth import (
     LEVEL_EDIT,
+    LEVEL_MANAGE,
     LEVEL_OWNER,
     LEVEL_READ,
     AuthProvider,
@@ -195,9 +188,6 @@ from omnigent.server.schemas import (
     SessionSwitchAgentRequest,
     UpdateSessionRequest,
 )
-from omnigent.session_lifecycle import (
-    labels_with_closed_status,
-)
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
@@ -215,6 +205,17 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import ProjectStore
+from omnigent.util.cost_plan import (
+    reserved_cost_control_keys,
+)
+from omnigent.util.reasoning_effort import (
+    EFFORT_CLEAR_VALUES,
+    EFFORT_VALUES,
+    validate_effort,
+)
+from omnigent.util.session_lifecycle import (
+    labels_with_closed_status,
+)
 from omnigent.version import VERSION
 
 
@@ -836,7 +837,7 @@ def register_core_routes(
         # here — it co-locates on the parent's runner.
         if parsed_metadata.host_id is not None and inherited_runner_id is None:
             from omnigent.harness_aliases import canonicalize_harness
-            from omnigent.model_catalog import spec_harness
+            from omnigent.models.model_catalog import spec_harness
 
             raw_harness = spec_harness(spec)
             await _bind_and_launch_on_caller_host(
@@ -1729,6 +1730,17 @@ def register_core_routes(
                                 "hosts-changed push failed; client will rely on fallback poll",
                                 exc_info=True,
                             )
+                elif evt_type == "projects_changed":
+                    async with emit_lock:
+                        try:
+                            await _send({"type": "projects_changed"})
+                        except WebSocketDisconnect:
+                            raise
+                        except Exception:
+                            _logger.warning(
+                                "projects-changed push failed; client converges on next load",
+                                exc_info=True,
+                            )
 
         reader_task = asyncio.create_task(_reader(), name="session-updates-reader")
         ticker_task = asyncio.create_task(_ticker(), name="session-updates-ticker")
@@ -1913,11 +1925,18 @@ def register_core_routes(
         #   owner-gated stop (an editor must not hide/stop a session they can't
         #   issue that stop for). Presence is the signal for project (``""``
         #   unfiles), so gate on model_fields_set, not a non-None value.
+        # * MANAGE — exposing the workspace to view-level collaborators
+        #   (``share_workspace_files``). It is a sharing decision, so it sits
+        #   with the same tier that already controls who is granted access
+        #   (grant/revoke, public toggle) — the share dialog is manage-gated.
+        #   Presence is the signal (the flag's own True/False is the value).
         # * EDIT — every other field.
         #
-        # Owner implies edit, so a single check at the resolved level gates all
-        # three with no redundant second permission-store read.
+        # A higher tier implies the lower ones, so a single check at the
+        # resolved (strictest requested) level gates them all with no redundant
+        # second permission-store read.
         set_project = "project_id" in body.model_fields_set
+        set_share_workspace = "share_workspace_files" in body.model_fields_set
         pin_only = body.model_fields_set == {"labels"} and set(body.labels or {}) == {
             PINNED_LABEL_KEY
         }
@@ -1925,6 +1944,8 @@ def register_core_routes(
             required_level = LEVEL_READ
         elif body.archived is not None or set_project:
             required_level = LEVEL_OWNER
+        elif set_share_workspace:
+            required_level = LEVEL_MANAGE
         else:
             required_level = LEVEL_EDIT
         await _require_access(
@@ -2229,6 +2250,9 @@ def register_core_routes(
                 None if clear_subagent_routing else subagent_routing_override
             ),
             _unset_subagent_routing_override=clear_subagent_routing,
+            # Owner opt-in for workspace-file browsing. Presence is the signal:
+            # an omitted field leaves it unchanged; True/False set or clear it.
+            share_workspace_files=(body.share_workspace_files if set_share_workspace else None),
             terminal_launch_args=terminal_launch_args,
             archived=body.archived,
         )
@@ -2853,13 +2877,21 @@ def register_core_routes(
         # Push the forked session to this user's other open tabs.
         _announce_session_added(user_id, new_conv.id)
 
+        # Bound the response like the GET-session snapshot: newest item page,
+        # chronological. Clients navigate by the fork's id and hydrate the
+        # transcript via the paged items endpoint, so returning the whole
+        # copied history only made the user-blocked response scale with
+        # source size.
         fork_items = await asyncio.to_thread(
-            conversation_store.list_items, new_conv.id, limit=10000
+            conversation_store.list_items,
+            new_conv.id,
+            limit=100,
+            order="desc",
         )
         level = await _get_permission_level(user_id, new_conv.id, permission_store)
         return _build_session_response(
             new_conv,
-            fork_items.data,
+            list(reversed(fork_items.data)),
             "idle",
             permission_level=level,
             last_task_error=None,

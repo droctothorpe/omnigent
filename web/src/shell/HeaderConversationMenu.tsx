@@ -12,6 +12,7 @@ import {
   EllipsisIcon,
   FolderInputIcon,
   GitBranchIcon,
+  GitForkIcon,
   InfoIcon,
   MailIcon,
   PencilIcon,
@@ -64,11 +65,19 @@ interface HeaderConversationMenuProps {
   conversation: Conversation;
   currentProject: string | null;
   canShare: boolean;
+  canFork: boolean;
   shareDisabled?: boolean;
   shareDisabledReason?: string;
   onShare: () => void;
+  onFork: () => void;
   hasAgentInfo?: boolean;
   onAgentInfo?: () => void;
+  /**
+   * Mobile Chat/Terminal view switch (ViewModeMenuItems) — leads the menu on
+   * terminal-first sessions and carries its own trailing separator. `null`
+   * otherwise.
+   */
+  viewItems?: ReactNode;
   /** Mobile workspace-rail entries (Files · Agents · Shells · Logs). */
   workspaceItems?: ReactNode;
 }
@@ -92,11 +101,14 @@ export function HeaderConversationMenu({
   conversation,
   currentProject,
   canShare,
+  canFork,
   shareDisabled = false,
   shareDisabledReason,
   onShare,
+  onFork,
   hasAgentInfo = false,
   onAgentInfo,
+  viewItems = null,
   workspaceItems = null,
 }: HeaderConversationMenuProps) {
   const navigate = useNavigate();
@@ -187,6 +199,9 @@ export function HeaderConversationMenu({
 
   const mainItems = (
     <>
+      {/* Chat/Terminal switch leads the menu on terminal-first sessions; it
+          renders its own trailing separator (null on other sessions). */}
+      {viewItems}
       <DropdownMenuItem
         data-testid="header-pin-conversation"
         className={itemClass}
@@ -212,6 +227,16 @@ export function HeaderConversationMenu({
         >
           <ShareIcon className="size-3.5" />
           Share
+        </DropdownMenuItem>
+      )}
+      {canFork && (
+        <DropdownMenuItem
+          data-testid="header-fork-conversation"
+          className={itemClass}
+          onSelect={onFork}
+        >
+          <GitForkIcon className="size-3.5" />
+          Fork
         </DropdownMenuItem>
       )}
       {hasAgentInfo && onAgentInfo && (
@@ -329,9 +354,9 @@ export function HeaderConversationMenu({
             size={isMobile ? "icon" : "icon-xs"}
             aria-label="Conversation actions"
             data-testid="header-conversation-actions"
-            className="shrink-0 border-none text-muted-foreground hover:text-foreground max-md:rounded-full"
+            className="shrink-0 border-none text-muted-foreground hover:text-foreground max-md:size-11 max-md:rounded-full"
           >
-            <EllipsisIcon className={isMobile ? "size-4" : "size-3.5"} />
+            <EllipsisIcon className={isMobile ? "size-5" : "size-3.5"} />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent

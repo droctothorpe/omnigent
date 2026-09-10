@@ -367,6 +367,15 @@ export interface Session {
    * `"on"` at create, so `null` means Default rather than "inherit".
    */
   subagentRoutingOverride?: "on" | "off" | null;
+  /**
+   * Whether the owner opted into letting people with *view* (read-only)
+   * access browse this session's workspace files (the Files/Changes/GitHub
+   * surfaces and the file contents behind them). `false` by default — a
+   * read grant shares the conversation, not the raw filesystem. Owner-set
+   * from the share dialog; the rail reads it to decide whether to mount the
+   * file surfaces for a view-only viewer.
+   */
+  shareWorkspaceFiles?: boolean;
   /** Model context window size in tokens as looked up server-side. */
   contextWindow?: number | null;
   /**
