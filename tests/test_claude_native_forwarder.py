@@ -10340,11 +10340,12 @@ async def test_forward_btw_overlay_relays_after_stability_then_dedupes(
     tmp_path: Path,
 ) -> None:
     """
-    A settled /btw overlay relays a user + assistant message once.
+    A settled /btw overlay relays ONE transient side-chat event.
 
     The first poll only records the exchange as pending (torn-capture
-    guard); the second poll (same exchange) posts both items under one
-    response id; the third poll is deduped and posts nothing.
+    guard); the second poll (same exchange) posts the transient
+    ``external_btw_sidechat`` event; the third poll is deduped and posts
+    nothing.
     """
     overlay = BtwOverlay(question="/btw is this ok?", answer="Yes, all good.", truncated=False)
     monkeypatch.setattr(forwarder, "read_btw_overlay", lambda _bridge_dir: overlay)
@@ -10358,29 +10359,23 @@ async def test_forward_btw_overlay_relays_after_stability_then_dedupes(
                 client,
                 session_id="conv1",
                 bridge_dir=tmp_path,
-                agent_name="claude-native-ui",
                 dedupe=dedupe,
             )
 
-    assert len(calls) == 2
-    user_body, assistant_body = calls
-    assert user_body["type"] == "external_conversation_item"
-    assert user_body["data"]["item_type"] == "message"
-    assert user_body["data"]["item_data"]["role"] == "user"
-    assert user_body["data"]["item_data"]["content"][0]["text"] == "/btw is this ok?"
-    assert assistant_body["data"]["item_data"]["role"] == "assistant"
-    assert assistant_body["data"]["item_data"]["agent"] == "claude-native-ui"
-    assert assistant_body["data"]["item_data"]["content"][0]["text"] == "Yes, all good."
-    # Both items group under one synthetic response id.
-    assert user_body["data"]["response_id"] == assistant_body["data"]["response_id"]
+    assert len(calls) == 1
+    (body,) = calls
+    assert body["type"] == "external_btw_sidechat"
+    assert body["data"]["question"] == "/btw is this ok?"
+    assert body["data"]["answer"] == "Yes, all good."
+    assert body["data"]["truncated"] is False
 
 
 @pytest.mark.asyncio
-async def test_forward_btw_overlay_appends_truncation_note(
+async def test_forward_btw_overlay_relays_truncated_flag(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A truncated overlay relays the visible answer plus a terminal note."""
+    """A clipped overlay relays the visible answer with truncated=True."""
     overlay = BtwOverlay(question="/btw big", answer="line1\nline2", truncated=True)
     monkeypatch.setattr(forwarder, "read_btw_overlay", lambda _bridge_dir: overlay)
     dedupe = forwarder._ForwardDedupeState()
@@ -10393,14 +10388,12 @@ async def test_forward_btw_overlay_appends_truncation_note(
                 client,
                 session_id="conv1",
                 bridge_dir=tmp_path,
-                agent_name="claude-native-ui",
                 dedupe=dedupe,
             )
 
-    assert len(calls) == 2
-    answer_text = calls[1]["data"]["item_data"]["content"][0]["text"]
-    assert answer_text.startswith("line1\nline2")
-    assert "may be truncated" in answer_text
+    assert len(calls) == 1
+    assert calls[0]["data"]["answer"] == "line1\nline2"
+    assert calls[0]["data"]["truncated"] is True
 
 
 @pytest.mark.asyncio
@@ -10420,7 +10413,6 @@ async def test_forward_btw_overlay_no_overlay_is_noop(
             client,
             session_id="conv1",
             bridge_dir=tmp_path,
-            agent_name="claude-native-ui",
             dedupe=dedupe,
         )
 

@@ -92,6 +92,7 @@ from omnigent.server.routes._sessions.common import (
     _EXTERNAL_ACP_SUBAGENT_START_TYPE,
     _EXTERNAL_ANTIGRAVITY_SUBAGENT_START_TYPE,
     _EXTERNAL_ASSISTANT_MESSAGE_TYPE,
+    _EXTERNAL_BTW_SIDECHAT_TYPE,
     _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
     _EXTERNAL_CODEX_COLLABORATION_MODE_CHANGE_TYPE,
     _EXTERNAL_CODEX_SUBAGENT_START_TYPE,
@@ -162,6 +163,7 @@ from omnigent.server.routes._sessions.helpers import (
     _persist_policy_deny_sentinel,
     _persist_session_status_error_labels,
     _prune_session_read_state,
+    _publish_btw_sidechat,
     _publish_compaction_completed,
     _publish_compaction_failed,
     _publish_compaction_in_progress,
@@ -1326,6 +1328,22 @@ def register_events_routes(
                     code=ErrorCode.INVALID_INPUT,
                 )
             _publish_session_superseded(session_id, target_conversation_id.strip())
+            return {"queued": False}
+        if body.type == _EXTERNAL_BTW_SIDECHAT_TYPE:
+            question = body.data.get("question")
+            answer = body.data.get("answer")
+            if not isinstance(question, str) or not isinstance(answer, str) or not answer:
+                raise OmnigentError(
+                    "external_btw_sidechat requires string data.question and a "
+                    "non-empty string data.answer",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            _publish_btw_sidechat(
+                session_id,
+                question=question,
+                answer=answer,
+                truncated=bool(body.data.get("truncated")),
+            )
             return {"queued": False}
         if body.type == _EXTERNAL_ELICITATION_RESOLVED_TYPE:
             elicitation_id = body.data.get("elicitation_id")

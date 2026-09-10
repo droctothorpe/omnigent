@@ -1370,7 +1370,6 @@ async def forward_claude_transcript_to_session(
                             client=client,
                             session_id=current_session_id,
                             bridge_dir=bridge_dir,
-                            agent_name=agent_name,
                             dedupe=dedupe,
                         )
             except asyncio.CancelledError:
@@ -5182,7 +5181,6 @@ async def _forward_btw_overlay_from_pane(
     *,
     session_id: str,
     bridge_dir: Path,
-    agent_name: str,
     dedupe: _ForwardDedupeState,
 ) -> None:
     """
@@ -5190,23 +5188,23 @@ async def _forward_btw_overlay_from_pane(
 
     ``/btw`` answers live only in the in-TUI overlay — never in the
     transcript, the message-deltas file, or a hook — so the transcript
-    forwarder relays nothing and the web composer that submitted a ``/btw``
-    is left with a stuck, unanswered bubble. This scrapes the settled
-    overlay (read-only, no keystrokes → no race with the executor's pane
-    writes) and posts the exchange as one user message (the ``/btw`` line,
-    which reconciles the composer's optimistic bubble) plus one assistant
-    message (the answer). Both entry points are covered: a ``/btw`` typed in
-    the web composer or directly in the embedded terminal.
+    forwarder relays nothing. This scrapes the settled overlay (read-only,
+    no keystrokes → no race with the executor's pane writes) and posts it as
+    a single TRANSIENT ``external_btw_sidechat`` event: the web UI shows the
+    ephemeral overlay (dismissed with Escape) and nothing is written to the
+    main transcript, faithful to ``/btw``'s side-chat nature. Both entry
+    points are covered: a ``/btw`` typed in the web composer or directly in
+    the embedded terminal.
 
-    Best-effort: a long answer the pane clipped is relayed with a note
-    pointing at the terminal (read-only capture cannot page the overlay).
-    Deduped so the persistent, history-stacking overlay posts each distinct
-    exchange once; a failed POST simply retries next poll.
+    Best-effort: a long answer the pane clipped is relayed with the
+    ``truncated`` flag set (the overlay points at the terminal for the full
+    text — read-only capture cannot page the overlay). Deduped so the
+    persistent, history-stacking overlay posts each distinct exchange once;
+    a failed POST simply retries next poll.
 
     :param client: Omnigent HTTP client.
     :param session_id: Omnigent session/conversation id.
     :param bridge_dir: Native Claude bridge directory.
-    :param agent_name: Agent/model name stamped on the assistant message.
     :param dedupe: Shared per-session dedupe state; mutated in place.
     """
     now = time.monotonic()
@@ -5225,35 +5223,14 @@ async def _forward_btw_overlay_from_pane(
     if dedupe.btw_pending_key != key:
         dedupe.btw_pending_key = key
         return
-    response_id = f"btw-{key[:12]}"
-    answer_text = overlay.answer
-    if overlay.truncated:
-        answer_text = (
-            f"{answer_text}\n\n_(This `/btw` side-chat answer may be truncated — "
-            "open the terminal to read the full response.)_"
-        )
-    user_item = ClaudeTranscriptItem(
-        source_id=f"btw:{key}:user",
-        item_type="message",
-        data={
-            "role": "user",
-            "content": [{"type": "input_text", "text": overlay.question or "/btw"}],
-        },
-        response_id=response_id,
-    )
-    assistant_item = ClaudeTranscriptItem(
-        source_id=f"btw:{key}:assistant",
-        item_type="message",
-        data={
-            "role": "assistant",
-            "agent": agent_name,
-            "content": [{"type": "output_text", "text": answer_text}],
-        },
-        response_id=response_id,
-    )
     try:
-        await _post_external_conversation_item(client, session_id=session_id, item=user_item)
-        await _post_external_conversation_item(client, session_id=session_id, item=assistant_item)
+        await _post_external_btw_sidechat(
+            client,
+            session_id=session_id,
+            question=overlay.question or "/btw",
+            answer=overlay.answer,
+            truncated=overlay.truncated,
+        )
     except httpx.HTTPError:
         # Leave the exchange un-relayed (not in ``posted_btw_keys``) so the
         # next poll retries; the overlay persists until dismissed.
@@ -5268,6 +5245,38 @@ async def _forward_btw_overlay_from_pane(
     dedupe.btw_pending_key = None
     while len(dedupe.posted_btw_keys) > _MAX_SEEN_BTW_KEYS:
         dedupe.posted_btw_keys.pop(next(iter(dedupe.posted_btw_keys)))
+
+
+async def _post_external_btw_sidechat(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    question: str,
+    answer: str,
+    truncated: bool,
+) -> None:
+    """
+    Post one transient ``external_btw_sidechat`` event to the Sessions API.
+
+    The server broadcasts it to the conversation's live stream without
+    persisting anything (see ``_publish_btw_sidechat``), so the ``/btw``
+    exchange shows as a dismissable overlay and never enters the transcript.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id.
+    :param question: The ``/btw`` request line as typed.
+    :param answer: The side-chat answer text.
+    :param truncated: True when the pane clipped a longer answer.
+    :raises httpx.HTTPError: If the Omnigent request fails or is rejected.
+    """
+    resp = await client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={
+            "type": "external_btw_sidechat",
+            "data": {"question": question, "answer": answer, "truncated": truncated},
+        },
+    )
+    resp.raise_for_status()
 
 
 async def _post_external_model_change(
