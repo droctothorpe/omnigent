@@ -1278,7 +1278,16 @@ def register_core_routes(
         # here and never reaches the probe. Only stamp-stale candidates fall
         # through to liveness_lookup, which additionally rules out a runner
         # whose tunnel is live on THIS replica before we settle.
-        if liveness_lookup is not None:
+        # Hold the reaper off right after this process started: a server
+        # recycle keeps its runners, which re-register within seconds. A poll
+        # landing before a runner's tunnel is back would otherwise read its
+        # still-running session as orphaned (no live tunnel here, and its
+        # runner_last_seen was NULLed on the old process's shutdown or not yet
+        # re-stamped) and settle it to idle — the turn then reads idle even
+        # after the runner reconnects. See shutdown_state.server_recently_started.
+        from omnigent.server import shutdown_state
+
+        if liveness_lookup is not None and not shutdown_state.server_recently_started():
             orphan_suspects = [
                 conv
                 for conv in page.data

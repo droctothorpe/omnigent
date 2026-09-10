@@ -37,6 +37,18 @@ import time
 # the only peer that sends it.
 SERVER_INITIATED_CLOSE_CODES: frozenset[int] = frozenset({1012})
 
+# How long after process start a runner that has not yet reconnected its
+# tunnel counts as "still reconnecting" rather than orphaned. A server
+# recycle (rolling deploy, App restart) leaves its runners intact; they
+# re-register within seconds, but a session-list poll landing in that gap
+# would otherwise read a still-running session as orphaned and settle it to
+# idle before the tunnel is back. Comfortably covers a reconnect while
+# staying well under the runner liveness TTL. Symmetric with
+# :data:`SHUTDOWN_WINDOW_S`.
+STARTUP_WINDOW_S: float = 30.0
+
+_process_started_at: float = time.monotonic()
+
 # How long a mark counts as "still shutting down". Platform termination
 # graces are far shorter (Databricks Apps: 15s; Kubernetes default: 30s),
 # and the reconciliation deadlines this suppresses fire ~10s after the drop.
@@ -82,9 +94,27 @@ def server_shutting_down(now: float | None = None) -> bool:
     return current - _marked_at < SHUTDOWN_WINDOW_S
 
 
+def server_recently_started(now: float | None = None) -> bool:
+    """
+    Return whether this process started within :data:`STARTUP_WINDOW_S`.
+
+    Used to hold off the orphaned-``running`` reaper right after start: a
+    server recycle keeps its runners, which re-register within seconds, so a
+    running session whose runner has not reconnected *yet* is presumed
+    reconnecting rather than dead during this window.
+
+    :param now: Monotonic clock reading to measure against; defaults to
+        :func:`time.monotonic`.
+    :returns: ``True`` while still inside the startup window.
+    """
+    current = time.monotonic() if now is None else now
+    return current - _process_started_at < STARTUP_WINDOW_S
+
+
 def reset_for_tests() -> None:
     """
-    Clear the shutdown mark (test isolation).
+    Clear the shutdown mark and reset the startup clock (test isolation).
     """
-    global _marked_at
+    global _marked_at, _process_started_at
     _marked_at = None
+    _process_started_at = time.monotonic()

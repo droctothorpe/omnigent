@@ -37,3 +37,10 @@ def test_only_a_server_initiated_close_code_marks_shutdown(
 ) -> None:
     assert shutdown_state.note_tunnel_close_code(code) is expected
     assert shutdown_state.server_shutting_down() is expected
+
+
+def test_freshly_started_process_is_within_the_startup_window_then_leaves_it() -> None:
+    # reset_for_tests() stamps the start clock to now, so we are inside it.
+    assert shutdown_state.server_recently_started() is True
+    past = time.monotonic() + shutdown_state.STARTUP_WINDOW_S
+    assert shutdown_state.server_recently_started(now=past) is False

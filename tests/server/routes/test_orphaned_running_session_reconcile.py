@@ -122,9 +122,15 @@ def test_reconcile_is_conditional_and_marks_scheduled_run_incomplete(
 async def test_list_reconciles_orphaned_running_session(
     client: httpx.AsyncClient,
     db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A persisted-running session whose runner is confirmed gone reads
     "idle" in the list, not a phantom "running"."""
+    # Exercise the steady-state reaper, past the post-start grace that holds
+    # it off while recycled runners reconnect.
+    from omnigent.server import shutdown_state
+
+    monkeypatch.setattr(shutdown_state, "server_recently_started", lambda now=None: False)
     session_id = _seed_running_session(db_uri, runner_fresh=False)
 
     resp = await client.get("/v1/sessions")
@@ -136,10 +142,16 @@ async def test_list_reconciles_orphaned_running_session(
 async def test_list_leaves_running_session_with_fresh_runner(
     client: httpx.AsyncClient,
     db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A running session whose runner is fresh (alive on another replica
     within the grace window) is left running — the reconciliation must not
     fire while the runner could still be executing the turn."""
+    # Past the post-start grace, so this isolates the fresh-runner guard
+    # rather than passing only because the reaper is held off after start.
+    from omnigent.server import shutdown_state
+
+    monkeypatch.setattr(shutdown_state, "server_recently_started", lambda now=None: False)
     session_id = _seed_running_session(db_uri, runner_fresh=True)
 
     resp = await client.get("/v1/sessions")
