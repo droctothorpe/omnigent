@@ -15,6 +15,7 @@ import { useMemo } from "react";
 import { defaultRemarkPlugins } from "streamdown";
 import remarkBreaks from "remark-breaks";
 import { normalizeExplicitMathDelimiters } from "@/components/ai-elements/mathMarkdown";
+import { joinWrappedUrls } from "@/components/ai-elements/wrappedUrlMarkdown";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { WORKSPACE_FILE_LINK_ATTR } from "@/components/ai-elements/streamdown-security";
 import { ZoomableImage } from "@/components/ImageLightbox";
@@ -364,7 +365,9 @@ export function FilePathAwareMessageResponse({
   // non-string children (none today) pass an inert "" and bypass the result.
   const isString = typeof children === "string";
   const normalizedText = useMemo(
-    () => (isString ? normalizeExplicitMathDelimiters(children as string) : ""),
+    // URL rejoin runs first, on the raw line structure a hard wrap left
+    // behind; math-delimiter rewriting never touches newlines or URLs.
+    () => (isString ? normalizeExplicitMathDelimiters(joinWrappedUrls(children as string)) : ""),
     [isString, children],
   );
   const throttledText = useThrottledValue(normalizedText, STREAM_MARKDOWN_THROTTLE_MS);
