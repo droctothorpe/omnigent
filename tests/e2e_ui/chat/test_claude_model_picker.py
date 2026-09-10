@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlparse
 
+import pytest
 from playwright.sync_api import Page, Route, expect
 
 from omnigent.harnesses.claude_native.main import (
@@ -21,6 +23,15 @@ _EXPECTED_ROWS = [
     ("sonnet", "Sonnet 5"),
     ("haiku", "Haiku 4.5"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _finish_snapshot_routes(page: Page) -> Iterator[None]:
+    """Drain snapshot response handlers before Playwright disposes the page."""
+    yield
+    page.unroute_all(behavior="wait")
+
+
 _MODEL_OPTIONS = [
     {
         "id": "opus",
@@ -476,25 +487,25 @@ _CLAUDE_LLM_MODEL = "system.ai.claude-sonnet-5"
 # the test quick. Only the switch back to the Claude session is delayed.
 _SNAPSHOT_DELAY_MS = 2_000
 
-# Records every distinct composer model label the page ever paints, tagged with
-# the session route it was painted under. A transient wrong label is invisible
-# to `expect()` (which retries until it passes), so the assertion runs against
-# this log rather than a point-in-time read.
+# Sample each painted frame against React's committed session, not history:
+# BrowserRouter updates history before committing its concurrent route render.
+# Keep transient labels that retrying expect() assertions would miss.
 _LABEL_RECORDER = """
 (() => {
   window.__modelLabelLog = [];
   const record = () => {
     const el = document.querySelector('[data-testid="composer-agent-config-value"]');
-    const entry = { path: location.pathname, text: el ? el.textContent.trim() : "" };
+    const current = document.querySelector('main[data-session-id]');
+    const entry = {
+      path: `/c/${current?.dataset.sessionId}`,
+      text: el ? el.textContent.trim() : "",
+    };
     const log = window.__modelLabelLog;
     const last = log[log.length - 1];
     if (!last || last.path !== entry.path || last.text !== entry.text) log.push(entry);
+    requestAnimationFrame(record);
   };
-  new MutationObserver(record).observe(document, {
-    subtree: true,
-    childList: true,
-    characterData: true,
-  });
+  requestAnimationFrame(record);
 })()
 """
 
@@ -614,6 +625,9 @@ def test_composer_model_label_never_shows_the_previous_sessions_model(
     # sticky pick, and leaves Claude never-visited so its open is cold.
     page.goto(f"{base_url}/c/{codex_session}")
     expect(label).to_contain_text(_CODEX_MODEL_LABEL, timeout=15_000)
+    expect(page.locator("main[data-session-id]")).to_have_attribute(
+        "data-session-id", codex_session
+    )
 
     # Cold-open Claude with its snapshot held, and watch every label the
     # composer paints under the Claude route.

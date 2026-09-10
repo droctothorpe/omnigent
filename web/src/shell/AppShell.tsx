@@ -2064,6 +2064,7 @@ export function AppShell() {
                 <main
                   className="relative flex min-h-0 min-w-0 flex-1 flex-col"
                   data-shell-header={extensionOwnsHeader ? "hidden" : "visible"}
+                  data-session-id={conversationId}
                 >
                   <Outlet />
                 </main>
