@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -618,3 +619,93 @@ def maybe_merge_user_provider_config(config: dict[str, object]) -> dict[str, obj
     result.setdefault("$schema", "https://opencode.ai/config.json")
 
     return result
+
+
+def _configure_opencode_on_demand() -> None:
+    """Run ``ucode configure --agents opencode`` for the connect profile, minting
+    via the broker. Used when the background boot configure has not yet written
+    opencode's config at launch time. Best-effort and quiet."""
+    from omnigent.host.databricks_credential import HOST_DATABRICKS_PROFILE, broker_token_command
+    from omnigent.inner.databricks_executor import _read_databrickscfg_host
+    from omnigent.onboarding.ucode_setup import (
+        build_ucode_configure_command_for_profile,
+        find_ucode_command,
+    )
+
+    host = _read_databrickscfg_host(HOST_DATABRICKS_PROFILE)
+    bearer_command = broker_token_command(host.rstrip("/")) if host else None
+    if not bearer_command:
+        return
+    try:
+        argv = build_ucode_configure_command_for_profile(
+            find_ucode_command(), profile=HOST_DATABRICKS_PROFILE, agents=["opencode"]
+        )
+        subprocess.run(
+            argv,
+            capture_output=True,
+            timeout=120,
+            env={
+                **os.environ,
+                "DATABRICKS_BEARER_COMMAND": bearer_command,
+                "DATABRICKS_CONFIG_PROFILE": HOST_DATABRICKS_PROFILE,
+            },
+        )
+    except Exception:  # noqa: BLE001 - best-effort; the caller declines if config is still absent.
+        _logger.info("opencode on-demand ucode configure failed", exc_info=True)
+
+
+def managed_connect_opencode_config(xdg_config_home: Path) -> dict[str, object] | None:
+    """Consume ucode's generated opencode config on a managed connect host.
+
+    The opencode counterpart to Claude reading ``read_ucode_state``: on a managed
+    connect host, ``ucode configure --agents opencode`` (run at host boot) writes
+    ``~/.config/opencode/opencode.json`` (provider block + served-model selectors)
+    and a ``plugin/ucode-auth.js`` that mints a fresh Databricks token per request
+    via ``ucode auth-token`` (→ the broker). omnigent isolates opencode to a
+    per-session ``XDG_CONFIG_HOME``, so this reuses ucode's output: it returns
+    ucode's config (to seed the session ``opencode.json``) after copying the auth
+    plugin into the session plugin dir and pointing ``plugin`` at the copy.
+
+    Reuse over reinvention — the same ucode artifact serves OSS connect sandboxes
+    here, lakebox (via ``ucode opencode``), and ucode's own users; refresh comes
+    from ucode's plugin, not a static omnigent-minted token.
+
+    Returns ``None`` off a managed connect host (no broker sidecar) or when ucode
+    did not generate an opencode config — so laptop and non-connect launches are
+    untouched. The caller must also forward ``DATABRICKS_BEARER_COMMAND`` into the
+    opencode process env so the plugin's ``ucode auth-token`` can mint.
+    """
+    from omnigent.host.databricks_credential import _read_sidecar, _sidecar_path
+
+    if _read_sidecar(_sidecar_path()) is None:
+        return None  # not a managed connect host
+
+    # ucode writes opencode's config into its own XDG root, not ~/.config/opencode.
+    ucode_config_dir = Path.home() / ".ucode" / "opencode-xdg" / "opencode"
+    ucode_config = ucode_config_dir / "opencode.json"
+    if not ucode_config.exists():
+        # The boot-time configure_ucode_for_sandbox runs in the background and may
+        # not have written opencode's config yet when this launch resolves. Unlike
+        # claude/codex/pi, opencode has no working hand-built fallback on the
+        # connect path, so configure it on demand here (a few seconds, off the
+        # runner's dial-back path). Best-effort; a failure just declines below.
+        _configure_opencode_on_demand()
+    try:
+        config = json.loads(ucode_config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(config, dict) or "provider" not in config:
+        return None  # ucode did not configure opencode (e.g. not in --agents)
+
+    ucode_plugin = ucode_config_dir / "plugin" / "ucode-auth.js"
+    try:
+        plugin_src = ucode_plugin.read_text(encoding="utf-8")
+    except OSError:
+        return None  # provider block without the refresh plugin is not usable
+    session_plugin_dir = xdg_config_home / "opencode" / "plugin"
+    session_plugin_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    session_plugin = session_plugin_dir / "ucode-auth.js"
+    session_plugin.write_text(plugin_src, encoding="utf-8")
+    # Point at the session copy; the caller appends its own policy plugin.
+    config["plugin"] = [str(session_plugin)]
+    return config

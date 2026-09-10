@@ -237,7 +237,9 @@ def test_build_ucode_configure_command_normalizes_pasted_url() -> None:
 def test_build_ucode_configure_command_for_profile_broker_mode() -> None:
     from omnigent.onboarding.ucode_setup import build_ucode_configure_command_for_profile
 
-    argv = build_ucode_configure_command_for_profile(["ucode"], profile="omnigent")
+    argv = build_ucode_configure_command_for_profile(
+        ["ucode"], profile="omnigent", agents=["claude", "codex", "pi"]
+    )
     assert argv == [
         "ucode",
         "configure",
@@ -247,6 +249,7 @@ def test_build_ucode_configure_command_for_profile_broker_mode() -> None:
         "claude,codex,pi",
         "--skip-validate",
         "--skip-upgrade",
+        "--skip-unavailable",
     ]
     # broker mode: no --use-pat (the caller supplies DATABRICKS_BEARER_COMMAND)
     assert "--use-pat" not in argv

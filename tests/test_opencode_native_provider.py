@@ -742,3 +742,54 @@ def test_mcp_progress_heartbeat_lifecycle() -> None:
         assert len(written_messages) == count_at_exit
     finally:
         bridge_mod._write_jsonrpc = orig_write
+
+
+def test_managed_connect_opencode_config_consumes_ucode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a managed connect host, opencode reuses ucode's generated config
+    (provider block + system.ai model) and its refreshing auth plugin, copied into
+    the per-session XDG dir."""
+    import omnigent.harnesses.opencode_native.provider as prov
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # ucode's generated opencode config + auth plugin (its own XDG root).
+    ucode_dir = tmp_path / ".ucode" / "opencode-xdg" / "opencode"
+    (ucode_dir / "plugin").mkdir(parents=True)
+    (ucode_dir / "opencode.json").write_text(
+        json.dumps(
+            {
+                "model": "databricks-anthropic/system.ai.claude-opus-4-8",
+                "provider": {"databricks-anthropic": {"options": {"baseURL": "https://ws/x"}}},
+            }
+        )
+    )
+    (ucode_dir / "plugin" / "ucode-auth.js").write_text("// ucode auth plugin\n")
+    # A managed connect host (broker sidecar present) — and the ucode config
+    # already exists, so no on-demand configure is triggered.
+    monkeypatch.setattr(
+        "omnigent.host.databricks_credential._read_sidecar",
+        lambda path: {"server": "s", "host_id": "h", "host_token": "t", "workspace_host": "https://ws"},
+    )
+
+    session_xdg = tmp_path / "session-xdg"
+    config = prov.managed_connect_opencode_config(session_xdg)
+
+    assert config is not None
+    assert config["model"] == "databricks-anthropic/system.ai.claude-opus-4-8"  # system.ai
+    assert "databricks-anthropic" in config["provider"]
+    # auth plugin copied into the session dir and registered.
+    session_plugin = session_xdg / "opencode" / "plugin" / "ucode-auth.js"
+    assert session_plugin.exists()
+    assert config["plugin"] == [str(session_plugin)]
+
+
+def test_managed_connect_opencode_config_none_without_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No broker sidecar (e.g. a laptop) → None, so opencode's normal launch is
+    untouched off a managed sandbox."""
+    import omnigent.harnesses.opencode_native.provider as prov
+
+    monkeypatch.setattr("omnigent.host.databricks_credential._read_sidecar", lambda path: None)
+    assert prov.managed_connect_opencode_config(Path("/tmp/unused-xdg")) is None

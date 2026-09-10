@@ -191,6 +191,7 @@ def build_ucode_configure_command_for_profile(
         ",".join(agents),
         "--skip-validate",
         "--skip-upgrade",
+        "--skip-unavailable",
     ]
     if use_pat:
         argv.append("--use-pat")
