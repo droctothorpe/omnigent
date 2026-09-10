@@ -11,17 +11,14 @@ import {
   type ReactNode,
 } from "react";
 import {
-  ArrowUpIcon,
   BotIcon,
+  CheckIcon,
+  WandSparklesIcon,
   CornerUpLeftIcon,
   FileTextIcon,
   FolderIcon,
-  GitBranchIcon,
   ImageIcon,
   Loader2Icon,
-  PaperclipIcon,
-  SettingsIcon,
-  SquareIcon,
   SquareTerminalIcon,
   XIcon,
 } from "lucide-react";
@@ -33,6 +30,33 @@ import {
 import { useNavigate, useParams } from "@/lib/routing";
 import { isImeCompositionKeyEvent } from "@/lib/ime";
 import { Button } from "@/components/ui/button";
+import {
+  ChatComposer,
+  COMPOSER_COLUMN_WIDTH,
+  ComposerInputArea,
+  ComposerTextarea,
+  ComposerActionRow,
+  ComposerActionGroup,
+  ComposerSendButton,
+} from "@/components/composer/ChatComposer";
+import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
+import {
+  ComposerWorkspaceBar,
+  ComposerWorkspaceTrigger,
+  ComposerPermissionPicker,
+  ComposerHarnessTrigger,
+} from "@/components/composer/ComposerControls";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useAppName } from "@/lib/branding";
 import { cn } from "@/lib/utils";
 import { QueuedMessagesStrip } from "@/pages/QueuedMessagesStrip";
@@ -206,7 +230,7 @@ import { useServerInfo } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import { MainTerminalView } from "@/shell/MainTerminalView";
 import { UNTITLED_CONVERSATION_LABEL } from "@/shell/sidebarNav";
-import { NewChatLandingScreen } from "@/shell/NewChatDialog";
+import { ComposerAgentIcon, NewChatLandingScreen } from "@/shell/NewChatDialog";
 import { ResumeWithDirectoryDialog } from "@/shell/ResumeWithDirectoryDialog";
 import { ReconnectSessionDialog } from "@/shell/ReconnectSessionDialog";
 import { useTerminalFirst } from "@/shell/TerminalFirstContext";
@@ -223,11 +247,16 @@ import {
 import { isCodexNativeSession } from "@/lib/codexPlanMode";
 import { getCliServerUrl } from "@/lib/host";
 import { useOmnigentAnalytics } from "@/lib/analyticsEmit";
-import { GoalControl, GoalStatusPill, useGoalState, type Goal } from "@/components/goal";
+import {
+  GoalDialog,
+  CommandGoalDialog,
+  GoalStatusPill,
+  useGoalState,
+  type Goal,
+} from "@/components/goal";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { ConnectionIndicator } from "./ChatIndicators";
-import { CHAT_COLUMN_WIDTH } from "./chatLayout";
 import { Transcript } from "@/components/chat/Transcript";
 
 /** Server-info as consumers see it: the probe's result, or "loading". */
@@ -2182,16 +2211,9 @@ export function composerHarnessLabel(
 function ComposerStatusLine({
   goal,
   isSubAgentSession,
-  onHostReconnect,
 }: {
   goal: Goal | null;
   isSubAgentSession: boolean;
-  /**
-   * Opens the reconnect help dialog, handed to the host badge — which turns
-   * itself into a clickable reconnect affordance when its bound host is
-   * offline and reconnectable.
-   */
-  onHostReconnect?: () => void;
 }) {
   const conversationId = useChatStore((s) => s.conversationId);
   // A client-only temp id has no server session — gate the server-scoped hooks
@@ -2201,16 +2223,6 @@ function ComposerStatusLine({
   const contextWindow = useChatStore((s) => s.contextWindow);
   const tokensUsed = useChatStore((s) => s.tokensUsed);
   const codexPlanMode = useChatStore((s) => s.codexPlanMode);
-  // Seeded from the session snapshot on bind (chatStore.sessionBindingPatch),
-  // alongside contextWindow — so the branch reads from the same store as
-  // the other status-line values rather than a separate fetch.
-  const gitBranch = useChatStore((s) => s.gitBranch);
-
-  // Host binding drives whether the HostBadge has anything to show — read it
-  // from the same source the badge does so the tray's render guard matches.
-  const { session } = useSession(sessionId);
-  const isHostBound = !!session?.hostId;
-
   // PR link → opens the workspace rail's GitHub tab. Shares the info query's
   // cache with the GitHub panel, so opening the tab is instant.
   const github = useGithubInfo(sessionId ?? undefined);
@@ -2218,27 +2230,12 @@ function ComposerStatusLine({
   const prNumber = github.data?.pr?.number ?? null;
   const showPr = !!conversationId && !isSubAgentSession && prNumber !== null && !!openGithubTab;
 
-  const showBranch = !!conversationId && !!gitBranch;
-  // Host indicator (green/red dot + host name), left of the worktree branch.
-  // Hidden on sub-agent sessions — the header's child-session slot owns the
-  // back affordance there, mirroring where this badge used to live. HostBadge
-  // self-hides when the session isn't host-bound, so also gate on isHostBound
-  // (below) before treating the badge as a reason to render the tray.
-  const showHost = !!conversationId && !isSubAgentSession;
   const showPlanMode = !!conversationId && codexPlanMode;
   const showGoal = !!conversationId && goal != null;
   // contextWindow > 0: the SSE path validates it but the snapshot path doesn't, and 0/0 → "NaN%".
   const showRing =
     !!conversationId && contextWindow != null && contextWindow > 0 && tokensUsed != null;
-  // A host-bound session shows the badge, so the tray must render for it even
-  // with no branch/ring yet — otherwise the host + context footer vanishes for
-  // sessions with no worktree branch (e.g. codex) until the ring populates.
-  // This also keeps the offline host's reconnect affordance on screen, since
-  // the badge is where it lives and an unreachable session often has no
-  // branch/ring at all.
-  const showHostBadge = showHost && isHostBound;
-  if (!showBranch && !showPr && !showPlanMode && !showGoal && !showRing && !showHostBadge)
-    return null;
+  if (!showPr && !showPlanMode && !showGoal && !showRing) return null;
 
   return (
     <div
@@ -2246,22 +2243,10 @@ function ComposerStatusLine({
       className={cn(
         // -mt-4 tucks under the card; pt-5.5 keeps content below the overlap.
         "mx-auto -mt-4 flex w-full items-center gap-3 rounded-b-2xl px-4 pb-1.5 pt-5.5",
-        CHAT_COLUMN_WIDTH,
+        COMPOSER_COLUMN_WIDTH,
       )}
     >
-      {/* Left: host + branch. flex-1 keeps the right cluster pinned; truncate, no wrap. */}
       <div className="flex min-w-0 flex-1 items-center gap-3 text-sm text-muted-foreground">
-        {showHost && conversationId && (
-          <HostBadge sessionId={conversationId} onReconnect={onHostReconnect} />
-        )}
-        {showBranch && (
-          <span className="flex min-w-0 items-center gap-1.5">
-            <GitBranchIcon className="ui-icon" />
-            <span data-testid="composer-git-branch" className="min-w-0 truncate" title={gitBranch}>
-              {gitBranch}
-            </span>
-          </span>
-        )}
         {showPr && (
           <button
             type="button"
@@ -2351,7 +2336,7 @@ function SubagentComposerTray({ label }: { label: string }) {
       data-testid="composer-subagent-tray"
       className={cn(
         "mx-auto -mb-4 flex w-full items-center gap-1.5 rounded-t-2xl bg-brand-accent/10 px-4 pt-1.5 pb-5.5 text-sm text-brand-accent",
-        CHAT_COLUMN_WIDTH,
+        COMPOSER_COLUMN_WIDTH,
       )}
     >
       <BotIcon className="size-3.5 shrink-0" aria-hidden="true" />
@@ -2412,7 +2397,7 @@ export function BackgroundTaskPill() {
     // pointer-events-none lets the transcript underneath stay scrollable /
     // selectable — only the pill itself re-enables them.
     <div className="pointer-events-none absolute inset-x-0 bottom-full px-4 md:px-6">
-      <div className={cn("mx-auto flex w-full px-1 pb-1.5", CHAT_COLUMN_WIDTH)}>
+      <div className={cn("mx-auto flex w-full px-1 pb-1.5", COMPOSER_COLUMN_WIDTH)}>
         <div className="pointer-events-auto relative">
           {/* Reserves the collapsed footprint so the absolute, upward-growing
             card never shoves the composer. */}
@@ -2557,6 +2542,7 @@ function ComposerImpl({
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [planModeBusy, setPlanModeBusy] = useState(false);
+  const [goalDialogOpen, setGoalDialogOpen] = useState(false);
   // Index of the highlighted item in the slash-command suggestions menu.
   // -1 means no item highlighted (menu closed or no matches). When the menu
   // opens with matches the reset logic below pre-selects the first item (0)
@@ -2678,6 +2664,37 @@ function ComposerImpl({
   // No server session behind a temp id — gate goal/workspace fetches on it so
   // the create window issues no `/v1/sessions/temp:*` requests.
   const composerSessionId = isTempConvId(conversationId) ? null : conversationId;
+  const { session: composerSession } = useSession(composerSessionId);
+  const composerBranch = useChatStore((s) => s.gitBranch);
+  const claudePermissionMode = useChatStore((s) => s.claudePermissionMode);
+  const codexApprovalMode = useChatStore((s) => s.codexApprovalMode);
+  const [configBusy, setConfigBusy] = useState(false);
+  const configBusyRef = useRef(false);
+  const composerWorkspace = composerSession?.workspace;
+  const permissionOptions = showClaudePermissionMode
+    ? CLAUDE_NATIVE_SWITCHABLE_PERMISSION_MODES
+    : CODEX_NATIVE_RUNTIME_APPROVAL_PRESETS;
+  const permissionLabel = showClaudePermissionMode
+    ? claudePermissionModeLabel(claudePermissionMode)
+    : codexApprovalModeLabel(codexApprovalMode);
+  const changePermission = async (mode: string) => {
+    if (isReadOnly || unreachable || configBusyRef.current) return;
+    configBusyRef.current = true;
+    setConfigBusy(true);
+    const sourceSessionId = useChatStore.getState().conversationId;
+    try {
+      const store = useChatStore.getState();
+      if (showClaudePermissionMode) await store.setClaudePermissionMode(mode);
+      else if (showCodexApprovalMode) await store.setCodexApprovalMode(mode);
+    } catch (error) {
+      if (useChatStore.getState().conversationId === sourceSessionId)
+        setCommandError(error instanceof Error ? error.message : "Unable to change permissions");
+    } finally {
+      configBusyRef.current = false;
+      setConfigBusy(false);
+    }
+  };
+  useEffect(() => setGoalDialogOpen(false), [conversationId]);
   const { goal, setGoal: setGoalState } = useGoalState(
     composerSessionId,
     showGoalControl && runnerOnline === true,
@@ -3458,7 +3475,7 @@ function ComposerImpl({
         }}
         onSteer={(queueId) => steerMessage(queueId)}
         onReorder={reorderQueuedMessage}
-        widthClassName={CHAT_COLUMN_WIDTH}
+        widthClassName={COMPOSER_COLUMN_WIDTH}
       />
       {/* Sub-agent context tray — peeks above the card; reserves its own
           layout slot so the card sits below it (see SubagentComposerTray).
@@ -3467,16 +3484,51 @@ function ComposerImpl({
       {subAgentLabel ? <SubagentComposerTray label={subAgentLabel} /> : null}
       {/* Drop cue, spanning the chat column this composer belongs to. */}
       {isDragActive && dropTarget ? <FileDropOverlay container={dropTarget} /> : null}
-      {/* Single rounded container — textarea + action row. No focus-within
-          ring; drag-over still lifts an inset ring. dark:bg-card-solid so
-          upper trays (queued / sub-agent) don't ghost through glass --card. */}
-      <div
+      <div className={cn("mx-auto", COMPOSER_COLUMN_WIDTH)}>
+        <ComposerWorkspaceBar data-testid="composer-workspace-controls">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <ComposerWorkspaceTrigger
+                kind="directory"
+                label={composerWorkspace?.split(/[\\/]/).filter(Boolean).pop() ?? "No workspace"}
+                title={composerWorkspace ?? "No workspace bound"}
+              />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="top" className="max-w-[min(90vw,24rem)]">
+              <DropdownMenuLabel>Session workspace</DropdownMenuLabel>
+              <p className="break-all px-2 py-1 text-xs text-muted-foreground">
+                {composerWorkspace ?? "This session has no workspace binding."}
+              </p>
+              <p className="px-2 py-1 text-xs text-muted-foreground">
+                Choose a different workspace when starting a new session.
+              </p>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <ComposerWorkspaceTrigger
+                kind="worktree"
+                label={composerBranch || "No branch reported"}
+                data-testid="composer-git-branch"
+              />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="top" className="max-w-[min(90vw,24rem)]">
+              <DropdownMenuLabel>Session worktree</DropdownMenuLabel>
+              <p className="break-all px-2 py-1 text-xs text-muted-foreground">
+                {composerBranch || "The runner has not reported a branch for this session."}
+              </p>
+              <p className="px-2 py-1 text-xs text-muted-foreground">
+                The current session keeps its workspace and worktree.
+              </p>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </ComposerWorkspaceBar>
+      </div>
+      <ChatComposer
         ref={bindComposerCard}
-        // Opaque card edge for transcript clearance; status shelf below is translucent.
-        data-composer-card
         className={cn(
-          "relative mx-auto flex w-full flex-col rounded-2xl border border-border bg-card dark:bg-card-solid shadow-composer transition-[border-color,box-shadow] has-[textarea:focus]:shadow-composer-focus",
-          CHAT_COLUMN_WIDTH,
+          "mx-auto",
+          COMPOSER_COLUMN_WIDTH,
           isDragActive && "ring-2 ring-ring ring-inset",
         )}
       >
@@ -3529,13 +3581,13 @@ function ComposerImpl({
             (text-transparent, caret kept visible) and render an aligned mirror
             behind it. Same box/typography so wrapping matches the textarea
             exactly. Only mounted while the draft is a command. */}
-        <div className="relative overflow-hidden">
+        <ComposerInputArea>
           {composerIsCommand && (
             <div
               ref={backdropRef}
               aria-hidden
               data-testid="composer-highlight-overlay"
-              className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-4 pt-3 pb-2 text-ui text-foreground"
+              className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-3 pt-3 pb-1 text-[13px] leading-[20.8px] text-foreground"
             >
               {(() => {
                 const split = splitSlashCommand(value);
@@ -3550,7 +3602,7 @@ function ComposerImpl({
               })()}
             </div>
           )}
-          <textarea
+          <ComposerTextarea
             ref={textareaRef}
             value={value}
             onChange={(e) => {
@@ -3622,13 +3674,12 @@ function ComposerImpl({
             disabled={disabled || isReadOnly || unreachable || hasPendingElicitation}
             data-slash-command={composerIsCommand ? "true" : undefined}
             className={cn(
-              "relative w-full resize-none overflow-y-auto bg-transparent px-4 pt-3 pb-2 text-ui outline-none [scrollbar-width:none] placeholder:text-muted-foreground disabled:opacity-60 [&::-webkit-scrollbar]:hidden",
               // Hand glyph painting to the overlay while a command is drafted;
               // the caret stays visible via caret-foreground.
               composerIsCommand && "text-transparent caret-foreground",
             )}
           />
-        </div>
+        </ComposerInputArea>
         {/* File chips — shown below textarea when files are attached */}
         {files.length > 0 && (
           <div className="flex flex-wrap gap-1.5 px-4 pb-2">
@@ -3702,26 +3753,80 @@ function ComposerImpl({
             {commandError}
           </div>
         )}
-        <div
-          className="@container/composer-actions flex items-center justify-between gap-2 px-2 pb-2"
-          data-testid="composer-action-row"
-        >
-          {/* Attach + mic — left side of the action row */}
-          <div className="flex shrink-0 items-center gap-0.5">
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="size-9 md:size-8"
-              disabled={disabled || isReadOnly || hasPendingElicitation}
-              onClick={() => fileInputRef.current?.click()}
-              title="Attach files"
-              componentId="chat.composer.attach_files"
-            >
-              <PaperclipIcon className="size-4" data-icon-size="16" />
-              <span className="sr-only">Attach files</span>
-            </Button>
+        <ComposerActionRow data-testid="composer-action-row">
+          <ComposerActionGroup side="left">
+            <ComposerAddMenu
+              disabled={false}
+              attachDisabled={disabled || isReadOnly || hasPendingElicitation}
+              onAttach={() => fileInputRef.current?.click()}
+              showGoal={showGoalControl || showClaudeGoalControl || showPollyCodexGoalControl}
+              onGoal={() => setGoalDialogOpen(true)}
+              goalDisabled={!composerSessionId || (!showGoalControl && isReadOnly)}
+              goalActive={goal !== null}
+              goalDescription={goal ? "View or update your goal" : "Set a goal for this session"}
+              showPlan={showCodexPlanMode}
+              onPlan={() => void toggleCodexPlanMode()}
+              planDisabled={isReadOnly || planModeBusy}
+              planActive={codexPlanMode}
+              planLabel={codexPlanMode ? "Exit Plan mode" : "Enter Plan mode"}
+            />
+            {!subAgentLabel && composerSessionId && (
+              <HostBadge
+                sessionId={composerSessionId}
+                appearance="composer"
+                readOnly={isReadOnly}
+                onReconnect={onShowReconnectHelp}
+              />
+            )}
+            {(showClaudePermissionMode || showCodexApprovalMode) && (
+              <ComposerPermissionPicker
+                label="Permissions"
+                value={permissionLabel || "Permissions"}
+                options={permissionOptions}
+                disabled={isReadOnly || unreachable || configBusy}
+                onSelect={(mode) => void changePermission(mode)}
+              />
+            )}
+          </ComposerActionGroup>
+          <ComposerActionGroup side="right">
+            <div className="flex min-w-0 items-center rounded-lg">
+              <ComposerModelSource
+                modelPickerKind={modelPickerKind}
+                codexModelOptions={codexModelOptions}
+                costRoutingEligible={costRoutingEligible}
+              >
+                <SessionHarnessPicker
+                  busy={configBusy}
+                  busyRef={configBusyRef}
+                  setBusy={setConfigBusy}
+                  agentName={
+                    subAgentName ??
+                    agents?.find((agent) => agent.id === selectedAgentId)?.name ??
+                    agents?.[0]?.name ??
+                    null
+                  }
+                  harnessLabel={harnessLabel}
+                  showModels={showModels}
+                  showEffort={showEffort}
+                  showClaudePermissionMode={showClaudePermissionMode}
+                  showCodexApprovalMode={showCodexApprovalMode}
+                  effortLevels={effortLevels}
+                  modelPickerKind={modelPickerKind}
+                  codexModelOptions={codexModelOptions}
+                  costRoutingEligible={costRoutingEligible}
+                  subagentRoutingEligible={subagentRoutingEligible}
+                  // Config changes persist server-side and apply on the next
+                  // wake/turn (the runner forward is best-effort), so the gear
+                  // stays live wherever a message could be sent — including
+                  // asleep/starting/unknown. Only read-only viewers and sessions
+                  // no message can wake (unreachable) get an inert gear.
+                  disabled={isReadOnly || unreachable}
+                  openNonce={pickerOpenNonce}
+                />
+              </ComposerModelSource>
+            </div>
             <ComposerMicButton
+              className="size-8 md:size-7"
               enableHotkey
               disabled={disabled || isReadOnly || hasPendingElicitation}
               onVoiceStart={() => {
@@ -3744,154 +3849,19 @@ function ComposerImpl({
                 resetCursor();
               }}
             />
-          </div>
-          {/* Right side: read-only model/effort label + config gear + Send.
-              Smart Routing lives inside the gear modal — folded into the Model
-              dropdown for Claude, a standalone Switch for other routable
-              agents. */}
-          <div className="flex min-w-0 items-center gap-0.5">
-            {showCodexPlanMode && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={codexPlanMode ? "secondary" : "ghost"}
-                    className={cn(
-                      "h-9 w-9 gap-0 px-0 text-sm md:h-8 @lg/composer-actions:w-auto @lg/composer-actions:gap-1.5 @lg/composer-actions:px-2",
-                      codexPlanMode && "border border-ring/30 text-foreground",
-                    )}
-                    disabled={isReadOnly || planModeBusy}
-                    aria-pressed={codexPlanMode}
-                    aria-label={codexPlanMode ? "Exit Plan mode" : "Enter Plan mode"}
-                    data-testid="codex-plan-mode-toggle"
-                    data-active={codexPlanMode ? "true" : undefined}
-                    onClick={() => void toggleCodexPlanMode()}
-                    componentId="chat.composer.toggle_plan_mode"
-                  >
-                    {planModeBusy ? (
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                    ) : (
-                      <FileTextIcon className="size-3.5" />
-                    )}
-                    <span className="hidden @lg/composer-actions:inline">Plan</span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {codexPlanMode ? "Exit Plan mode" : "Enter Plan mode"}
-                </TooltipContent>
-              </Tooltip>
-            )}
-            {showGoalControl && (
-              <GoalControl
-                conversationId={conversationId}
-                readOnly={isReadOnly}
-                goal={goal}
-                onGoalChange={setGoalState}
-                backendLabel="Codex"
-              />
-            )}
-            {showClaudeGoalControl && (
-              <GoalControl
-                mode="command"
-                conversationId={conversationId}
-                readOnly={isReadOnly}
-                onStartGoal={(condition) => onSend(`/goal ${condition}`)}
-                backendLabel="Claude"
-              />
-            )}
-            {showPollyCodexGoalControl && (
-              <GoalControl
-                mode="command"
-                conversationId={conversationId}
-                readOnly={isReadOnly}
-                onStartGoal={(condition) => onSend(`/goal ${condition}`)}
-                backendLabel="Codex"
-              />
-            )}
-            <div className="flex min-h-9 min-w-0 items-center rounded-lg transition-colors empty:hidden md:min-h-8 has-[button:not([aria-disabled=true])]:hover:bg-muted dark:has-[button:not([aria-disabled=true])]:hover:bg-muted/50 [&>button]:bg-transparent!">
-              <ComposerModelSource
-                modelPickerKind={modelPickerKind}
-                codexModelOptions={codexModelOptions}
-                costRoutingEligible={costRoutingEligible}
-              >
-                <ComposerModelEffortLabel
-                  showModels={showModels}
-                  showEffort={showEffort}
-                  modelPickerKind={modelPickerKind}
-                  codexModelOptions={codexModelOptions}
-                  costRoutingEligible={costRoutingEligible}
-                  harnessLabel={harnessLabel}
-                  // The pill-wide hover highlight advertises one clickable
-                  // control, so the label half opens the same config modal as
-                  // the gear whenever the gear renders beside it.
-                  onOpenConfig={
-                    hasSessionConfig({
-                      showModels,
-                      showEffort,
-                      costRoutingEligible,
-                      subagentRoutingEligible,
-                      showClaudePermissionMode,
-                      showCodexApprovalMode,
-                    })
-                      ? () => setPickerOpenNonce((n) => n + 1)
-                      : null
-                  }
-                  configDisabled={isReadOnly || unreachable}
-                />
-              </ComposerModelSource>
-              <ComposerConfigGear
-                harnessLabel={harnessLabel}
-                showModels={showModels}
-                showEffort={showEffort}
-                showClaudePermissionMode={showClaudePermissionMode}
-                showCodexApprovalMode={showCodexApprovalMode}
-                effortLevels={effortLevels}
-                modelPickerKind={modelPickerKind}
-                codexModelOptions={codexModelOptions}
-                costRoutingEligible={costRoutingEligible}
-                subagentRoutingEligible={subagentRoutingEligible}
-                // Config changes persist server-side and apply on the next
-                // wake/turn (the runner forward is best-effort), so the gear
-                // stays live wherever a message could be sent — including
-                // asleep/starting/unknown. Only read-only viewers and sessions
-                // no message can wake (unreachable) get an inert gear.
-                disabled={isReadOnly || unreachable}
-                openNonce={pickerOpenNonce}
-              />
-            </div>
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button
-                    type="submit"
-                    size="icon"
-                    variant={showInterruptButton ? "destructive" : "default"}
-                    // Send button fades more decisively when there's no draft —
-                    // overrides the base 50% disabled-opacity so the affordance
-                    // reads as "waiting for input", not "almost active".
-                    className={cn(
-                      "size-9 shrink-0 rounded-lg md:size-8",
-                      !showInterruptButton &&
-                        "hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100",
-                    )}
-                    // Interrupt stays live during a pending elicitation —
-                    // cancelling the turn is the other legitimate way out.
+                  <ComposerSendButton
+                    interrupt={showInterruptButton}
                     disabled={
                       showInterruptButton
                         ? isReadOnly
                         : !hasDraft || disabled || isReadOnly || hasPendingElicitation
                     }
                     title={showInterruptButton ? "Interrupt" : undefined}
-                    aria-label={showInterruptButton ? "Interrupt" : "Send"}
-                  >
-                    {showInterruptButton ? (
-                      <SquareIcon className="size-4 fill-current" />
-                    ) : (
-                      <ArrowUpIcon className="size-4" viewBox="4 4 16 16" />
-                    )}
-                    <span className="sr-only">{showInterruptButton ? "Interrupt" : "Send"}</span>
-                  </Button>
+                    label={showInterruptButton ? "Interrupt" : "Send"}
+                  />
                 </TooltipTrigger>
                 {!showInterruptButton && !preventsKeyboardSubmit && (
                   <KeyboardShortcutTooltipContent
@@ -3901,14 +3871,30 @@ function ComposerImpl({
                 )}
               </Tooltip>
             </TooltipProvider>
-          </div>
-        </div>
-      </div>
-      <ComposerStatusLine
-        goal={goal}
-        isSubAgentSession={subAgentLabel != null}
-        onHostReconnect={onShowReconnectHelp}
-      />
+          </ComposerActionGroup>
+        </ComposerActionRow>
+      </ChatComposer>
+      {showGoalControl ? (
+        <GoalDialog
+          open={goalDialogOpen}
+          onOpenChange={setGoalDialogOpen}
+          conversationId={composerSessionId}
+          readOnly={isReadOnly}
+          goal={goal}
+          onGoalChange={setGoalState}
+        />
+      ) : (
+        (showClaudeGoalControl || showPollyCodexGoalControl) && (
+          <CommandGoalDialog
+            open={goalDialogOpen}
+            onOpenChange={setGoalDialogOpen}
+            readOnly={isReadOnly}
+            onStartGoal={(condition) => onSend(`/goal ${condition}`)}
+            backendLabel={showClaudeGoalControl ? "Claude" : "Codex"}
+          />
+        )
+      )}
+      <ComposerStatusLine goal={goal} isSubAgentSession={subAgentLabel != null} />
     </form>
   );
 }
@@ -4829,17 +4815,11 @@ function hasSessionConfig({
   );
 }
 
-/**
- * Composer gear affordance: a ghost `SettingsIcon` that shows the session's
- * live run-config on hover and opens `SessionConfigModal` on click. Rendered
- * only when the session has at least one switchable knob (model, effort, or
- * smart routing) — otherwise there's nothing to configure.
- *
- * @param openNonce External "open the modal" signal, nonce-keyed so repeat
- *   requests re-open (bare ``/model`` submits and clicks on the pill's
- *   model/effort label half route here). ``0`` / omitted means never requested.
- */
-function ComposerConfigGear({
+function SessionHarnessPicker({
+  busy,
+  busyRef,
+  setBusy,
+  agentName,
   harnessLabel,
   showModels,
   showEffort,
@@ -4853,6 +4833,10 @@ function ComposerConfigGear({
   disabled,
   openNonce = 0,
 }: {
+  busy: boolean;
+  busyRef: { current: boolean };
+  setBusy: (busy: boolean) => void;
+  agentName: string | null;
   harnessLabel: string | null;
   showModels: boolean;
   showEffort: boolean;
@@ -4867,16 +4851,25 @@ function ComposerConfigGear({
   openNonce?: number;
 }) {
   const [open, setOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const appliedOpenNonce = useRef(0);
-  useEffect(() => {
-    if (!openNonce || openNonce === appliedOpenNonce.current) return;
-    // Consume the nonce even when disabled so a later enable doesn't replay a
-    // stale open request; skip opening while the gear is inert (read-only /
-    // unreachable), matching the click guard.
-    appliedOpenNonce.current = openNonce;
-    if (disabled) return;
-    setOpen(true);
-  }, [openNonce, disabled]);
+  const conversationId = useChatStore((state) => state.conversationId);
+  const sessionHarness = useChatStore((state) => state.sessionHarness);
+  const subAgentName = useChatStore((state) => state.subAgentName);
+  const pendingModelChange = useChatStore((state) => state.pendingModelChange);
+  const selectedEffort = useSessionEffort();
+  const costControlModeOverride = useChatStore((state) => state.costControlModeOverride);
+  const routingOn = costRoutingEligible && costControlModeOverride === "on";
+  const { effectiveModel, modelLabel, modelOptions, pickerSelectedModel } =
+    useResolvedComposerModel(modelPickerKind, codexModelOptions);
+  const nativeAgent =
+    nativeCodingAgentForHarness(sessionHarness) ??
+    (modelPickerKind ? nativeCodingAgentForHarness(modelPickerKind + "-native") : undefined);
+  const iconAgent = {
+    name: nativeAgent?.agentName ?? agentName ?? subAgentName ?? "",
+    harness: nativeAgent?.harness ?? sessionHarness,
+  };
   const summary = useSessionConfigSummary({
     harnessLabel,
     showModels,
@@ -4885,67 +4878,227 @@ function ComposerConfigGear({
     codexModelOptions,
     costRoutingEligible,
   });
-
-  if (
-    !hasSessionConfig({
-      showModels,
-      showEffort,
-      costRoutingEligible,
-      subagentRoutingEligible,
-      showClaudePermissionMode,
-      showCodexApprovalMode,
-    })
-  )
-    return null;
-
+  const configurable = hasSessionConfig({
+    showModels,
+    showEffort,
+    costRoutingEligible,
+    subagentRoutingEligible,
+    showClaudePermissionMode,
+    showCodexApprovalMode,
+  });
+  const effortLabel =
+    showEffort && !routingOn
+      ? formatStatusEffortLabel(selectedEffort, modelPickerKind === "codex")
+      : null;
+  const label = routingOn ? SMART_ROUTING_LABEL : (modelLabel ?? harnessLabel ?? "Session");
+  const availableEfforts =
+    modelPickerKind === "codex"
+      ? codexEffortLevelsForModel(codexModelOptions, pickerSelectedModel)
+      : effortLevels;
+  useEffect(() => {
+    if (!openNonce || openNonce === appliedOpenNonce.current) return;
+    appliedOpenNonce.current = openNonce;
+    if (!disabled && configurable) setOpen(true);
+  }, [openNonce, disabled, configurable]);
+  useEffect(() => {
+    setMenuOpen(false);
+    setOpen(false);
+    setError(null);
+  }, [conversationId]);
+  const apply = async (change: () => Promise<unknown>) => {
+    if (disabled || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError(null);
+    const sourceSessionId = useChatStore.getState().conversationId;
+    try {
+      await change();
+    } catch (failure) {
+      if (useChatStore.getState().conversationId === sourceSessionId)
+        setError(
+          failure instanceof Error ? failure.message : "Unable to update session configuration",
+        );
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+  const selectModel = (modelId: string | null) =>
+    void apply(async () => {
+      const store = useChatStore.getState();
+      const sourceSessionId = store.conversationId;
+      await store.setModel(modelId, {
+        expectConfirmation: modelPickerKind === "claude" || modelPickerKind === "codex",
+      });
+      if (
+        costRoutingEligible &&
+        routingOn &&
+        useChatStore.getState().conversationId === sourceSessionId
+      )
+        await store.setCostControlMode("off");
+    });
   return (
     <>
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              // Soft-disable: keep the button hover-able so its tooltip (the
-              // read-only config summary) still shows, but block the click and
-              // dim it. A native `disabled` button swallows pointer events, so
-              // the tooltip would never fire.
-              // The ::before hairline is this gear's divider from the
-              // model/effort label in the composer's split pill. It's drawn
-              // here rather than as a sibling node because the label renders
-              // nothing for some sessions — `first:` then drops the divider.
-              className={cn(
-                "size-9 shrink-0 text-muted-foreground before:absolute before:top-1/2 before:left-0 before:h-4 before:w-px before:-translate-y-1/2 before:bg-border hover:text-foreground first:before:hidden md:size-8",
-                disabled && "cursor-default opacity-50 hover:text-muted-foreground",
-              )}
-              aria-disabled={disabled}
-              onClick={() => {
-                if (disabled) return;
-                setOpen(true);
-              }}
-              data-testid="composer-config-gear"
-              aria-label="Configure session"
-            >
-              <SettingsIcon className="size-4" data-icon-size="16" />
-            </Button>
-          </TooltipTrigger>
-          {summary.length > 0 && (
+      <DropdownMenu
+        open={menuOpen}
+        onOpenChange={(next) => {
+          if (!next || (!disabled && !busy && configurable)) setMenuOpen(next);
+        }}
+      >
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="flex min-w-0">
+                <DropdownMenuTrigger asChild>
+                  <ComposerHarnessTrigger
+                    label="Configure session"
+                    model={label}
+                    effort={effortLabel ?? undefined}
+                    icon={<ComposerAgentIcon agent={iconAgent} />}
+                    disabled={busy || !configurable}
+                    aria-disabled={disabled || busy || !configurable}
+                    className={disabled ? "cursor-default opacity-50" : undefined}
+                    testIdPrefix="composer"
+                    data-testid="composer-config-gear"
+                    pending={
+                      pendingModelChange !== null &&
+                      (modelPickerKind === "claude" || modelPickerKind === "codex")
+                    }
+                  />
+                </DropdownMenuTrigger>
+              </span>
+            </TooltipTrigger>
             <TooltipContent
               side="top"
               className="max-w-80 flex-col items-start gap-0.5 px-3 py-2"
               data-testid="composer-config-gear-tooltip"
             >
               {summary.map((row) => (
-                <span key={row.label} className="max-w-72 truncate text-muted-foreground">
-                  {row.label}:{" "}
-                  <span className="text-background dark:text-popover-foreground">{row.value}</span>
+                <span key={row.label}>
+                  {row.label}: {row.value}
                 </span>
               ))}
             </TooltipContent>
-          )}
-        </Tooltip>
-      </TooltipProvider>
+          </Tooltip>
+        </TooltipProvider>
+        <DropdownMenuContent
+          side="top"
+          align="end"
+          collisionPadding={12}
+          className="composer-agent-menu min-w-[17.5rem] max-w-[calc(100vw-2rem)] p-2"
+          data-testid="composer-agent-menu"
+        >
+          <div
+            title={
+              !costRoutingEligible || !showModels
+                ? "Smart Routing is not available for this session."
+                : undefined
+            }
+          >
+            <DropdownMenuItem
+              disabled={busy || !costRoutingEligible || !showModels}
+              onSelect={() =>
+                void apply(() =>
+                  useChatStore.getState().setCostControlMode(routingOn ? "off" : "on"),
+                )
+              }
+              data-selected={routingOn}
+            >
+              <WandSparklesIcon className="size-4" />
+              <span className="flex-1">{SMART_ROUTING_LABEL}</span>
+              {routingOn && <CheckIcon className="size-4" />}
+            </DropdownMenuItem>
+          </div>
+          <DropdownMenuLabel className="px-2 text-xs font-normal text-muted-foreground">
+            {nativeAgent ? "Harnesses" : "Agents"}
+          </DropdownMenuLabel>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger
+              disabled={busy}
+              className="gap-2"
+              data-testid="composer-agent-edit"
+            >
+              <ComposerAgentIcon agent={iconAgent} />
+              <span className="flex-1">{harnessLabel ?? "Session"}</span>
+              <span className="max-w-32 truncate text-xs text-muted-foreground">
+                {routingOn ? SMART_ROUTING_LABEL : (modelLabel ?? "Default")}
+              </span>
+              <span className="text-xs text-muted-foreground">Edit</span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent
+              className="composer-agent-menu composer-agent-config-menu max-h-[var(--radix-dropdown-menu-content-available-height)] max-w-[calc(100vw-2rem)] overflow-y-auto"
+              data-testid="composer-agent-config-menu"
+            >
+              {showModels && (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>Model</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="composer-agent-menu max-h-[min(28rem,var(--radix-dropdown-menu-content-available-height))] max-w-[calc(100vw-2rem)] overflow-y-auto">
+                    <DropdownMenuItem disabled={busy} onSelect={() => selectModel(null)}>
+                      Default
+                    </DropdownMenuItem>
+                    {modelOptions.map((option) => (
+                      <DropdownMenuItem
+                        key={option.id}
+                        disabled={busy}
+                        onSelect={() => selectModel(option.id)}
+                        data-selected={!routingOn && option.id === pickerSelectedModel}
+                      >
+                        <span className="flex-1">
+                          {option.displayName ?? option.label ?? option.id}
+                        </span>
+                        {!routingOn && option.id === pickerSelectedModel && (
+                          <CheckIcon className="size-4" />
+                        )}
+                      </DropdownMenuItem>
+                    ))}
+                    {effectiveModel &&
+                      !modelOptions.some((option) => option.id === effectiveModel) && (
+                        <DropdownMenuItem disabled>
+                          {modelLabel ?? effectiveModel} (current)
+                        </DropdownMenuItem>
+                      )}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              )}
+              {showEffort && (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger disabled={routingOn || busy}>
+                    Effort
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="composer-agent-menu">
+                    {availableEfforts.map((effort) => (
+                      <DropdownMenuItem
+                        key={effort}
+                        onSelect={() => void apply(() => useChatStore.getState().setEffort(effort))}
+                        data-selected={effort === selectedEffort}
+                      >
+                        <span className="flex-1">{formatEffortLabel(effort)}</span>
+                        {effort === selectedEffort && <CheckIcon className="size-4" />}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              )}
+              <DropdownMenuItem disabled={busy} onSelect={() => setOpen(true)}>
+                Advanced settings…
+              </DropdownMenuItem>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            disabled={busy}
+            onSelect={() => setOpen(true)}
+            data-testid="composer-advanced-settings"
+          >
+            Advanced settings…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {error && (
+        <span role="alert" className="max-w-40 text-xs text-destructive">
+          {error}
+        </span>
+      )}
       <SessionConfigModal
         open={open}
         onOpenChange={setOpen}
@@ -5174,128 +5327,5 @@ function ComposerModelSource({
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
-  );
-}
-
-/**
- * ``<Model> <Effort>`` label in the composer, left of the config gear — model
- * in the foreground, effort muted. Renders nothing when neither is
- * known/switchable (the harness identity and full config live in the gear
- * tooltip/modal). The pill's hover highlight spans both halves, so when the
- * gear renders the label is a button opening the same session-config modal —
- * the click target matches the hover affordance; without a gear it stays a
- * plain read-only span.
- *
- * @param showModels Whether the session exposes a model to surface.
- * @param showEffort Whether the session exposes a reasoning-effort level.
- * @param modelPickerKind Native picker family, or ``null`` for SDK/bundle.
- * @param codexModelOptions Server-provided model options (codex/cursor/…).
- * @param costRoutingEligible Whether Smart Routing is offered for this session.
- * @param harnessLabel Harness identity (e.g. "Polly (Pi)"), used as the label
- *   fallback for SDK/bundle agents that surface no model/effort.
- * @param onOpenConfig Opens the session-config modal; ``null`` when the gear
- *   isn't rendered, which keeps the label non-interactive.
- * @param configDisabled Mirrors the gear's inert state (read-only viewer /
- *   unreachable session): soft-disables the click without dimming the label.
- */
-function ComposerModelEffortLabel({
-  showModels,
-  showEffort,
-  modelPickerKind,
-  codexModelOptions,
-  costRoutingEligible,
-  harnessLabel,
-  onOpenConfig = null,
-  configDisabled = false,
-}: {
-  showModels: boolean;
-  showEffort: boolean;
-  modelPickerKind: NativeModelPickerKind | null;
-  codexModelOptions: readonly NativeModelOption[];
-  costRoutingEligible: boolean;
-  harnessLabel: string | null;
-  onOpenConfig?: (() => void) | null;
-  configDisabled?: boolean;
-}) {
-  const selectedEffort = useSessionEffort();
-  const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
-  const pendingModelChange = useChatStore((s) => s.pendingModelChange);
-  const { modelLabel } = useResolvedComposerModel(modelPickerKind, codexModelOptions);
-  const routingOn = costRoutingEligible && costControlModeOverride === "on";
-  // An asked-but-unconfirmed switch on a reported-model session: the chip
-  // keeps the harness's model; this spinner is the honest "asked, not yet
-  // true" marker until the report (or the not-applied error) settles it.
-  const modelPending =
-    pendingModelChange !== null && (modelPickerKind === "claude" || modelPickerKind === "codex") ? (
-      <Loader2Icon
-        data-testid="composer-model-pending"
-        aria-label="Model change pending"
-        className="ml-1 inline size-3 shrink-0 animate-spin text-muted-foreground"
-      />
-    ) : null;
-  const effortLabel =
-    showEffort && selectedEffort
-      ? formatStatusEffortLabel(selectedEffort, modelPickerKind === "codex")
-      : null;
-  // SDK/bundle sessions (no native picker) still surface their resolved model
-  // in the label even though the gear modal has no Model dropdown for them —
-  // showModels gates only the modal control, not this read-out.
-  const model = showModels || modelPickerKind === null ? modelLabel : null;
-
-  let content: ReactNode;
-  if (routingOn) {
-    // Routing picks the model + effort per turn, so the label reads
-    // "Smart Routing" with no pinned model/effort — matching the tooltip.
-    content = <span className="text-foreground">{SMART_ROUTING_LABEL}</span>;
-  } else if (!model && !effortLabel) {
-    // SDK/bundle agents (e.g. Polly) that resolve no model/effort fall back to
-    // the harness identity ("Polly (Pi)") so the slot isn't empty. Scoped to
-    // SDK/bundle (modelPickerKind === null): native wrappers keep an empty label
-    // when their model is unresolved rather than surfacing the bare vendor name,
-    // which the gear tooltip already shows.
-    if (modelPickerKind !== null || !harnessLabel) return null;
-    content = <span className="text-foreground">{harnessLabel}</span>;
-  } else {
-    content = (
-      <>
-        {model && <span className="text-foreground">{model}</span>}
-        {model && effortLabel && " "}
-        {effortLabel && <span className="text-muted-foreground">{effortLabel}</span>}
-        {modelPending}
-      </>
-    );
-  }
-
-  const labelClass =
-    "min-w-0 shrink truncate pl-2.5 pr-2 text-sm tabular-nums text-muted-foreground";
-  if (!onOpenConfig) {
-    return (
-      <span data-testid="composer-model-effort-label" className={labelClass}>
-        {content}
-      </span>
-    );
-  }
-  // The pill highlights as one control when hovered anywhere, so the label
-  // half must act like the gear beside it: clicking opens the same config
-  // modal. Soft-disable (aria-disabled) mirrors the gear so the pill's hover
-  // highlight drops with it, while the label text stays fully readable.
-  return (
-    <button
-      type="button"
-      data-testid="composer-model-effort-label"
-      aria-haspopup="dialog"
-      aria-disabled={configDisabled}
-      onClick={() => {
-        if (configDisabled) return;
-        onOpenConfig();
-      }}
-      className={cn(
-        labelClass,
-        "h-9 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring md:h-8",
-        configDisabled ? "cursor-default" : "cursor-pointer",
-      )}
-    >
-      {content}
-    </button>
   );
 }

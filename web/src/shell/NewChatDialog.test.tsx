@@ -28,6 +28,7 @@ import {
   NewChatLandingScreen,
   resetLandingDraft,
 } from "./NewChatDialog";
+import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import { authenticatedFetch } from "@/lib/identity";
@@ -59,6 +60,71 @@ import {
 import { writeHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
 import { setPendingInitialPrompt } from "@/store/chatStore";
 import { TooltipProvider } from "@/components/ui/tooltip";
+
+describe("ComposerAddMenu", () => {
+  it("groups real actions and opens the existing attachment picker only after selection", () => {
+    const onAttach = vi.fn();
+    const onPlan = vi.fn();
+    render(
+      <form>
+        <ComposerAddMenu
+          disabled={false}
+          onAttach={onAttach}
+          onPlan={onPlan}
+          planActive={false}
+          projects={[]}
+          onProjectSelect={vi.fn()}
+        />
+      </form>,
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Add" }), { button: 0 });
+    const menu = screen.getByRole("menu", { name: "Add" });
+    expect(within(menu).getByText("Session")).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: /Goal/ })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(onAttach).not.toHaveBeenCalled();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Files and images" }));
+    expect(onAttach).toHaveBeenCalledOnce();
+    expect(onPlan).not.toHaveBeenCalled();
+  });
+
+  it("opens project choices in place and calls the real project selection handler", () => {
+    const onProjectSelect = vi.fn();
+    render(
+      <ComposerAddMenu
+        disabled={false}
+        onAttach={vi.fn()}
+        planActive={false}
+        projects={[{ name: "docs" }, { name: "app" }]}
+        onProjectSelect={onProjectSelect}
+      />,
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Add" }), { button: 0 });
+    fireEvent.click(screen.getByRole("menuitem", { name: /Work in a project/ }));
+    expect(screen.getByText("Choose a project")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "docs" }));
+    expect(onProjectSelect).toHaveBeenCalledWith("docs");
+  });
+
+  it("enables plan mode through the existing harness handler", () => {
+    const onPlan = vi.fn();
+    render(
+      <ComposerAddMenu
+        disabled={false}
+        onAttach={vi.fn()}
+        onPlan={onPlan}
+        planActive={false}
+        projects={[]}
+        onProjectSelect={vi.fn()}
+      />,
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Add" }), { button: 0 });
+    fireEvent.click(screen.getByRole("menuitem", { name: /Plan/ }));
+    expect(onPlan).toHaveBeenCalledOnce();
+  });
+});
 
 // Only authenticatedFetch is stubbed (the create POST under test);
 // the module's other exports stay real for any other consumer in the tree.
@@ -1506,13 +1572,15 @@ describe("NewChatLandingScreen", () => {
     expect(attach).toHaveClass("size-8", "md:size-7");
     expect(hostChip).toHaveClass(
       "h-8",
-      "gap-1",
+      "gap-0.5",
       "rounded-lg",
       "bg-transparent",
-      "px-1.5",
+      "w-11",
+      "pl-1",
+      "pr-2",
       "md:h-7",
     );
-    expect(hostChip).not.toHaveClass("w-10", "md:w-11", "p-0", "gap-0.5", "justify-center");
+    expect(hostChip).toHaveClass("justify-center");
     expect(hostChip).toHaveAttribute("title", "Host: This machine, Online");
     expect(permission).toHaveClass(
       "size-8",
@@ -1611,8 +1679,8 @@ describe("NewChatLandingScreen", () => {
       "data-icon-size",
       "16",
     );
-    expect(screen.getByTestId("new-chat-landing-host-status")).toHaveClass("size-1");
-    expect(screen.getByTestId("new-chat-landing-host-icon")).toHaveClass("size-3.5");
+    expect(screen.getByTestId("new-chat-landing-host-status")).toHaveClass("size-2");
+    expect(screen.getByTestId("new-chat-landing-host-icon")).toHaveClass("size-4");
     expect(screen.queryByTestId("new-chat-landing-footer")).toBeNull();
     expect(composerSurface).toContainElement(composer);
     expect(composerSurface).not.toContainElement(notices);
@@ -2833,8 +2901,10 @@ describe("NewChatLandingScreen", () => {
     );
     expect(screen.getByTestId("new-chat-landing-host-chip")).toHaveClass(
       "h-8",
-      "gap-1",
-      "px-1.5",
+      "gap-0.5",
+      "w-11",
+      "pl-1",
+      "pr-2",
       "bg-transparent",
       "md:h-7",
     );
