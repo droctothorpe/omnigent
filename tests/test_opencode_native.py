@@ -49,17 +49,13 @@ class _FakeClient:
 # ── _materialize_opencode_agent_spec ────────────────────────────────────────
 
 
-def test_materialize_spec_defaults_no_model(tmp_path: Path, monkeypatch) -> None:
-    # Pin the host shells so the declared terminals are deterministic.
-    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setenv("SHELL", "/bin/zsh")
+def test_materialize_spec_defaults_no_model(tmp_path: Path) -> None:
     spec = yaml.safe_load(_materialize_opencode_agent_spec(tmp_path).read_text())
     assert spec["executor"] == {"harness": "opencode-native"}
     assert spec["spawn"] is True
-    # One terminal per installed shell, $SHELL first — a non-empty block gates
-    # the relay's sys_terminal_* advertisement.
-    assert list(spec["terminals"]) == ["zsh", "bash", "fish"]
-    assert spec["terminals"]["zsh"]["command"] == "zsh"
+    # Bundles carry a portable fallback until a host-bound runner replaces it.
+    assert list(spec["terminals"]) == ["bash"]
+    assert spec["terminals"]["bash"]["command"] == "bash"
 
 
 def test_materialize_spec_pins_model(tmp_path: Path) -> None:
