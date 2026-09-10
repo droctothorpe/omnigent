@@ -11,7 +11,7 @@ import os
 import tempfile
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -31,6 +31,7 @@ from omnigent.claude_native_bridge import (
     compute_transcript_cumulative_cost,
     read_active_session_id,
     read_bridge_id,
+    read_btw_overlay,
     read_claude_context_state,
     read_claude_session_id,
     read_hook_events_from_offset,
@@ -89,6 +90,14 @@ _DEFAULT_POLL_INTERVAL_S = 0.25
 # it runs well below the poll interval; a mode switch is a human action and 2s
 # of lag is imperceptible.
 _PERMISSION_MODE_POLL_INTERVAL_S = 2.0
+# Minimum spacing between /btw overlay pane reads. Like the permission-mode
+# mirror this spawns a ``tmux capture-pane`` subprocess, and a side-chat is a
+# human action, so a ~1s cadence is ample without churning subprocesses.
+_BTW_OVERLAY_POLL_INTERVAL_S = 1.0
+# Bound on the per-session ring of already-relayed /btw exchange keys. The
+# overlay persists (and stacks history) across polls, so a handful of keys
+# covers a session's side chats while keeping the dedupe set small.
+_MAX_SEEN_BTW_KEYS = 64
 # Hard ceiling on one poll iteration of the forward loop. A silently stalled
 # await anywhere in the pipeline used to stop mirroring, status and the busy
 # signal forever; the deadline cancels the stall (the traceback names it) and
@@ -593,6 +602,16 @@ class _ForwardDedupeState:
     # whose ``PreCompact`` was missed from later hijacking an unrelated
     # genuine compaction's token.
     pending_compaction_dismiss_seq: int | None = None
+    # /btw side-chat relay. The overlay is never persisted (transcript,
+    # deltas and hooks are all empty for it), so it is scraped read-only from
+    # the pane. ``btw_next_read`` throttles the capture subprocess.
+    # ``posted_btw_keys`` rings the (question, answer) hashes already relayed
+    # so the persistent, history-stacking overlay isn't re-posted every poll.
+    # ``btw_pending_key`` requires the same exchange on two consecutive reads
+    # before posting, so a torn capture can't relay a partial answer.
+    btw_next_read: float = 0.0
+    btw_pending_key: str | None = None
+    posted_btw_keys: dict[str, None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1071,6 +1090,16 @@ async def forward_claude_transcript_to_session(
                             client=client,
                             session_id=current_session_id,
                             bridge_dir=bridge_dir,
+                            dedupe=dedupe,
+                        )
+                        # A /btw side-chat answers only in the pane overlay
+                        # (never the transcript/deltas/hooks), so scrape and
+                        # mirror the settled exchange into the web view.
+                        await _forward_btw_overlay_from_pane(
+                            client=client,
+                            session_id=current_session_id,
+                            bridge_dir=bridge_dir,
+                            agent_name=agent_name,
                             dedupe=dedupe,
                         )
             except asyncio.CancelledError:
@@ -4371,6 +4400,99 @@ async def _forward_permission_mode_from_pane(
         )
         return
     dedupe.posted_permission_mode = mode
+
+
+async def _forward_btw_overlay_from_pane(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    bridge_dir: Path,
+    agent_name: str,
+    dedupe: _ForwardDedupeState,
+) -> None:
+    """
+    Mirror a completed Claude Code ``/btw`` side-chat into the web view.
+
+    ``/btw`` answers live only in the in-TUI overlay — never in the
+    transcript, the message-deltas file, or a hook — so the transcript
+    forwarder relays nothing and the web composer that submitted a ``/btw``
+    is left with a stuck, unanswered bubble. This scrapes the settled
+    overlay (read-only, no keystrokes → no race with the executor's pane
+    writes) and posts the exchange as one user message (the ``/btw`` line,
+    which reconciles the composer's optimistic bubble) plus one assistant
+    message (the answer). Both entry points are covered: a ``/btw`` typed in
+    the web composer or directly in the embedded terminal.
+
+    Best-effort: a long answer the pane clipped is relayed with a note
+    pointing at the terminal (read-only capture cannot page the overlay).
+    Deduped so the persistent, history-stacking overlay posts each distinct
+    exchange once; a failed POST simply retries next poll.
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id.
+    :param bridge_dir: Native Claude bridge directory.
+    :param agent_name: Agent/model name stamped on the assistant message.
+    :param dedupe: Shared per-session dedupe state; mutated in place.
+    """
+    now = time.monotonic()
+    if now < dedupe.btw_next_read:
+        return
+    dedupe.btw_next_read = now + _BTW_OVERLAY_POLL_INTERVAL_S
+    overlay = await asyncio.to_thread(read_btw_overlay, bridge_dir)
+    if overlay is None:
+        dedupe.btw_pending_key = None
+        return
+    key = hashlib.sha256(f"{overlay.question or ''}\x00{overlay.answer}".encode()).hexdigest()
+    if key in dedupe.posted_btw_keys:
+        return
+    # Require the same exchange on two consecutive reads before relaying so a
+    # torn capture (footer read, answer still painting) can't post a partial.
+    if dedupe.btw_pending_key != key:
+        dedupe.btw_pending_key = key
+        return
+    response_id = f"btw-{key[:12]}"
+    answer_text = overlay.answer
+    if overlay.truncated:
+        answer_text = (
+            f"{answer_text}\n\n_(This `/btw` side-chat answer may be truncated — "
+            "open the terminal to read the full response.)_"
+        )
+    user_item = ClaudeTranscriptItem(
+        source_id=f"btw:{key}:user",
+        item_type="message",
+        data={
+            "role": "user",
+            "content": [{"type": "input_text", "text": overlay.question or "/btw"}],
+        },
+        response_id=response_id,
+    )
+    assistant_item = ClaudeTranscriptItem(
+        source_id=f"btw:{key}:assistant",
+        item_type="message",
+        data={
+            "role": "assistant",
+            "agent": agent_name,
+            "content": [{"type": "output_text", "text": answer_text}],
+        },
+        response_id=response_id,
+    )
+    try:
+        await _post_external_conversation_item(client, session_id=session_id, item=user_item)
+        await _post_external_conversation_item(client, session_id=session_id, item=assistant_item)
+    except httpx.HTTPError:
+        # Leave the exchange un-relayed (not in ``posted_btw_keys``) so the
+        # next poll retries; the overlay persists until dismissed.
+        _logger.debug(
+            "claude-native /btw relay post failed; session=%s",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+        return
+    dedupe.posted_btw_keys[key] = None
+    dedupe.btw_pending_key = None
+    while len(dedupe.posted_btw_keys) > _MAX_SEEN_BTW_KEYS:
+        dedupe.posted_btw_keys.pop(next(iter(dedupe.posted_btw_keys)))
 
 
 async def _post_external_model_change(

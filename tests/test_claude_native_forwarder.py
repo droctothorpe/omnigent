@@ -26,6 +26,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 import omnigent.claude_native_forwarder as forwarder
 from omnigent.claude_native_bridge import (
     BRIDGE_ID_LABEL_KEY,
+    BtwOverlay,
     ClaudeMessageDelta,
     ClaudeTranscriptItem,
     prepare_bridge_dir,
@@ -8670,3 +8671,117 @@ async def test_forward_loop_deadline_unsticks_a_stalled_iteration(
     assert stall_warnings, "the deadline trip must be loudly logged, never silent"
     # The warning's traceback names the stalled await for next-time forensics.
     assert stall_warnings[0].exc_info is not None
+
+
+# ── /btw side-chat overlay relay ───────────────────────────────────
+
+
+def _btw_recording_client_calls() -> tuple[list[dict[str, Any]], httpx.MockTransport]:
+    """
+    Build a MockTransport that records POST bodies for /btw relay tests.
+
+    :returns: The shared ``calls`` list and the transport to hand an
+        ``httpx.AsyncClient``.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Record each POST body and return a benign success."""
+        calls.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"queued": False, "item_id": "item_x"})
+
+    return calls, httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_forward_btw_overlay_relays_after_stability_then_dedupes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A settled /btw overlay relays a user + assistant message once.
+
+    The first poll only records the exchange as pending (torn-capture
+    guard); the second poll (same exchange) posts both items under one
+    response id; the third poll is deduped and posts nothing.
+    """
+    overlay = BtwOverlay(question="/btw is this ok?", answer="Yes, all good.", truncated=False)
+    monkeypatch.setattr(forwarder, "read_btw_overlay", lambda _bridge_dir: overlay)
+    dedupe = forwarder._ForwardDedupeState()
+    calls, transport = _btw_recording_client_calls()
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+        for _ in range(3):
+            dedupe.btw_next_read = 0.0  # bypass the per-poll throttle
+            await forwarder._forward_btw_overlay_from_pane(
+                client,
+                session_id="conv1",
+                bridge_dir=tmp_path,
+                agent_name="claude-native-ui",
+                dedupe=dedupe,
+            )
+
+    assert len(calls) == 2
+    user_body, assistant_body = calls
+    assert user_body["type"] == "external_conversation_item"
+    assert user_body["data"]["item_type"] == "message"
+    assert user_body["data"]["item_data"]["role"] == "user"
+    assert user_body["data"]["item_data"]["content"][0]["text"] == "/btw is this ok?"
+    assert assistant_body["data"]["item_data"]["role"] == "assistant"
+    assert assistant_body["data"]["item_data"]["agent"] == "claude-native-ui"
+    assert assistant_body["data"]["item_data"]["content"][0]["text"] == "Yes, all good."
+    # Both items group under one synthetic response id.
+    assert user_body["data"]["response_id"] == assistant_body["data"]["response_id"]
+
+
+@pytest.mark.asyncio
+async def test_forward_btw_overlay_appends_truncation_note(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A truncated overlay relays the visible answer plus a terminal note."""
+    overlay = BtwOverlay(question="/btw big", answer="line1\nline2", truncated=True)
+    monkeypatch.setattr(forwarder, "read_btw_overlay", lambda _bridge_dir: overlay)
+    dedupe = forwarder._ForwardDedupeState()
+    calls, transport = _btw_recording_client_calls()
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+        for _ in range(2):
+            dedupe.btw_next_read = 0.0
+            await forwarder._forward_btw_overlay_from_pane(
+                client,
+                session_id="conv1",
+                bridge_dir=tmp_path,
+                agent_name="claude-native-ui",
+                dedupe=dedupe,
+            )
+
+    assert len(calls) == 2
+    answer_text = calls[1]["data"]["item_data"]["content"][0]["text"]
+    assert answer_text.startswith("line1\nline2")
+    assert "may be truncated" in answer_text
+
+
+@pytest.mark.asyncio
+async def test_forward_btw_overlay_no_overlay_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No visible overlay posts nothing and clears any pending key."""
+    monkeypatch.setattr(forwarder, "read_btw_overlay", lambda _bridge_dir: None)
+    dedupe = forwarder._ForwardDedupeState()
+    dedupe.btw_pending_key = "stale"
+    calls, transport = _btw_recording_client_calls()
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+        dedupe.btw_next_read = 0.0
+        await forwarder._forward_btw_overlay_from_pane(
+            client,
+            session_id="conv1",
+            bridge_dir=tmp_path,
+            agent_name="claude-native-ui",
+            dedupe=dedupe,
+        )
+
+    assert calls == []
+    assert dedupe.btw_pending_key is None
