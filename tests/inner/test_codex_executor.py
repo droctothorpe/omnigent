@@ -3840,6 +3840,38 @@ def test_clean_codex_env_deny_wins_over_extra_allow(monkeypatch):
     assert "OPENAI_API_KEY" not in _clean_codex_env(["OPENAI_API_KEY"])
 
 
+def test_clean_codex_env_normalizes_non_interactive_term(monkeypatch) -> None:
+    """A dumb, empty, or unset host ``TERM`` becomes a real terminal type.
+
+    Headless host daemons run under ``TERM=dumb`` (or no TERM at all), and
+    codex answers a non-interactive TERM with a TUI-only "Continue anyway?
+    [y/N]" confirmation; the subprocess's stdin is DEVNULL, so it declines
+    and exits without serving and the session never starts. The env handed
+    to codex must therefore never carry a non-interactive TERM.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    from omnigent.inner.codex_executor import _clean_codex_env
+
+    for hostile in ("dumb", ""):
+        monkeypatch.setenv("TERM", hostile)
+        assert _clean_codex_env()["TERM"] == "xterm-256color"
+
+    monkeypatch.delenv("TERM", raising=False)
+    assert _clean_codex_env()["TERM"] == "xterm-256color"
+
+
+def test_clean_codex_env_preserves_interactive_term(monkeypatch) -> None:
+    """A genuine terminal type passes through to codex unchanged.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    from omnigent.inner.codex_executor import _clean_codex_env
+
+    monkeypatch.setenv("TERM", "tmux-256color")
+    assert _clean_codex_env()["TERM"] == "tmux-256color"
+
+
 def test_declared_passthrough_reads_sandbox_env_passthrough():
     # Codex consumes the shared helper in agent_env rather than keeping its own
     # copy; this still covers the codex spawn path's source of extra_allowed.

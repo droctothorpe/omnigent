@@ -498,9 +498,14 @@ def _clean_codex_env(extra_allow: Iterable[str] = ()) -> dict[str, str]:
     codex signals back out of it, so those names have to survive the filter
     (see :data:`_CODEX_OMNIGENT_LAUNCH_ENV_VARS`).
 
+    A dumb/unset ``TERM`` (a headless host daemon's) is normalized to a real
+    terminal type: codex answers it with an interactive "Continue anyway?
+    [y/N]" confirmation that no stdin-less subprocess can satisfy, so it would
+    exit before serving instead of starting.
+
     :returns: Filtered environment dict.
     """
-    return clean_agent_env(
+    env = clean_agent_env(
         allow_prefixes=("OPENAI_", "REQUESTS_", "CODEX_HOME"),
         allow_exact=(
             "PYTHONUTF8",
@@ -520,6 +525,11 @@ def _clean_codex_env(extra_allow: Iterable[str] = ()) -> dict[str, str]:
         deny_exact=_CODEX_ENV_DENY_EXACT,
         extra_allowed=extra_allow,
     )
+    # Every codex here runs headless (stdin=DEVNULL); a dumb/unset TERM makes
+    # the CLI block on its TUI-only TERM confirmation and exit without serving.
+    if env.get("TERM", "") in ("", "dumb"):
+        env["TERM"] = "xterm-256color"
+    return env
 
 
 def codex_skill_sources(
