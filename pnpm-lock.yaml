@@ -19,7 +19,7 @@ overrides:
   qs: 6.16.0
   query-string: 9.5.0
   '@hono/node-server': 1.19.15
-  hono: 4.12.34
+  hono: 4.13.5
   linkify-it: 5.0.2
   shiki: 4.2.0
   react: ^18.2.0
@@ -1435,7 +1435,7 @@ packages:
     resolution: {integrity: sha512-Za2ai6TLdKjUvnur+eenO6nuYYipVAEhyCAdaV8IRvmU9kK8crOZUSYvIXn72E4f8fJqyAbpcJuTsYYmZp9Deg==}
     engines: {node: '>=18.14.1'}
     peerDependencies:
-      hono: 4.12.34
+      hono: 4.13.5
 
   '@iconify/types@2.0.0':
     resolution: {integrity: sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==}
@@ -4006,6 +4006,7 @@ packages:
   '@testing-library/jest-dom@6.10.0':
     resolution: {integrity: sha512-HQwu0KaB2zyT0iLzBL+8CLyZDL3KlZlZJ+2iyc9uCUnlJVskJU/UlPuVCyIPhtukjPQdT2QNoR5nCP5FqTmmDQ==}
     engines: {node: '>=22', npm: '>=6', yarn: '>=1'}
+    deprecated: Incorrect minor release with breaking changes (Node >=22 and required @testing-library/dom peer). Use 6.9.1 for the 6.x line, or upgrade to 7.0.0.
     peerDependencies:
       '@testing-library/dom': '>=10 <11'
       vitest: '*'
@@ -6192,8 +6193,8 @@ packages:
   hoist-non-react-statics@3.3.2:
     resolution: {integrity: sha512-/gGivxi8JPKWNm/W0jSmzcMPpfpPLc3dY/6GxhX2hQ9iGj3aDfklV4ET7NjKpSinLpJ5vafa9iiGIEZg10SfBw==}
 
-  hono@4.12.34:
-    resolution: {integrity: sha512-GqXJqY/xJkJmuloTrnV1ZEXG3fqte+VjkUqoRNZXcrUidiUOP4fMSIHHY4tsqZBK++kVyWmt/AAfSUuy57/eSA==}
+  hono@4.13.5:
+    resolution: {integrity: sha512-O6+/eCYRkzzzy0rPWwKLiGBR1nFuUPZynnwjxN1MBA62NNqbT0wQEzQyK2gSO5yDIDB336sXQleAhOHrzlYyKw==}
     engines: {node: '>=16.9.0'}
 
   hosted-git-info@4.1.0:
@@ -10658,9 +10659,9 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@hono/node-server@1.19.15(hono@4.12.34)':
+  '@hono/node-server@1.19.15(hono@4.13.5)':
     dependencies:
-      hono: 4.12.34
+      hono: 4.13.5
 
   '@iconify/types@2.0.0': {}
 
@@ -11097,7 +11098,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.29.0(supports-color@10.2.2)(zod@3.25.76)':
     dependencies:
-      '@hono/node-server': 1.19.15(hono@4.12.34)
+      '@hono/node-server': 1.19.15(hono@4.13.5)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -11107,7 +11108,7 @@ snapshots:
       eventsource-parser: 3.1.0
       express: 5.2.1(supports-color@10.2.2)
       express-rate-limit: 8.6.0(express@5.2.1(supports-color@10.2.2))(supports-color@10.2.2)
-      hono: 4.12.34
+      hono: 4.13.5
       jose: 6.2.3
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -11119,7 +11120,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.29.0(supports-color@10.2.2)(zod@4.4.3)':
     dependencies:
-      '@hono/node-server': 1.19.15(hono@4.12.34)
+      '@hono/node-server': 1.19.15(hono@4.13.5)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -11129,7 +11130,7 @@ snapshots:
       eventsource-parser: 3.1.0
       express: 5.2.1(supports-color@10.2.2)
       express-rate-limit: 8.6.0(express@5.2.1(supports-color@10.2.2))(supports-color@10.2.2)
-      hono: 4.12.34
+      hono: 4.13.5
       jose: 6.2.3
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -15924,7 +15925,7 @@ snapshots:
     dependencies:
       react-is: 16.13.1
 
-  hono@4.12.34: {}
+  hono@4.13.5: {}
 
   hosted-git-info@4.1.0:
     dependencies:
