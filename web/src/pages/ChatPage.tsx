@@ -164,6 +164,7 @@ import {
 } from "@/components/SlashCommandMenu";
 import { FileMentionMenu } from "@/components/FileMentionMenu";
 import { FileDropOverlay } from "@/components/FileDropOverlay";
+import { FilePathAwareMessageResponse } from "@/components/blocks/ChatMarkdown";
 import {
   useWorkspaceAllFiles,
   useWorkspaceDirectory,
@@ -2584,6 +2585,10 @@ function ComposerImpl({
   // Text + attachments handed back by a send that failed before the server
   // took ownership. Drained below so the message can be retried.
   const failedSendDraft = useChatStore((s) => s.failedSendDraft);
+  // A settled /btw side-chat overlay is open, so Escape dismisses it here
+  // (before the "Esc cancels turn" branch) rather than interrupting a turn.
+  const btwSidechat = useChatStore((s) => s.btwSidechat);
+  const dismissBtwSidechat = useChatStore((s) => s.dismissBtwSidechat);
   // The conversation whose draft the composer's value/files currently hold.
   // Trails `conversationId` by one commit across a session switch; see the
   // draft-restore effect.
@@ -3362,6 +3367,12 @@ function ComposerImpl({
       submit();
       return;
     }
+    // Esc dismisses the /btw sidechat overlay if open
+    if (e.key === "Escape" && btwSidechat) {
+      e.preventDefault();
+      dismissBtwSidechat();
+      return;
+    }
     // Esc cancels an in-flight turn. When idle it's a no-op — clearing on
     // Esc destroys typed prompts with no undo (common muscle memory after
     // dismissing autocomplete suggestions).
@@ -3507,6 +3518,36 @@ function ComposerImpl({
             onOpenDir={openMentionDir}
             onAttach={attachMention}
           />
+        )}
+        {/* /btw sidechat overlay — transient question+answer panel */}
+        {btwSidechat && (
+          <div className="border-b border-border bg-card/50 backdrop-blur-sm p-4">
+            <div className="mb-3 flex items-start justify-between">
+              <h3 className="font-medium text-sm">Claude Quick Answer</h3>
+              <button
+                type="button"
+                onClick={() => dismissBtwSidechat()}
+                className="rounded-full text-muted-foreground hover:text-foreground p-0.5"
+                aria-label="Close sidebar"
+              >
+                <XIcon className="size-4" />
+              </button>
+            </div>
+            <div className="mb-2">
+              <p className="text-xs text-muted-foreground mb-1">Question:</p>
+              <p className="text-sm">{btwSidechat.question}</p>
+            </div>
+            <div className="mb-2">
+              <p className="text-xs text-muted-foreground mb-1">Answer:</p>
+              <div className="text-sm prose prose-sm dark:prose-invert max-w-none">
+                <FilePathAwareMessageResponse>{btwSidechat.answer}</FilePathAwareMessageResponse>
+              </div>
+            </div>
+            {btwSidechat.truncated && (
+              <p className="text-xs text-muted-foreground italic">Answer was truncated</p>
+            )}
+            <p className="text-xs text-muted-foreground mt-2">Press Esc to close</p>
+          </div>
         )}
         {/* Quote chips — one per quoted selection, shown above the textarea */}
         {replyQuotes.length > 0 && (
