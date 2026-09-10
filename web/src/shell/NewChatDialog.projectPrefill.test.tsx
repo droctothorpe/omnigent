@@ -425,7 +425,7 @@ describe("NewChatLandingScreen project prefill", () => {
     const body = await submitAndReadBody();
     expect(body.host_id).toBe("host_1");
     expect("workspace" in body).toBe(false);
-    // The branch name is generated client-side, so `git` is always explicit.
+    // A settled seed rides explicitly (the server fills only an ABSENT git).
     expect((body.git as { branch_name: string }).branch_name).toMatch(/^worktree-[0-9a-f]{8}$/);
   });
 
@@ -1014,5 +1014,89 @@ describe("NewChatLandingScreen global always-use-worktree default", () => {
     const body = await submitAndReadBody();
     expect(body.workspace).toBe(REPO);
     expect(body.git).toBeUndefined();
+  });
+});
+
+describe("NewChatLandingScreen project worktree default protocol", () => {
+  // The server materializes a project's `use_worktree` default when the
+  // create OMITS `git` (field absent) and honors an explicit `git: null`
+  // opt-out. These pin the composer's half of that contract: omit while the
+  // git-ness probe leaves the decision unresolved, pin null once "no
+  // worktree" is a settled choice.
+  function branchLabel(): string {
+    return screen.getByTestId("new-chat-landing-branch-chip").textContent ?? "";
+  }
+
+  it("omits git — not null — when Send outraces the git-ness probe", async () => {
+    setProjectConfig({ host_id: "host_1", workspace: REPO, use_worktree: true });
+    // The probe never resolved before Send: the seed effect has made no
+    // decision, so the create must leave `git` ABSENT for the server to
+    // materialize the project default (a null here would opt the session
+    // out of the worktree the toggles promised).
+    vi.mocked(useHostWorktrees).mockReturnValue({
+      data: undefined,
+      isError: false,
+    } as ReturnType<typeof useHostWorktrees>);
+    renderLanding();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("alpha"),
+    );
+    const body = await submitAndReadBody();
+    expect(body.project_id).toBe("proj_alpha");
+    expect("git" in body).toBe(false);
+  });
+
+  it("pins git: null when the user clears the seeded worktree branch", async () => {
+    setProjectConfig({ host_id: "host_1", workspace: REPO, use_worktree: true });
+    renderLanding();
+
+    await waitFor(() => expect(branchLabel()).toMatch(/^worktree-[0-9a-f]{8}$/));
+    fireEvent.click(screen.getByTestId("new-chat-landing-branch-chip"));
+    fireEvent.change(screen.getByTestId("new-chat-landing-branch-input"), {
+      target: { value: "" },
+    });
+
+    const body = await submitAndReadBody();
+    // The clear is a resolved opt-out: explicit null keeps the server from
+    // re-applying the project default the user just declined.
+    expect("git" in body).toBe(true);
+    expect(body.git).toBeNull();
+  });
+
+  it("pins git: null for a non-git workspace once the probe has settled", async () => {
+    setProjectConfig({ host_id: "host_1", workspace: REPO, use_worktree: true });
+    // Probe settled: no worktrees at all — REPO is not a git repo, so the
+    // seed decision is "no worktree" and the server must not fill one (it
+    // would fail open, but the explicit null saves it the probe).
+    vi.mocked(useHostWorktrees).mockReturnValue({
+      data: [] as HostWorktree[],
+      isError: false,
+    } as ReturnType<typeof useHostWorktrees>);
+    renderLanding();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("alpha"),
+    );
+    const body = await submitAndReadBody();
+    expect(body.git).toBeNull();
+  });
+
+  it("keeps omitting git while the probe is unresolved even after an error", async () => {
+    setProjectConfig({ host_id: "host_1", workspace: REPO, use_worktree: true });
+    // A failed probe leaves the client without a git-ness answer — that is
+    // still "no decision", so the create omits `git` and the server (which
+    // probes the host authoritatively) settles the default.
+    vi.mocked(useHostWorktrees).mockReturnValue({
+      data: undefined,
+      isError: true,
+    } as ReturnType<typeof useHostWorktrees>);
+    renderLanding();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("alpha"),
+    );
+    const body = await submitAndReadBody();
+    expect("git" in body).toBe(false);
   });
 });

@@ -229,6 +229,7 @@ from omnigent.server.routes._sessions.helpers import (
     _create_and_publish_antigravity_child,
     _create_and_publish_codex_child,
     _create_session_worktree,
+    _defaulted_worktree_workspace_is_git,
     _delete_stored_session_bundle_after_failure,
     _derive_terminal_launch_args_from_spec,
     _emit_server_routing_decision,
@@ -8635,15 +8636,26 @@ async def _create_session_from_existing_agent(
                 raise OmnigentError(exc.message, code=ErrorCode.INVALID_INPUT) from exc
             git_branch = body.git.branch_name
         else:
-            created_worktree = await _create_session_worktree(
-                host_id=body.host_id,
-                source_repo=canonical_workspace,
-                git=body.git,
-                request=request,
-            )
-            canonical_workspace = created_worktree.worktree_path
-            git_branch = created_worktree.branch
-            created_worktree_path = created_worktree.worktree_path
+            # A git block materialized from the project's `use_worktree`
+            # default fails open on a non-git workspace (the caller never
+            # spelled it out); caller-supplied git options stay strict.
+            create_worktree = True
+            if project_resolution.git_from_worktree_default:
+                create_worktree = await _defaulted_worktree_workspace_is_git(
+                    host_id=body.host_id,
+                    workspace=canonical_workspace,
+                    request=request,
+                )
+            if create_worktree:
+                created_worktree = await _create_session_worktree(
+                    host_id=body.host_id,
+                    source_repo=canonical_workspace,
+                    git=body.git,
+                    request=request,
+                )
+                canonical_workspace = created_worktree.worktree_path
+                git_branch = created_worktree.branch
+                created_worktree_path = created_worktree.worktree_path
 
     # Native-terminal pass-through args.
     #

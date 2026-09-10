@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,13 +25,21 @@ from fastapi import FastAPI
 from omnigent.host.frames import (
     HostCreateWorktreeFrame,
     HostHelloFrame,
+    HostListWorktreesFrame,
     HostRemoveWorktreeFrame,
     HostStatFrame,
     decode_host_frame,
 )
+from omnigent.runtime.agent_cache import AgentCache
+from omnigent.server.app import create_app
 from omnigent.server.auth import RESERVED_USER_LOCAL
 from omnigent.server.host_registry import HostConnection
+from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+from omnigent.stores.artifact_store.local import LocalArtifactStore
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
+from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from tests.server.helpers import create_test_agent
 
 pytestmark = pytest.mark.asyncio
@@ -57,10 +66,13 @@ class _HostCapture:
     :param create: ``host.create_worktree`` frames received.
     :param remove: ``host.remove_worktree`` frames received (a non-empty
         list proves the create-rollback path fired).
+    :param list_worktrees: ``host.list_worktrees`` frames received (the
+        git-ness probe a project-defaulted worktree runs first).
     """
 
     create: list[HostCreateWorktreeFrame] = field(default_factory=list)
     remove: list[HostRemoveWorktreeFrame] = field(default_factory=list)
+    list_worktrees: list[HostListWorktreesFrame] = field(default_factory=list)
 
 
 # Factory yielded by the ``register_worktree_host`` fixture:
@@ -86,15 +98,26 @@ async def register_worktree_host(
     :returns: Async iterator yielding a ``register`` factory. Its
         kwargs: ``create_status`` (``"ok"`` returns a worktree path,
         ``"failed"`` simulates a host git failure such as a bad base
-        ref) and ``create_error`` (the failure message). Returns a
+        ref), ``create_error`` (the failure message), ``list_status`` /
+        ``list_error`` (same for the ``host.list_worktrees`` git-ness
+        probe — ``"failed"`` models a non-git workspace), and
+        ``target_app`` (register into another app's host registry, e.g.
+        the project-store-wired one). Returns a
         ``_HostCapture`` whose ``.create`` / ``.remove`` lists accumulate
         the create- and remove-worktree frames the host received.
     """
     conns: list[HostConnection] = []
 
-    def _register(*, create_status: str = "ok", create_error: str | None = None) -> _HostCapture:
+    def _register(
+        *,
+        create_status: str = "ok",
+        create_error: str | None = None,
+        list_status: str = "ok",
+        list_error: str | None = None,
+        target_app: FastAPI | None = None,
+    ) -> _HostCapture:
         HostStore(db_uri).upsert_on_connect(_HOST_ID, "wt-host", RESERVED_USER_LOCAL)
-        conn = app.state.host_registry.register(
+        conn = (target_app or app).state.host_registry.register(
             host_id=_HOST_ID,
             ws=_FakeWebSocket(),  # type: ignore[arg-type] — duck-typed
             hello=HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="wt-host"),
@@ -142,6 +165,33 @@ async def register_worktree_host(
                                     "worktree_path": None,
                                     "branch": None,
                                     "error": create_error,
+                                }
+                            )
+                elif isinstance(frame, HostListWorktreesFrame):
+                    cap.list_worktrees.append(frame)
+                    fut = conn.pending_list_worktrees.pop(frame.request_id, None)
+                    if fut is not None and not fut.done():
+                        if list_status == "ok":
+                            fut.set_result(
+                                {
+                                    "status": "ok",
+                                    "worktrees": [
+                                        {
+                                            "path": frame.repo_path,
+                                            "branch": "main",
+                                            "is_main": True,
+                                            "detached": False,
+                                        }
+                                    ],
+                                    "error": None,
+                                }
+                            )
+                        else:
+                            fut.set_result(
+                                {
+                                    "status": "failed",
+                                    "worktrees": None,
+                                    "error": list_error,
                                 }
                             )
                 elif isinstance(frame, HostRemoveWorktreeFrame):
@@ -471,3 +521,178 @@ async def test_create_failure_rollback_preserves_existing_branch(
         "rollback of an existing-branch recreate must preserve the user's "
         "pre-existing branch (unpushed commits would be lost)"
     )
+
+
+@pytest.fixture()
+def project_worktree_app(runtime_init: None, db_uri: str, tmp_path: Any) -> FastAPI:
+    """The shared ``app`` wiring plus a project store, so `project_id`
+    creates resolve their config defaults (``use_worktree``) end-to-end."""
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    return create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        project_store=SqlAlchemyProjectStore(db_uri),
+    )
+
+
+@pytest_asyncio.fixture()
+async def project_worktree_client(
+    project_worktree_app: FastAPI,
+) -> AsyncIterator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=project_worktree_app), base_url="http://test"
+    ) as project_client:
+        yield project_client
+
+
+def _worktree_project(db_uri: str, project_id: str, config: dict[str, Any]) -> str:
+    """Create an owner-less (single-user) project row with *config*."""
+    SqlAlchemyProjectStore(db_uri).create(project_id, f"proj-{project_id[:8]}", None, config)
+    return project_id
+
+
+async def test_project_worktree_default_creates_generated_worktree(
+    register_worktree_host: RegisterHost,
+    project_worktree_app: FastAPI,
+    project_worktree_client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A `project_id` create that OMITS ``git`` materializes the project's
+    ``use_worktree: true`` default server-side: the git-ness probe runs, a
+    generated ``worktree-<hex8>`` branch reaches ``host.create_worktree``,
+    and the session starts in the created worktree.
+
+    This is the OMNI class of "Random worktree silently ignored": the web
+    composer resolves the toggle into an explicit branch only after its
+    git-ness probe settles, so a Send that outraces the probe (or a probe
+    that fails) used to post no ``git`` block at all — and the session
+    started in the repo's main checkout despite the toggle being on.
+    """
+    cap = register_worktree_host(target_app=project_worktree_app)
+    agent = await create_test_agent(project_worktree_client, name="wt-default-agent")
+    project_id = _worktree_project(
+        db_uri,
+        "a7b753b34a61b09af35a01136d40fadf",
+        {"workspace": _SOURCE_REPO, "use_worktree": True},
+    )
+
+    resp = await project_worktree_client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "project_id": project_id, "host_id": _HOST_ID},
+    )
+    assert resp.status_code == 201, resp.text
+
+    # The defaulted block probes git-ness first, then creates the worktree.
+    assert len(cap.list_worktrees) == 1
+    assert cap.list_worktrees[0].repo_path == _SOURCE_REPO
+    assert len(cap.create) == 1
+    frame = cap.create[0]
+    assert frame.repo_path == _SOURCE_REPO
+    assert re.fullmatch(r"worktree-[0-9a-f]{8}", frame.branch_name), frame.branch_name
+    assert frame.base_branch is None
+
+    body = resp.json()
+    assert body["git_branch"] == frame.branch_name
+    assert body["workspace"] == f"{_SOURCE_REPO}-worktrees/{frame.branch_name}"
+
+
+async def test_project_worktree_default_explicit_null_opts_out(
+    register_worktree_host: RegisterHost,
+    project_worktree_app: FastAPI,
+    project_worktree_client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """An explicit ``git: null`` (the composer's settled "no worktree"
+    decision) is honored: no probe, no worktree, plain workspace."""
+    cap = register_worktree_host(target_app=project_worktree_app)
+    agent = await create_test_agent(project_worktree_client, name="wt-default-null-agent")
+    project_id = _worktree_project(
+        db_uri,
+        "b7b753b34a61b09af35a01136d40fadf",
+        {"workspace": _SOURCE_REPO, "use_worktree": True},
+    )
+
+    resp = await project_worktree_client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "project_id": project_id,
+            "host_id": _HOST_ID,
+            "git": None,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert cap.list_worktrees == []
+    assert cap.create == []
+    body = resp.json()
+    assert body["git_branch"] is None
+    assert body["workspace"] == _SOURCE_REPO
+
+
+async def test_project_worktree_default_falls_back_plain_on_non_git_workspace(
+    register_worktree_host: RegisterHost,
+    project_worktree_app: FastAPI,
+    project_worktree_client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """A defaulted worktree fails open when the workspace isn't a git repo
+    (probe reports failure): the session still starts, plain — mirroring the
+    composer's own probe semantics — instead of failing the create over a
+    default the caller never spelled out."""
+    cap = register_worktree_host(
+        target_app=project_worktree_app,
+        list_status="failed",
+        list_error=f"not a git repository: {_SOURCE_REPO}",
+    )
+    agent = await create_test_agent(project_worktree_client, name="wt-default-nongit-agent")
+    project_id = _worktree_project(
+        db_uri,
+        "c7b753b34a61b09af35a01136d40fadf",
+        {"workspace": _SOURCE_REPO, "use_worktree": True},
+    )
+
+    resp = await project_worktree_client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "project_id": project_id, "host_id": _HOST_ID},
+    )
+    assert resp.status_code == 201, resp.text
+    assert len(cap.list_worktrees) == 1
+    assert cap.create == []
+    body = resp.json()
+    assert body["git_branch"] is None
+    assert body["workspace"] == _SOURCE_REPO
+
+
+async def test_project_create_with_explicit_git_skips_gitness_probe(
+    register_worktree_host: RegisterHost,
+    project_worktree_app: FastAPI,
+    project_worktree_client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """Caller-supplied git options stay strict: no fail-open probe, and the
+    explicit branch (not a generated one) reaches the host."""
+    cap = register_worktree_host(target_app=project_worktree_app)
+    agent = await create_test_agent(project_worktree_client, name="wt-explicit-git-agent")
+    project_id = _worktree_project(
+        db_uri,
+        "d7b753b34a61b09af35a01136d40fadf",
+        {"workspace": _SOURCE_REPO, "use_worktree": True},
+    )
+
+    resp = await project_worktree_client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "project_id": project_id,
+            "host_id": _HOST_ID,
+            "git": {"branch_name": "feature/mine"},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert cap.list_worktrees == []
+    assert len(cap.create) == 1
+    assert cap.create[0].branch_name == "feature/mine"
+    assert resp.json()["git_branch"] == "feature/mine"

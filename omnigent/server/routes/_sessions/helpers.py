@@ -8601,6 +8601,53 @@ def _require_host_conn_for_worktree(host_id: str | None, request: Request) -> Ho
     return host_conn
 
 
+async def _defaulted_worktree_workspace_is_git(
+    *,
+    host_id: str | None,
+    workspace: str | None,
+    request: Request,
+) -> bool:
+    """
+    Probe whether *workspace* is a git repository, for a defaulted worktree.
+
+    Runs only when the ``git`` block was materialized from the project's
+    ``use_worktree`` default (never for caller-supplied git options), and
+    mirrors the web composer's git-ness probe semantics: a workspace that is
+    not a git repo — or a probe that fails — skips the worktree so the
+    session still starts plain, instead of failing the create over a
+    default the caller never spelled out.
+
+    :param host_id: Target host id from the session request.
+    :param workspace: The boundary-validated workspace to probe, e.g.
+        ``"/Users/alice/myrepo"``.
+    :param request: FastAPI request carrying the host registry.
+    :returns: ``True`` when the host lists worktrees for ``workspace``
+        (it is a git repo); ``False`` on any probe failure.
+    """
+    from omnigent.server.routes._host_worktree import (
+        WorktreeProxyError,
+        list_worktrees_on_host,
+    )
+
+    if workspace is None:
+        return False
+    try:
+        host_conn = _require_host_conn_for_worktree(host_id, request)
+        await list_worktrees_on_host(
+            host_registry=request.app.state.host_registry,
+            host_conn=host_conn,
+            repo_path=workspace,
+        )
+    except (OmnigentError, WorktreeProxyError) as exc:
+        _logger.warning(
+            "skipping project worktree default for %s: git-ness probe failed: %s",
+            workspace,
+            exc,
+        )
+        return False
+    return True
+
+
 async def _create_session_worktree(
     *,
     host_id: str | None,

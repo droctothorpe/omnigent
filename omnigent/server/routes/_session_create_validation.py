@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,11 @@ class ProjectCreateResolution:
     body: Any
     project_id: str | None = None
     warnings: tuple[dict[str, str], ...] = ()
+    # True when ``body.git`` was materialized from the project's
+    # ``use_worktree`` default rather than sent by the caller or stored
+    # verbatim in the config — lets the create fail open on a non-git
+    # workspace instead of rejecting the session.
+    git_from_worktree_default: bool = False
 
 
 def _strict_project_create_enabled() -> bool:
@@ -62,6 +68,9 @@ async def resolve_project_session_create(
     Field presence, rather than value, controls defaulting.  Consequently an
     explicit JSON ``null`` remains explicit and is never replaced by a project
     hint.  Unknown and foreign projects deliberately share one 404 response.
+    A config ``use_worktree: true`` (the "Random worktree" toggle) with no
+    stored ``git`` block materializes a generated ``worktree-<hex8>`` branch
+    when the caller omitted ``git`` — see ``git_from_worktree_default``.
 
     ``warn_on_mismatch=False`` skips the consistency warnings (and their
     strict-mode escalation) for callers whose project is inherited rather than
@@ -88,6 +97,22 @@ async def resolve_project_session_create(
     for field in ("agent_id", "workspace", "git"):
         if field not in fields_set and field in config and field in body.__class__.model_fields:
             updates[field] = config[field]
+    # The "Random worktree" toggle stores ``use_worktree: true``, not a
+    # ``git`` block — every session needs a freshly generated branch, so it
+    # can only be materialized at create time. Do it here, server-side, so a
+    # client that resolved no git decision (field absent — e.g. Send outraced
+    # the composer's git-ness probe) still gets the promised worktree. An
+    # explicit JSON ``null`` remains an explicit opt-out, like every default.
+    git_from_worktree_default = False
+    if (
+        "git" in body.__class__.model_fields
+        and "git" not in fields_set
+        and "git" not in config
+        and config.get("use_worktree") is True
+        and getattr(body, "host_id", None) is not None
+    ):
+        updates["git"] = {"branch_name": f"worktree-{secrets.token_hex(4)}"}
+        git_from_worktree_default = True
     resolved_data = body.model_dump()
     resolved_data.update(updates)
     # Re-validate project hints because config is intentionally stored as
@@ -111,7 +136,11 @@ async def resolve_project_session_create(
         )
 
     if not warn_on_mismatch:
-        return ProjectCreateResolution(body=resolved, project_id=project_id)
+        return ProjectCreateResolution(
+            body=resolved,
+            project_id=project_id,
+            git_from_worktree_default=git_from_worktree_default,
+        )
 
     warnings: list[dict[str, str]] = []
     explicit_agent_id = getattr(body, "agent_id", None) if "agent_id" in fields_set else None
@@ -136,7 +165,12 @@ async def resolve_project_session_create(
             "Project session create mismatch: " + "; ".join(w["message"] for w in warnings),
             code=ErrorCode.INVALID_INPUT,
         )
-    return ProjectCreateResolution(body=resolved, project_id=project_id, warnings=tuple(warnings))
+    return ProjectCreateResolution(
+        body=resolved,
+        project_id=project_id,
+        warnings=tuple(warnings),
+        git_from_worktree_default=git_from_worktree_default,
+    )
 
 
 # Claude Code's ``--permission-mode`` launch vocabulary — every value the CLI

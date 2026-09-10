@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -461,6 +462,121 @@ async def test_git_default_fill_with_differing_workspace_emits_no_warning(db_uri
     assert resolved.body.git is not None
     assert resolved.body.git.branch_name == "feature/project"
     assert resolved.warnings == ()
+
+
+async def test_use_worktree_default_materializes_generated_branch(db_uri: str) -> None:
+    """``use_worktree: true`` fills a fresh ``worktree-<hex8>`` branch when
+    the caller omits ``git`` — the "Random worktree" toggle stores a boolean,
+    so the branch can only be generated at create time."""
+    project_store = SqlAlchemyProjectStore(db_uri)
+    project = project_store.create(
+        "587b7cb7ac30abf4debfaa578d052ec6",
+        "worktree-default",
+        ALICE,
+        {"agent_id": CUSTOM_AGENT_ID, "workspace": "/work/project", "use_worktree": True},
+    )
+    resolved = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(project_id=project.id, host_id="host_abc"),
+        user_id=ALICE,
+        project_store=project_store,
+    )
+    assert resolved.body.git is not None
+    assert re.fullmatch(r"worktree-[0-9a-f]{8}", resolved.body.git.branch_name)
+    assert resolved.body.git.existing_worktree is False
+    assert resolved.git_from_worktree_default is True
+
+    # Random means per-session: a second create gets its own branch.
+    second = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(project_id=project.id, host_id="host_abc"),
+        user_id=ALICE,
+        project_store=project_store,
+    )
+    assert second.body.git is not None
+    assert second.body.git.branch_name != resolved.body.git.branch_name
+
+
+async def test_use_worktree_default_respects_explicit_git_null(db_uri: str) -> None:
+    """An explicit JSON ``null`` git is an opt-out and is never re-filled."""
+    project_store = SqlAlchemyProjectStore(db_uri)
+    project = project_store.create(
+        "687b7cb7ac30abf4debfaa578d052ec6",
+        "worktree-default-null",
+        ALICE,
+        {"agent_id": CUSTOM_AGENT_ID, "workspace": "/work/project", "use_worktree": True},
+    )
+    resolved = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(project_id=project.id, host_id="host_abc", git=None),
+        user_id=ALICE,
+        project_store=project_store,
+    )
+    assert resolved.body.git is None
+    assert resolved.git_from_worktree_default is False
+
+
+async def test_use_worktree_default_keeps_explicit_git_options(db_uri: str) -> None:
+    """A caller-supplied git block is never replaced by the default."""
+    project_store = SqlAlchemyProjectStore(db_uri)
+    project = project_store.create(
+        "787b7cb7ac30abf4debfaa578d052ec6",
+        "worktree-default-explicit",
+        ALICE,
+        {"agent_id": CUSTOM_AGENT_ID, "workspace": "/work/project", "use_worktree": True},
+    )
+    resolved = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(
+            project_id=project.id,
+            host_id="host_abc",
+            git={"branch_name": "feature/mine"},
+        ),
+        user_id=ALICE,
+        project_store=project_store,
+    )
+    assert resolved.body.git is not None
+    assert resolved.body.git.branch_name == "feature/mine"
+    assert resolved.git_from_worktree_default is False
+
+
+async def test_use_worktree_default_requires_a_host(db_uri: str) -> None:
+    """No ``host_id`` means no machine to create the worktree on — no fill."""
+    project_store = SqlAlchemyProjectStore(db_uri)
+    project = project_store.create(
+        "887b7cb7ac30abf4debfaa578d052ec6",
+        "worktree-default-hostless",
+        ALICE,
+        {"agent_id": CUSTOM_AGENT_ID, "use_worktree": True},
+    )
+    resolved = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(project_id=project.id),
+        user_id=ALICE,
+        project_store=project_store,
+    )
+    assert resolved.body.git is None
+    assert resolved.git_from_worktree_default is False
+
+
+async def test_use_worktree_default_defers_to_config_git_block(db_uri: str) -> None:
+    """A config-stored ``git`` block wins over ``use_worktree`` (it is the
+    more specific instruction, and it is not default-derived)."""
+    project_store = SqlAlchemyProjectStore(db_uri)
+    project = project_store.create(
+        "987b7cb7ac30abf4debfaa578d052ec6",
+        "worktree-default-config-git",
+        ALICE,
+        {
+            "agent_id": CUSTOM_AGENT_ID,
+            "workspace": "/work/project",
+            "use_worktree": True,
+            "git": {"branch_name": "feature/project"},
+        },
+    )
+    resolved = await resolve_project_session_create(
+        body=ProjectSessionCreateRequest(project_id=project.id, host_id="host_abc"),
+        user_id=ALICE,
+        project_store=project_store,
+    )
+    assert resolved.body.git is not None
+    assert resolved.body.git.branch_name == "feature/project"
+    assert resolved.git_from_worktree_default is False
 
 
 async def test_multipart_create_defaults_workspace_and_files_atomically(

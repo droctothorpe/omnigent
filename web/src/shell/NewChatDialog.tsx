@@ -4407,6 +4407,17 @@ export function NewChatLandingScreen() {
       // in an existing worktree sends no git opts — the workspace is bound
       // straight to that dir, which also sidesteps the "branch already
       // exists" guard.
+      //
+      // The server materializes the project's worktree default when a
+      // `project_id` create OMITS `git`. Once the seed decision has been made
+      // for this workspace (the git-ness probe settled) and no branch is in
+      // place, "no worktree" is a resolved choice — the user cleared the
+      // seed, or the workspace isn't a git repo — so pin an explicit
+      // `git: null` to keep the server from re-applying the default.
+      const worktreeDefaultDeclined =
+        prefillConfig?.useWorktree === true &&
+        worktreeSeededForRef.current === workspaceTrimmed &&
+        trimmedBranch === "";
       const agent = agentList.find((a) => a.id === effectiveAgentId);
       const nativeAgent = nativeCodingAgentForAvailableAgent(agent);
       const nativeLabels = nativeWrapperLabelsForAgent(agent);
@@ -4592,16 +4603,22 @@ export function NewChatLandingScreen() {
                   // Config-seeded workspace on a `project_id` create: omitted
                   // so the server default-fills it (see agent_id above).
                   ...(workspaceFromProjectConfig ? {} : { workspace: workspaceTrimmed }),
-                  // Create a new worktree, or bind an existing one
+                  // Create a new worktree, bind an existing one
                   // (`existing_worktree` records the branch for the sidebar +
-                  // delete flow without creating anything), or neither. Always
-                  // explicit when set: the branch name is generated (or typed)
-                  // client-side, so the server cannot default-fill it.
+                  // delete flow without creating anything), decline the
+                  // project's worktree default (explicit null), or leave the
+                  // decision to the server: an ABSENT `git` on a `project_id`
+                  // create is default-filled from `use_worktree` — the seed
+                  // below can lose a race with the git-ness probe, and the
+                  // server materializing the default is what keeps that race
+                  // from silently dropping the worktree.
                   git: shouldCreateWorktree
                     ? { branch_name: trimmedBranch, base_branch: baseBranch.trim() || undefined }
                     : startInExistingWorktree
                       ? { branch_name: trimmedBranch, existing_worktree: true }
-                      : undefined,
+                      : worktreeDefaultDeclined
+                        ? null
+                        : undefined,
                 }),
             // Native-wrapper labels + codex bypass + the born-filed project
             // label (see `createLabels` above).
