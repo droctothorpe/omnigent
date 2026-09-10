@@ -73,6 +73,17 @@ def test_register_and_get() -> None:
     assert fetched.hello.name == "test-host"
 
 
+def test_interactive_shells_survive_disconnect() -> None:
+    """A runner can outlive its host tunnel without losing the shell snapshot."""
+    registry = HostRegistry()
+    hello = _make_hello()
+    hello.interactive_shells = ["zsh", "invalid", "zsh", "bash"]
+    registry.register("host_shells", FakeWebSocket(), hello, owner="alice")
+    registry.deregister("host_shells")
+
+    assert registry.interactive_shells("host_shells") == ["zsh", "bash"]
+
+
 def test_deregister() -> None:
     """
     Verify that deregister removes the host from the registry.

@@ -16,6 +16,7 @@ from omnigent.native.native_coding_agents import (
     native_coding_agent_for_harness,
     native_coding_agent_for_wrapper_label,
     native_shell_terminal_spec,
+    native_shell_terminal_specs,
     public_agent_name,
 )
 
@@ -112,20 +113,15 @@ def test_public_agent_name_passes_through_regular_names() -> None:
 
 
 @pytest.mark.posix_only
-def test_native_shell_terminal_spec_offers_installed_shells_default_first(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One terminal per installed shell, keyed by name, ``$SHELL`` first.
+def test_native_shell_terminal_spec_offers_host_shells_default_first() -> None:
+    """One terminal per host shell, keyed by name, with its default first.
 
     Every native wrapper declares this so "+ New shell" opens the user's login
     shell by default while still offering the other installed shells. Each entry
     is keyed and commanded by its basename and is an unsandboxed caller-process
     shell with cwd override allowed.
     """
-    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setenv("SHELL", "/usr/local/bin/fish")
-    spec = native_shell_terminal_spec()
-    # $SHELL (fish) leads, then the remaining offered shells in order.
+    spec = native_shell_terminal_spec(["fish", "bash", "zsh"])
     assert list(spec) == ["fish", "bash", "zsh"]
     for name, entry in spec.items():
         assert entry["command"] == name
@@ -137,21 +133,27 @@ def test_native_shell_terminal_spec_offers_installed_shells_default_first(
         }
 
 
-def test_native_shell_terminal_spec_falls_back_to_bash(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With no shells resolvable anywhere the spec still offers a single bash.
-
-    Resolution is fully hermetic: nothing on PATH, nothing in the standard shell
-    dirs, and no usable ``$SHELL`` absolute path — otherwise the dir probe would
-    leak whatever shells the host actually has installed.
-    """
-    from omnigent import _platform
-
-    monkeypatch.setattr("shutil.which", lambda name: None)
-    monkeypatch.setattr(_platform, "_resolve_interactive_shell", lambda name: None)
-    monkeypatch.setattr(_platform.os.path, "isabs", lambda path: False)
-    monkeypatch.delenv("SHELL", raising=False)
+def test_native_shell_terminal_spec_falls_back_to_bash() -> None:
+    """Generated bundles carry a portable bash fallback before host binding."""
     spec = native_shell_terminal_spec()
     assert list(spec) == ["bash"]
     assert spec["bash"]["command"] == "bash"
+
+
+def test_native_shell_terminal_specs_builds_runtime_specs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner can replace the fallback with parsed host terminal specs."""
+    monkeypatch.setattr(
+        "omnigent._platform._resolve_interactive_shell",
+        lambda shell: f"/resolved/{shell}",
+    )
+    spec = native_shell_terminal_specs(["zsh", "bash"])
+    assert list(spec) == ["zsh", "bash"]
+    assert spec["zsh"].command == "/resolved/zsh"
+    assert spec["zsh"].allow_cwd_override is True
+    assert spec["zsh"].os_env != "inherit"
+    assert spec["zsh"].os_env is not None
+    assert spec["zsh"].os_env.cwd == "."
+    assert spec["zsh"].os_env.sandbox is not None
+    assert spec["zsh"].os_env.sandbox.type == "none"

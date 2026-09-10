@@ -223,6 +223,21 @@ _KNOWN_INTERACTIVE_SHELLS = frozenset({"bash", "zsh", "fish", "sh", "dash", "ksh
 _OFFERED_INTERACTIVE_SHELLS = ("bash", "zsh", "fish")
 
 
+def normalize_interactive_shells(shells: object) -> list[str]:
+    """Return supported shell basenames in input order, without duplicates."""
+    if not isinstance(shells, (list, tuple)):
+        return []
+    normalized: list[str] = []
+    for shell in shells:
+        if (
+            isinstance(shell, str)
+            and shell in _KNOWN_INTERACTIVE_SHELLS
+            and shell not in normalized
+        ):
+            normalized.append(shell)
+    return normalized
+
+
 #: Standard absolute locations for interactive shells, probed when a shell
 #: isn't on ``PATH``. The host daemon snapshots ``PATH`` at spawn; a daemon
 #: launched from a GUI / ``launchd`` / minimal-env context inherits a stripped

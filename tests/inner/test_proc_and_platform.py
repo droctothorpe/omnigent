@@ -90,6 +90,15 @@ def test_default_interactive_shell_falls_back_to_bash(
     assert _platform.default_interactive_shell() == "bash"
 
 
+def test_normalize_interactive_shells_filters_and_deduplicates() -> None:
+    """Host and server accept only supported shell basenames."""
+    assert _platform.normalize_interactive_shells(["zsh", "bash", "zsh", "not-a-shell", 42]) == [
+        "zsh",
+        "bash",
+    ]
+    assert _platform.normalize_interactive_shells("bash") == []
+
+
 @pytest.mark.posix_only
 def test_default_interactive_shell_trusts_shell_absolute_path_off_path(
     monkeypatch: pytest.MonkeyPatch,

@@ -24,6 +24,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
 
+from omnigent._platform import normalize_interactive_shells
 from omnigent.entities import (
     Conversation,
     StoredFile,
@@ -31,6 +32,7 @@ from omnigent.entities import (
 from omnigent.entities.session_resources import session_resource_view_to_dict
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.native.native_coding_agents import (
+    native_coding_agent_for_agent_name,
     native_coding_agent_for_terminal_name,
 )
 from omnigent.runner.routing import RunnerRouter
@@ -1227,6 +1229,17 @@ def register_resources_routes(
         if not is_native_bootstrap:
             spec = await asyncio.to_thread(_load_agent_spec_for_session, conv, agent_store)
             declared = list(spec.terminals or {}) if spec is not None else []
+            if (
+                spec is not None
+                and conv.host_id is not None
+                and host_registry is not None
+                and native_coding_agent_for_agent_name(spec.name) is not None
+            ):
+                reported = normalize_interactive_shells(
+                    host_registry.interactive_shells(conv.host_id)
+                )
+                if reported:
+                    declared = reported
             if body.get("terminal") not in declared:
                 raise OmnigentError(
                     (

@@ -30,7 +30,9 @@ from omnigent.entities import (
     MessageData,
     NewConversationItem,
 )
+from omnigent.host.frames import HostHelloFrame
 from omnigent.llms.context_window import ModelPricing
+from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
 from omnigent.runtime.tool_output import MAX_TOOL_OUTPUT_BYTES
 from omnigent.server.background_session_titles import BackgroundTitleRequest
 from omnigent.server.routes._sessions.helpers import (
@@ -3241,6 +3243,61 @@ async def test_list_sessions_includes_external_session_id(
 
 
 # ── claude-native session discovery (list + snapshot) ────────────
+
+
+async def test_session_agent_terminals_follow_selected_host(
+    client: httpx.AsyncClient,
+    app: Any,
+    db_uri: str,
+) -> None:
+    """Native shell choices come from the host; custom choices stay authored."""
+    host_id = "6b9c07bfb42f687d53af44f018adebee"
+    HostStore(db_uri).upsert_on_connect(host_id, "bash-only-host", "owner@example.com")
+    app.state.host_registry.register(
+        host_id,
+        AsyncMock(),
+        HostHelloFrame(
+            version="0.1.0-test",
+            frame_protocol_version=1,
+            name="bash-only-host",
+            interactive_shells=["bash"],
+        ),
+        owner="owner@example.com",
+    )
+
+    terminal_spec = {
+        "zsh": {
+            "command": "zsh",
+            "os_env": {"type": "caller_process", "cwd": "."},
+        }
+    }
+    native_agent = await create_test_agent(
+        client,
+        name=CLAUDE_NATIVE_AGENT_NAME,
+        terminals=terminal_spec,
+    )
+    native_session = await _create_session(client, native_agent["id"])
+    SqlAlchemyConversationStore(db_uri).set_host_id(
+        native_session["id"], host_id=host_id, workspace="/tmp/native"
+    )
+
+    native_response = await client.get(f"/v1/sessions/{native_session['id']}/agent")
+    assert native_response.status_code == 200, native_response.text
+    assert native_response.json()["terminals"] == ["bash"]
+
+    custom_agent = await create_test_agent(
+        client,
+        name="custom-shell-agent",
+        terminals=terminal_spec,
+    )
+    custom_session = await _create_session(client, custom_agent["id"])
+    SqlAlchemyConversationStore(db_uri).set_host_id(
+        custom_session["id"], host_id=host_id, workspace="/tmp/custom"
+    )
+
+    custom_response = await client.get(f"/v1/sessions/{custom_session['id']}/agent")
+    assert custom_response.status_code == 200, custom_response.text
+    assert custom_response.json()["terminals"] == ["zsh"]
 
 
 async def test_claude_native_session_discoverable_with_terminal_metadata(
