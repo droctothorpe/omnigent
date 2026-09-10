@@ -1,0 +1,57 @@
+name: Dependency Age Audit
+
+# Audits committed lockfiles for dependencies published inside the seven-day
+# supply-chain cooldown. The cooldown is applied only when a lockfile is
+# resolved (pnpm's minimumReleaseAge, uv's exclude-newer), and a frozen install
+# never re-checks it — so a too-new pin can still slip into the committed lock.
+# This reads the ages back out (uv.lock records them inline; npm ages come from
+# the registry) and fails if any pin is younger than the window.
+#
+# Scheduled, not a PR gate: the npm half makes ~1.7k registry lookups, so it is
+# run nightly (and on demand) rather than blocking every pull request. The
+# lint_dep_cooldown_policy pre-commit hook is the fast PR-time guard.
+
+on:
+  schedule:
+    # Daily at 08:00 UTC.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      max-age-days:
+        description: "Cooldown window in days"
+        default: "7"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-age-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Audit dependency ages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a  # v3
+
+      # No project sync needed: the audit only reads the lockfiles and queries
+      # the public npm registry. PyYAML is the sole extra dependency (tomllib is
+      # stdlib on 3.12). Public npmjs is fast and carries accurate publish times.
+      - name: Run dependency age audit
+        run: |
+          uv run --no-project --with pyyaml \
+            python dev/lint/verify_dependency_ages.py \
+              --max-age-days "${{ github.event.inputs.max-age-days || '7' }}" \
+              --npm-registry https://registry.npmjs.org

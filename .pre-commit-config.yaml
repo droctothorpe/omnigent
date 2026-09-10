@@ -50,6 +50,17 @@ repos:
         files: \.(py|ya?ml|json|toml|sh)$
         exclude: (^|/)tests/|^openapi\.json$
 
+      # Guard the seven-day dependency-cooldown policy against silent regression:
+      # pnpm only honors minimumReleaseAge under top-level `settings:`, and uv
+      # needs exclude-newer + required-version. Offline config check; actual
+      # package ages are audited nightly by verify_dependency_ages.py.
+      - id: dep-cooldown-policy
+        name: dependency cooldown policy is effective
+        language: system
+        entry: .venv/bin/python dev/lint/lint_dep_cooldown_policy.py
+        pass_filenames: false
+        files: ^(pnpm-workspace\.yaml|uv\.toml)$
+
       - id: web-prettier
         name: web prettier
         language: system
