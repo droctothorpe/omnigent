@@ -654,6 +654,36 @@ def _configure_opencode_on_demand() -> None:
         _logger.info("opencode on-demand ucode configure failed", exc_info=True)
 
 
+def _provider_base_urls_match_host(config: Mapping[str, object], workspace_host: str) -> bool:
+    """True when every opencode provider base URL is HTTPS and shares
+    *workspace_host*'s network location.
+
+    Guards the managed-connect path: a broker bearer is forwarded to whatever
+    ``provider.<id>.options.baseURL`` the on-disk config names, so a stale/other
+    origin must not be trusted. Requires at least one base URL (a provider block
+    with none is not a usable gateway target).
+    """
+    from urllib.parse import urlsplit
+
+    expected = urlsplit(
+        workspace_host if "://" in workspace_host else f"https://{workspace_host}"
+    ).netloc
+    providers = config.get("provider")
+    if not isinstance(providers, Mapping):
+        return False
+    saw_url = False
+    for provider in providers.values():
+        options = provider.get("options") if isinstance(provider, Mapping) else None
+        base_url = options.get("baseURL") if isinstance(options, Mapping) else None
+        if not isinstance(base_url, str) or not base_url:
+            continue
+        saw_url = True
+        parts = urlsplit(base_url)
+        if parts.scheme != "https" or parts.netloc != expected:
+            return False
+    return saw_url
+
+
 def managed_connect_opencode_config(xdg_config_home: Path) -> dict[str, object] | None:
     """Consume ucode's generated opencode config on a managed connect host.
 
@@ -677,8 +707,10 @@ def managed_connect_opencode_config(xdg_config_home: Path) -> dict[str, object] 
     """
     from omnigent.host.databricks_credential import _read_sidecar, _sidecar_path
 
-    if _read_sidecar(_sidecar_path()) is None:
+    sidecar = _read_sidecar(_sidecar_path())
+    if sidecar is None:
         return None  # not a managed connect host
+    workspace_host = sidecar["workspace_host"].rstrip("/")
 
     # ucode writes opencode's config into its own XDG root, not ~/.config/opencode.
     ucode_config_dir = Path.home() / ".ucode" / "opencode-xdg" / "opencode"
@@ -696,6 +728,19 @@ def managed_connect_opencode_config(xdg_config_home: Path) -> dict[str, object] 
         return None
     if not isinstance(config, dict) or "provider" not in config:
         return None  # ucode did not configure opencode (e.g. not in --agents)
+    # Security: the config on disk carries the provider base URL, and we forward a
+    # freshly-minted broker bearer to it. A stale config (left from a previous
+    # workspace connection) or a locally-modified file could aim that bearer at a
+    # different origin. Only trust it when every provider base URL is HTTPS and
+    # targets the sidecar's current workspace host.
+    if not _provider_base_urls_match_host(config, workspace_host):
+        _logger.warning(
+            "opencode managed config: provider base URL is not HTTPS on the connected "
+            "workspace host %r — declining so the broker bearer is not forwarded to an "
+            "unverified origin.",
+            workspace_host,
+        )
+        return None
 
     ucode_plugin = ucode_config_dir / "plugin" / "ucode-auth.js"
     try:

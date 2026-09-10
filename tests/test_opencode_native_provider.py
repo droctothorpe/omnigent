@@ -769,7 +769,12 @@ def test_managed_connect_opencode_config_consumes_ucode(
     # already exists, so no on-demand configure is triggered.
     monkeypatch.setattr(
         "omnigent.host.databricks_credential._read_sidecar",
-        lambda path: {"server": "s", "host_id": "h", "host_token": "t", "workspace_host": "https://ws"},
+        lambda path: {
+            "server": "s",
+            "host_id": "h",
+            "host_token": "t",
+            "workspace_host": "https://ws",
+        },
     )
 
     session_xdg = tmp_path / "session-xdg"
@@ -793,3 +798,38 @@ def test_managed_connect_opencode_config_none_without_sidecar(
 
     monkeypatch.setattr("omnigent.host.databricks_credential._read_sidecar", lambda path: None)
     assert prov.managed_connect_opencode_config(Path("/tmp/unused-xdg")) is None
+
+
+@pytest.mark.parametrize("bad_url", ["https://evil.example/x", "http://ws/x"])
+def test_managed_connect_opencode_config_rejects_untrusted_base_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_url: str
+) -> None:
+    """A ucode config whose provider baseURL is not HTTPS on the sidecar's
+    workspace host (a stale file from a prior connection, or a tampered one) is
+    refused, so the freshly-minted broker bearer is never forwarded to an
+    unverified origin."""
+    import omnigent.harnesses.opencode_native.provider as prov
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ucode_dir = tmp_path / ".ucode" / "opencode-xdg" / "opencode"
+    (ucode_dir / "plugin").mkdir(parents=True)
+    (ucode_dir / "opencode.json").write_text(
+        json.dumps(
+            {
+                "model": "databricks-anthropic/system.ai.claude-opus-4-8",
+                "provider": {"databricks-anthropic": {"options": {"baseURL": bad_url}}},
+            }
+        )
+    )
+    (ucode_dir / "plugin" / "ucode-auth.js").write_text("// ucode auth plugin\n")
+    monkeypatch.setattr(
+        "omnigent.host.databricks_credential._read_sidecar",
+        lambda path: {
+            "server": "s",
+            "host_id": "h",
+            "host_token": "t",
+            "workspace_host": "https://ws",  # bad_url points elsewhere / non-HTTPS
+        },
+    )
+
+    assert prov.managed_connect_opencode_config(tmp_path / "session-xdg") is None

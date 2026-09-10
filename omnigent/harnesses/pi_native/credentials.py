@@ -1253,9 +1253,16 @@ def resolve_pi_native_provider(
         # no longer shadows it.
         entry = default_provider_for_harness(config, PI_SURFACE)
         if entry is None:
-            broker_resolved = _connect_broker_pi_provider(model=model)
-            if broker_resolved is not None:
-                return broker_resolved
+            # A global ApiKeyAuth means "use Pi's own login", not "route Pi
+            # through the owner's gateway" — so don't let the managed-connect
+            # broker fallback hijack an explicit key. (Pi has no spec here, so
+            # only the global auth block can carry that intent.)
+            from omnigent.host.databricks_credential import api_key_auth_precludes_broker
+
+            if not api_key_auth_precludes_broker(None):
+                broker_resolved = _connect_broker_pi_provider(model=model)
+                if broker_resolved is not None:
+                    return broker_resolved
             _LOGGER.info(
                 "pi-native: no omnigent-configured provider for the pi/anthropic/openai "
                 "surface; Pi will use its own login."

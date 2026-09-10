@@ -3240,6 +3240,7 @@ def resolve_native_claude_config(
         only need the routing shape pass ``False`` to stay network-free.
     :returns: The launch config, or ``None`` to use Claude's own login.
     """
+    from omnigent.host.databricks_credential import api_key_auth_precludes_broker
     from omnigent.onboarding.detected import effective_config_with_detected
     from omnigent.onboarding.provider_config import (
         default_provider_for_harness,
@@ -3286,15 +3287,20 @@ def resolve_native_claude_config(
             return _native_claude_config_from_entry(entry, refresh_models=refresh_models)
     # 4. Managed connect host: no provider config, but the host linked Databricks
     #    via the connect flow (host-only [omnigent] profile + broker sidecar).
-    #    Route Claude Code through the owner's gateway, minting via the broker.
-    broker_config = _connect_broker_claude_config()
-    if broker_config is not None:
-        log_info_once(
-            _logger,
-            "native-claude routing: managed connect host — Databricks AI gateway via the "
-            "credential broker (host-only [omnigent] profile + broker sidecar).",
-        )
-        return broker_config
+    #    Route Claude Code through the owner's gateway, minting via the broker —
+    #    unless an explicit API key (spec-level or global) is configured, which
+    #    Claude's own login threads and must not be silently rerouted (the
+    #    spec-less branch returns None above for the same reason; this covers the
+    #    spec branch, where _resolve_provider_for_build also returns None for it).
+    if not api_key_auth_precludes_broker(spec):
+        broker_config = _connect_broker_claude_config()
+        if broker_config is not None:
+            log_info_once(
+                _logger,
+                "native-claude routing: managed connect host — Databricks AI gateway via the "
+                "credential broker (host-only [omnigent] profile + broker sidecar).",
+            )
+            return broker_config
     log_info_once(
         _logger,
         "native-claude routing: Claude CLI login (no provider configured for the Claude "

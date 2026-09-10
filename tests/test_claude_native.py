@@ -11181,3 +11181,35 @@ def test_resolve_native_claude_config_spec_path_reaches_connect_broker(
         config.api_key_helper
         and "omnigent.host.databricks_credential token" in config.api_key_helper
     )
+
+
+def test_resolve_native_claude_config_spec_api_key_auth_skips_connect_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spec that explicitly configures an API key must NOT be rerouted through
+    the owner's Databricks gateway on a managed connect host — Claude Code threads
+    that key itself. Even with a broker sidecar present, resolution returns None
+    (Claude's own login), not the broker config."""
+    from types import SimpleNamespace
+
+    from omnigent.spec.types import ApiKeyAuth
+
+    # The shared resolver returns None for an explicit ApiKeyAuth (it leaves bare
+    # keys to Claude's own login), which previously fell through to the broker.
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._resolve_provider_for_build", lambda spec, harness_type: None
+    )
+    monkeypatch.setattr(
+        claude_native, "_ucode_config_for_profile", lambda profile, *, refresh_models: None
+    )
+    spec = SimpleNamespace(executor=SimpleNamespace(profile=None, auth=ApiKeyAuth(api_key="sk-x")))
+
+    from omnigent.host import databricks_credential as dc
+
+    cfg = tmp_path / ".databrickscfg"
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    dc._write_profile(cfg, "https://ws.example")
+    dc._write_sidecar(cfg, "https://srv", "hid", "launch-tok", "https://ws.example")
+
+    assert claude_native.resolve_native_claude_config(spec=spec, refresh_models=False) is None

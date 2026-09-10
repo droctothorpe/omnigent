@@ -244,3 +244,34 @@ def test_main_ignores_unknown_operation(
     capsys.readouterr()  # discard configure-time log output
     assert dc.main(["store"]) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_api_key_auth_precludes_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only an explicit ApiKeyAuth suppresses the managed-connect broker fallback.
+
+    A spec's own ``executor.auth`` is authoritative (the resolver already consulted
+    the global block for it); a spec-less launch (pi) falls back to the global
+    ``auth:`` block. A Databricks profile or no auth at all lets the broker run.
+    """
+    from types import SimpleNamespace
+
+    from omnigent.spec.types import ApiKeyAuth, DatabricksAuth
+
+    key_spec = SimpleNamespace(executor=SimpleNamespace(auth=ApiKeyAuth(api_key="sk-x")))
+    dbx_spec = SimpleNamespace(executor=SimpleNamespace(auth=DatabricksAuth(profile="p")))
+    bare_spec = SimpleNamespace(executor=SimpleNamespace(auth=None))
+    assert dc.api_key_auth_precludes_broker(key_spec) is True
+    assert dc.api_key_auth_precludes_broker(dbx_spec) is False
+    assert dc.api_key_auth_precludes_broker(bare_spec) is False
+
+    # Spec-less (pi): the global auth block carries the only key intent.
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._load_global_auth", lambda: ApiKeyAuth(api_key="sk-g")
+    )
+    assert dc.api_key_auth_precludes_broker(None) is True
+    monkeypatch.setattr(
+        "omnigent.runtime.workflow._load_global_auth", lambda: DatabricksAuth(profile="p")
+    )
+    assert dc.api_key_auth_precludes_broker(None) is False
+    monkeypatch.setattr("omnigent.runtime.workflow._load_global_auth", lambda: None)
+    assert dc.api_key_auth_precludes_broker(None) is False

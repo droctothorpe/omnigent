@@ -21,6 +21,12 @@ _logger = logging.getLogger(__name__)
 _SANDBOX_CONFIGURE_TIMEOUT_S = 120
 
 _UCODE_AGENT_NAMES: tuple[str, ...] = ("claude", "codex", "pi")
+# The OSS managed-connect flow (``omnigent host`` boot) also configures opencode,
+# so its config is ready at first launch instead of forcing a synchronous
+# on-demand ``ucode configure`` on the runner's event loop. Kept off
+# ``_UCODE_AGENT_NAMES`` so lakebox's own ``--use-pat`` claude/codex/pi wrappers,
+# which don't ship opencode, are unaffected.
+_CONNECT_AGENT_NAMES: tuple[str, ...] = (*_UCODE_AGENT_NAMES, "opencode")
 # Pin ucode to a fixed commit so setup is reproducible, rather than tracking
 # ucode's ``main`` HEAD (a mutable ref that can move under us between runs and
 # break setup unexpectedly). A full SHA is immutable, so uvx caches the built
@@ -238,8 +244,19 @@ def configure_ucode_for_sandbox(
             result = subprocess.run(
                 argv, capture_output=True, timeout=_SANDBOX_CONFIGURE_TIMEOUT_S, env=env
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as exc:
+            # A failed/timed-out configure silently forces the harness hand-built
+            # fallback; log it (with the exception) so the field isn't blind.
+            _logger.info("ucode: sandbox configure failed (profile=%s): %r", profile, exc)
             return
-        _logger.info("ucode: sandbox configure exit=%s (profile=%s)", result.returncode, profile)
+        if result.returncode != 0:
+            _logger.info(
+                "ucode: sandbox configure exit=%s (profile=%s): %s",
+                result.returncode,
+                profile,
+                result.stderr.decode("utf-8", "replace")[-500:].strip(),
+            )
+        else:
+            _logger.info("ucode: sandbox configure ok (profile=%s)", profile)
 
     threading.Thread(target=_run, name="ucode-configure", daemon=True).start()

@@ -40,10 +40,14 @@ import os
 import shlex
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 
 from omnigent.host.identity import HOST_TOKEN_ENV_VAR, MANAGED_HOST_TOKEN_HEADER
+
+if TYPE_CHECKING:
+    from omnigent.spec.types import AgentSpec
 
 _logger = logging.getLogger(__name__)
 
@@ -205,6 +209,30 @@ def broker_token_command(host: str, cfg_path: Path | None = None) -> str | None:
         return None
     module = "omnigent.host.databricks_credential"
     return f"python3 -m {module} token --coords {shlex.quote(str(path))}"
+
+
+def api_key_auth_precludes_broker(spec: AgentSpec | None) -> bool:
+    """True when an explicit ``ApiKeyAuth`` is configured, so the managed-connect
+    broker fallback must not reroute it through the owner's Databricks gateway.
+
+    The broker fallback is a last resort for a host with **no** credential intent
+    at all. An explicit API key resolves to ``None`` in the shared provider
+    resolver on purpose: the claude-sdk / openai builders and the native CLIs
+    thread the bare key themselves. Rerouting it through the owner's gateway would
+    silently ignore the user's key, so claude/codex/pi gate their broker fallback
+    on ``not api_key_auth_precludes_broker(...)``.
+
+    With a *spec*, its own ``executor.auth`` is authoritative (the resolver that
+    already ran consulted the global block for it). Without one (pi resolves off
+    machine config), the global ``auth:`` block carries the only key intent.
+    """
+    from omnigent.spec.types import ApiKeyAuth
+
+    if spec is not None:
+        return isinstance(getattr(spec.executor, "auth", None), ApiKeyAuth)
+    from omnigent.runtime.workflow import _load_global_auth
+
+    return isinstance(_load_global_auth(), ApiKeyAuth)
 
 
 def configure_host_databricks(server_url: str, host_id: str) -> bool:

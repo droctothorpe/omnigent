@@ -1287,33 +1287,15 @@ async def _auto_create_opencode_terminal(
     # gateway or a pinned default) + the agent's MCP servers + force-ask.
     config: dict[str, object] = {}
     xdg_config_home = xdg_config_home_for_bridge_dir(bridge_dir)
-    # Managed connect host: reuse ucode's generated opencode config (provider block
-    # + served model + refreshing auth plugin), the same artifact lakebox and ucode
-    # itself use. The plugin mints per request via ``ucode auth-token`` → the broker
-    # command forwarded into the opencode env below, so no static omnigent-minted
-    # token. None off a connect host, so the gateway/default path below is unchanged.
     managed_opencode_broker_cmd: str | None = None
-    config = managed_connect_opencode_config(xdg_config_home) or {}
-    if config:
-        pinned = config.get("model")
-        if isinstance(pinned, str):
-            model_override = pinned
-        from omnigent.host.databricks_credential import (
-            HOST_DATABRICKS_PROFILE,
-            broker_token_command,
-        )
-        from omnigent.inner.databricks_executor import _read_databrickscfg_host
-
-        _oc_host = _read_databrickscfg_host(HOST_DATABRICKS_PROFILE)
-        managed_opencode_broker_cmd = (
-            broker_token_command(_oc_host.rstrip("/")) if _oc_host else None
-        )
-    gateway = (
-        None
-        if config
-        else resolve_databricks_gateway(
-            _opencode_native_profile_from_spec(agent_spec), model_id=model_override
-        )
+    # A spec/CLI-selected Databricks gateway wins first (an explicit ``--model`` or
+    # a spec naming a profile), exactly as claude/codex/pi resolve the spec
+    # provider before their broker fallback. ``resolve_databricks_gateway`` returns
+    # None when no profile is selected (the bare managed-connect host), so the
+    # ucode-config path below is the genuine last resort — it never overrides an
+    # explicit selection.
+    gateway = resolve_databricks_gateway(
+        _opencode_native_profile_from_spec(agent_spec), model_id=model_override
     )
     if gateway is not None:
         # Pin the per-prompt model to the synthesized provider/endpoint id, and
@@ -1321,13 +1303,39 @@ async def _auto_create_opencode_terminal(
         model_override = gateway.qualified_model
         config = dict(build_opencode_provider_config(gateway))
         config["model"] = model_override
-    elif not config and model_override:
-        # No custom provider, but a model is pinned (``omni opencode --model`` or
-        # the ``omni setup`` OpenCode default): write opencode's default model so
-        # the native TUI and the first turn use it instead of ``opencode/big-pickle``.
-        # OpenCode resolves the provider from the model-id prefix against its own
-        # auth.json, so no provider block is needed.
-        config = dict(build_opencode_model_default_config(model_override))
+    else:
+        # Managed connect host (last resort): reuse ucode's generated opencode
+        # config (provider block + served model + refreshing auth plugin), the
+        # same artifact lakebox and ucode itself use. The plugin mints per request
+        # via ``ucode auth-token`` → the broker command forwarded into the opencode
+        # env below, so no static omnigent-minted token. Offloaded to a thread: on
+        # the first launch (before the host-boot configure has written opencode's
+        # config) it may run a ``ucode configure`` subprocess, which must not block
+        # the runner's event loop. None off a managed connect host.
+        managed_config = await asyncio.to_thread(managed_connect_opencode_config, xdg_config_home)
+        if managed_config:
+            config = managed_config
+            pinned = config.get("model")
+            if isinstance(pinned, str):
+                model_override = pinned
+            from omnigent.host.databricks_credential import (
+                HOST_DATABRICKS_PROFILE,
+                broker_token_command,
+            )
+            from omnigent.inner.databricks_executor import _read_databrickscfg_host
+
+            _oc_host = _read_databrickscfg_host(HOST_DATABRICKS_PROFILE)
+            managed_opencode_broker_cmd = (
+                broker_token_command(_oc_host.rstrip("/")) if _oc_host else None
+            )
+        elif model_override:
+            # No custom provider, but a model is pinned (``omni opencode --model``
+            # or the ``omni setup`` OpenCode default): write opencode's default
+            # model so the native TUI and first turn use it instead of
+            # ``opencode/big-pickle``. OpenCode resolves the provider from the
+            # model-id prefix against its own auth.json, so no provider block is
+            # needed.
+            config = dict(build_opencode_model_default_config(model_override))
 
     # Build opencode's ``mcp`` block: the Omnigent builtin-tool relay (so the
     # model can call sys_*/load_skill/web_fetch — the real "connects to Omnigent
