@@ -2563,6 +2563,8 @@ function ComposerImpl({
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [planModeBusy, setPlanModeBusy] = useState(false);
+  // Native IMEs can keep marked text painted after the controlled value clears.
+  const [isComposing, setIsComposing] = useState(false);
   // Index of the highlighted item in the slash-command suggestions menu.
   // -1 means no item highlighted (menu closed or no matches). When the menu
   // opens with matches the reset logic below pre-selects the first item (0)
@@ -2725,6 +2727,8 @@ function ComposerImpl({
 
   useEffect(() => {
     const restored = conversationId ? getSessionDraft(conversationId) : undefined;
+    isComposingRef.current = false;
+    setIsComposing(false);
     setValue(restored?.text ?? "");
     setFiles(restored?.files ?? []);
     dirtyRef.current = false;
@@ -3590,12 +3594,16 @@ function ComposerImpl({
             }}
             onCompositionStart={() => {
               isComposingRef.current = true;
+              setIsComposing(true);
             }}
             onCompositionEnd={() => {
               isComposingRef.current = false;
+              setIsComposing(false);
             }}
             onKeyDown={handleKeyDown}
             onBlur={() => {
+              isComposingRef.current = false;
+              setIsComposing(false);
               // Dismiss the "@"-mention menu when focus leaves the textarea
               // (clicking a chip's ✕, the Send button, or another field).
               // Menu rows ``preventDefault`` on mousedown so selecting an entry
@@ -3610,19 +3618,21 @@ function ComposerImpl({
             }}
             aria-label="Message the agent"
             placeholder={
-              readOnlyReason !== null
-                ? readOnlyReason
-                : isReadOnly
-                  ? "You have read-only access to this session"
-                  : unreachable
-                    ? "Session offline — reconnect below to continue"
-                    : hasPendingElicitation
-                      ? "Respond to the pending request above to continue"
-                      : disabled
-                        ? "Waiting for agents…"
-                        : isStreaming
-                          ? "Send a follow-up (queued) — Esc to stop"
-                          : "Send a message…"
+              isComposing
+                ? ""
+                : readOnlyReason !== null
+                  ? readOnlyReason
+                  : isReadOnly
+                    ? "You have read-only access to this session"
+                    : unreachable
+                      ? "Session offline — reconnect below to continue"
+                      : hasPendingElicitation
+                        ? "Respond to the pending request above to continue"
+                        : disabled
+                          ? "Waiting for agents…"
+                          : isStreaming
+                            ? "Send a follow-up (queued) — Esc to stop"
+                            : "Send a message…"
             }
             rows={1}
             disabled={disabled || isReadOnly || unreachable || hasPendingElicitation}

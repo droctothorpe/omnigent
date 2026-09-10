@@ -1923,6 +1923,25 @@ describe("Composer placeholder", () => {
     expect(textarea().placeholder).toMatch(/send a follow-up/i);
   });
 
+  it("suppresses the queued placeholder until native composition ends after send", () => {
+    const props = composerProps({ status: "streaming", isWorking: true });
+    render(<Composer {...props} />);
+    const ta = textarea();
+
+    fireEvent.compositionStart(ta);
+    expect(ta.placeholder).toBe("");
+
+    fireEvent.change(ta, { target: { value: "disabled" } });
+    fireEvent.submit(ta.closest("form")!);
+
+    expect(props.onSend).toHaveBeenCalledWith("disabled", undefined);
+    expect(ta).toHaveValue("");
+    expect(ta.placeholder).toBe("");
+
+    fireEvent.compositionEnd(ta);
+    expect(ta.placeholder).toMatch(/send a follow-up/i);
+  });
+
   it("unreachable (host offline / local-stranded): composer is blocked", () => {
     // A message can't wake it, so the textarea is disabled and the banner
     // below is the only affordance.
