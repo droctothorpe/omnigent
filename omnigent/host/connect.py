@@ -4184,6 +4184,66 @@ class HostProcess:
             await self._handle_import_local(ws, frame)
 
 
+_UCODE_CONFIGURED_HARNESSES = ("claude", "codex", "pi")
+
+
+def _generate_ucode_configs() -> None:
+    """Generate the harnesses' gateway configs via ``ucode`` at host boot.
+
+    ``ucode configure`` writes each harness's gateway config (e.g.
+    ``~/.claude/ucode-settings.json``) — base URL/route, coding-agent headers, and
+    a discovered served model — which the harness launch paths then read, so ucode
+    owns the config shape and model selection while omnigent still launches the
+    harness itself (bridge intact). Runs off the hot path, before the host
+    connects, so it never delays the runner's connect.
+
+    Best-effort and self-gating: only on a managed connect host (a broker sidecar
+    exists) with ``ucode`` installed (the managed-sandbox image). ``ucode
+    configure`` authenticates to the gateway through the broker, set in the
+    subprocess env only — it is not exported to the runner, which mints its own
+    per-request bearer. There is no PATH wrapper, so configure's internal
+    ``<agent> mcp`` calls hit the real binary (no re-entry).
+    """
+    from omnigent.host.databricks_credential import (
+        HOST_DATABRICKS_PROFILE,
+        broker_token_command,
+    )
+    from omnigent.inner.databricks_executor import _read_databrickscfg_host
+
+    workspace = _read_databrickscfg_host(HOST_DATABRICKS_PROFILE)
+    if not workspace:
+        return
+    bearer_command = broker_token_command(workspace)
+    if not bearer_command:
+        return  # no broker sidecar → not a managed connect host
+    env = {
+        **os.environ,
+        "DATABRICKS_BEARER_COMMAND": bearer_command,
+        "DATABRICKS_CONFIG_PROFILE": HOST_DATABRICKS_PROFILE,
+    }
+    for agent in _UCODE_CONFIGURED_HARNESSES:
+        try:
+            subprocess.run(
+                [
+                    "ucode",
+                    "configure",
+                    "--profiles",
+                    HOST_DATABRICKS_PROFILE,
+                    "--agents",
+                    agent,
+                    "--skip-validate",
+                    "--skip-upgrade",
+                ],
+                capture_output=True,
+                timeout=120,
+                env=env,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return  # ucode absent (not a managed-sandbox image) or unrunnable
+        else:
+            _logger.info("ucode: generated %s gateway config", agent)
+
+
 def run_host_process(
     server_url: str,
     config_path: Path | None = None,
@@ -4286,6 +4346,12 @@ def run_host_process(
     from omnigent.host.databricks_credential import configure_host_databricks
 
     configure_host_databricks(server_url, identity.host_id)
+
+    # Generate the harnesses' gateway configs via ucode now, before the host
+    # connects (off the runner's critical path). The harness launch paths read
+    # these; omnigent still launches each harness with its bridge. No-op outside a
+    # managed connect sandbox. See :func:`_generate_ucode_configs`.
+    _generate_ucode_configs()
 
     if lifecycle_lock is None and daemon_target is not None:
         lifecycle_lock = DaemonLifecycleLock.for_target(daemon_target)

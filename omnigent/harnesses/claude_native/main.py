@@ -3130,6 +3130,31 @@ def _connect_broker_default_model() -> str:
     return model_catalog.resolve_catalog_model("databricks", family="claude").model_id
 
 
+def _ucode_generated_claude_env(workspace_host: str) -> dict[str, str] | None:
+    """The Claude gateway env ucode generated at host boot, or ``None``.
+
+    ``ucode configure`` (run once at host boot) writes ``ucode-settings.json``
+    with the workspace gateway env — base URL/route, coding-agent headers, and a
+    discovered served model. We read it so ucode owns the config shape and model
+    selection; the caller supplies our own broker ``apiKeyHelper`` and launches
+    Claude Code itself (bridge intact). Returns ``None`` when the file is absent,
+    malformed, or points at a different workspace than the connected one (a stale
+    config we must not trust).
+    """
+    settings_path = Path.home() / ".claude" / "ucode-settings.json"
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    env = data.get("env") if isinstance(data, dict) else None
+    if not isinstance(env, dict):
+        return None
+    base_url = env.get(_UCODE_CLAUDE_BASE_URL_ENV)
+    if not isinstance(base_url, str) or workspace_host.rstrip("/") not in base_url:
+        return None  # absent, or generated for a different workspace
+    return {str(k): str(v) for k, v in env.items() if isinstance(v, (str, int))}
+
+
 def _connect_broker_claude_config() -> ClaudeNativeUcodeConfig | None:
     """Gateway config for a managed host connected via the credential broker.
 
@@ -3169,15 +3194,24 @@ def _connect_broker_claude_config() -> ClaudeNativeUcodeConfig | None:
     if not api_key_helper:
         return None  # no broker sidecar → not a managed connect host
     workspace_host = workspace_host.rstrip("/")
-    return ClaudeNativeUcodeConfig(
-        env={
+    # Prefer the gateway config ucode generated at host boot: it owns the config
+    # shape (base URL/route, coding-agent headers) and served-model discovery. We
+    # still mint the bearer through our own broker command (bridge-launched by the
+    # runner as usual), so this consumes ucode's config without ucode launching or
+    # authenticating the binary. Falls back to a hand-built config when ucode wrote
+    # nothing usable (configure skipped/failed, or ucode absent).
+    env = _ucode_generated_claude_env(workspace_host)
+    if env is None:
+        env = {
             _UCODE_CLAUDE_BASE_URL_ENV: f"{workspace_host}/ai-gateway/anthropic",
-            _CLAUDE_CODE_API_KEY_HELPER_TTL_ENV: str(_BROKER_APIKEY_HELPER_TTL_MS),
             _CLAUDE_CODE_USE_GATEWAY_ENV: "1",
             _CLAUDE_CODE_CUSTOM_HEADERS_ENV: _DATABRICKS_CODING_AGENT_HEADER,
-        },
+        }
+    env[_CLAUDE_CODE_API_KEY_HELPER_TTL_ENV] = str(_BROKER_APIKEY_HELPER_TTL_MS)
+    return ClaudeNativeUcodeConfig(
+        env=env,
         api_key_helper=api_key_helper,
-        model=_connect_broker_default_model(),
+        model=env.get("ANTHROPIC_MODEL") or _connect_broker_default_model(),
     )
 
 

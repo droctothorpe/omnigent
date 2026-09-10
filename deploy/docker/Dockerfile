@@ -397,6 +397,23 @@ RUN pip install --no-cache-dir /build /build/sdks/python-client /build/sdks/ui \
 # are sourced after that reset, so this puts the venv back in front.
 RUN echo 'export PATH="/opt/venv/bin:${PATH}"' > /etc/profile.d/omnigent-venv.sh
 
+# ── Databricks AI Gateway via ucode (github.com/databricks/ucode) ──────────────
+# ucode owns the coding-agent gateway config shape and served-model discovery. In
+# a managed connect sandbox, `omnigent host` runs `ucode configure` at boot to
+# GENERATE each harness's gateway config; the harness launch paths read it and
+# omnigent launches the harness itself, bridge intact (no PATH wrapper). Installed
+# in an isolated venv so its deps can't clash with /opt/venv, and pinned like every
+# other externally-fetched CLI here. If ucode is absent or configure fails, the
+# harness falls back to omnigent's hand-built gateway config, so this is optional.
+# UCODE_REF must point at a revision carrying databricks/ucode#531 + #532 (the
+# DATABRICKS_BEARER_COMMAND hook and per-request Pi auth); repin to the upstream
+# merge commit once those land.
+ARG UCODE_REF=c1cc383
+RUN python3 -m venv /opt/ucode-venv \
+ && /opt/ucode-venv/bin/pip install --no-cache-dir \
+      "ucode @ git+https://github.com/dhruv0811/ucode@${UCODE_REF}" \
+ && ln -sf /opt/ucode-venv/bin/ucode /usr/local/bin/ucode
+
 # Optional extra harness CLIs, off by default: space-separated harness names
 # with optional @version pins, or npm:<pkg-spec> — see install-harness-cli.sh
 # and deploy/docker/README.md. Kept at the end of the stage so script churn

@@ -10994,6 +10994,42 @@ def test_resolve_native_claude_config_connect_broker_fallback(
     assert config.model == "catalog-databricks-claude-default"
 
 
+def test_connect_broker_prefers_ucode_generated_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ucode has generated ~/.claude/ucode-settings.json for the connected
+    workspace, the managed-connect config uses ucode's base URL/headers and its
+    discovered served model — while keeping omnigent's own broker apiKeyHelper."""
+    _isolate_to_connect_fallback(monkeypatch)
+    from omnigent.host import databricks_credential as dc
+
+    cfg = tmp_path / ".databrickscfg"
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(cfg))
+    monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
+    dc._write_profile(cfg, "https://ws.example")
+    dc._write_sidecar(cfg, "https://srv", "hid", "launch-tok", "https://ws.example")
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    (home / ".claude" / "ucode-settings.json").write_text(
+        '{"apiKeyHelper": "ucode auth-token --host https://ws.example",'
+        ' "env": {"ANTHROPIC_BASE_URL": "https://ws.example/serving-endpoints/anthropic",'
+        ' "ANTHROPIC_MODEL": "system.ai.claude-sonnet-4-6",'
+        ' "ANTHROPIC_CUSTOM_HEADERS": "x-databricks-use-coding-agent-mode: true"}}'
+    )
+
+    config = claude_native.resolve_native_claude_config(spec=None, refresh_models=False)
+
+    assert config is not None
+    # ucode's base URL/route and discovered served model win over the hand-built default.
+    assert config.env["ANTHROPIC_BASE_URL"] == "https://ws.example/serving-endpoints/anthropic"
+    assert config.model == "system.ai.claude-sonnet-4-6"
+    # But the bearer is still minted through our own broker command, not ucode's.
+    assert config.api_key_helper is not None
+    assert "omnigent.host.databricks_credential token" in config.api_key_helper
+
+
 def test_connect_fallback_pins_deployment_gateway_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
