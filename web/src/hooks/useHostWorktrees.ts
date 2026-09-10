@@ -63,6 +63,20 @@ async function fetchHostWorktrees(hostId: string, repoPath: string): Promise<Hos
 }
 
 /**
+ * Shared query options for the host-worktrees probe, so an imperative
+ * ``queryClient.fetchQuery`` (e.g. the composer resolving the worktree
+ * default at submit time) joins the same cache entry — and dedupes with
+ * any in-flight request — as {@link useHostWorktrees}.
+ */
+export function hostWorktreesQueryOptions(hostId: string, repoPath: string) {
+  return {
+    queryKey: ["host-worktrees", hostId, repoPath] as const,
+    queryFn: () => fetchHostWorktrees(hostId, repoPath),
+    staleTime: 5_000,
+  };
+}
+
+/**
  * React Query hook: list the git worktrees of a repository on a host.
  *
  * Lazy — only fires when both ``hostId`` and ``repoPath`` are set.
@@ -75,10 +89,8 @@ async function fetchHostWorktrees(hostId: string, repoPath: string): Promise<Hos
  */
 export function useHostWorktrees(hostId: string | null, repoPath: string | null) {
   return useQuery({
-    queryKey: ["host-worktrees", hostId, repoPath],
-    queryFn: () => fetchHostWorktrees(hostId as string, repoPath as string),
+    ...hostWorktreesQueryOptions(hostId as string, repoPath as string),
     enabled: hostId !== null && repoPath !== null && repoPath !== "",
-    staleTime: 5_000,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev: HostWorktree[] | undefined) => prev,
   });
 }

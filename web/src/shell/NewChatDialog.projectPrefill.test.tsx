@@ -1,4 +1,5 @@
 import type * as UseConversationsModule from "@/hooks/useConversations";
+import type * as UseHostWorktreesModule from "@/hooks/useHostWorktrees";
 import type * as AgentLabelsModule from "@/lib/agentLabels";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -57,7 +58,11 @@ vi.mock("@/hooks/useHostFilesystem", () => ({
   useHostFilesystem: () => ({ data: undefined }),
   useCreateHostDirectory: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
-vi.mock("@/hooks/useHostWorktrees", () => ({
+// Keep the real hostWorktreesQueryOptions (the submit-time probe re-fetch
+// goes through it, hitting the mocked authenticatedFetch); only the hook is
+// stubbed so each test controls what the composer has seen pre-submit.
+vi.mock("@/hooks/useHostWorktrees", async (importOriginal) => ({
+  ...(await importOriginal<typeof UseHostWorktreesModule>()),
   useHostWorktrees: vi.fn(),
 }));
 vi.mock("@/hooks/useDirectorySessions", () => ({
@@ -1013,6 +1018,178 @@ describe("NewChatLandingScreen global always-use-worktree default", () => {
     await waitFor(() => expect(branchLabel()).toContain("Worktree"));
     const body = await submitAndReadBody();
     expect(body.workspace).toBe(REPO);
+    expect(body.git).toBeUndefined();
+  });
+});
+
+describe("worktree default when Send races the git-ness probe", () => {
+  // The worktree-default seed effect waits on the useHostWorktrees probe, but
+  // nothing gates submit on that seed — so a Send that lands first must
+  // resolve the probe at submit time and still create the promised worktree,
+  // rather than silently starting in the repo's main checkout.
+
+  /** The `git worktree list` answer for a plain git repo rooted at REPO. */
+  function repoProbeBody() {
+    return {
+      object: "list",
+      data: [{ path: REPO, branch: "main", is_main: true, detached: false }],
+    };
+  }
+
+  /** Calls to the create endpoint (POST /v1/sessions) seen by the fetch mock. */
+  function createCalls(): [string, RequestInit][] {
+    return vi
+      .mocked(authenticatedFetch)
+      .mock.calls.filter(
+        ([url, init]) => String(url).includes("/v1/sessions") && init?.method === "POST",
+      ) as [string, RequestInit][];
+  }
+
+  function probeCalls(): unknown[] {
+    return vi
+      .mocked(authenticatedFetch)
+      .mock.calls.filter(([url]) => String(url).includes("/worktrees"));
+  }
+
+  async function fillAndSend(workspaceTail = "alpha"): Promise<void> {
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain(
+        workspaceTail,
+      ),
+    );
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "hello" },
+    });
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+  }
+
+  it("creates the worktree when Send lands while the probe is still in flight", async () => {
+    setProjectConfig({ host_id: "host_1", workspace: REPO, use_worktree: true });
+    // The hook never resolved before Send: the seed effect has no data, so no
+    // branch is in place when the user submits.
+    vi.mocked(useHostWorktrees).mockReturnValue({
+      data: undefined,
+      isError: false,
+    } as ReturnType<typeof useHostWorktrees>);
+    // The submit-time re-fetch is held until after the click, like a slow
+    // server→host round-trip answering a moment too late.
+    let releaseProbe!: () => void;
+    const probeGate = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    vi.mocked(authenticatedFetch).mockImplementation(async (url, init) => {
+      if (String(url).includes("/worktrees")) {
+        await probeGate;
+        return {
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(repoProbeBody()),
+        } as Response;
+      }
+      if (init?.method === "POST") {
+        return { ok: true, json: () => Promise.resolve({ id: "conv_new" }) } as Response;
+      }
+      return { ok: true, status: 200, json: () => Promise.resolve({}) } as Response;
+    });
+    renderLanding();
+    await fillAndSend();
+
+    // The create must wait for the held probe rather than posting without git.
+    await waitFor(() => expect(probeCalls().length).toBe(1));
+    expect(createCalls().length).toBe(0);
+    releaseProbe();
+
+    await waitFor(() => expect(createCalls().length).toBe(1));
+    const body = JSON.parse(createCalls()[0][1].body as string) as Record<string, unknown>;
+    const git = body.git as { branch_name: string; existing_worktree?: boolean };
+    expect(git.branch_name).toMatch(/^worktree-[0-9a-f]{8}$/);
+    expect(git.existing_worktree).toBeUndefined();
+  });
+
+  it("rescues the worktree at submit when the probe failed before Send", async () => {
+    // A non-400 probe failure leaves the hook with no data for good, so the
+    // seed effect never fires — the submit-time re-fetch is the rescue.
+    setProjectConfig({ host_id: "host_1", workspace: REPO, use_worktree: true });
+    vi.mocked(useHostWorktrees).mockReturnValue({
+      data: undefined,
+      isError: true,
+    } as ReturnType<typeof useHostWorktrees>);
+    vi.mocked(authenticatedFetch).mockImplementation(async (url, init) => {
+      if (String(url).includes("/worktrees")) {
+        return { ok: true, status: 200, json: () => Promise.resolve(repoProbeBody()) } as Response;
+      }
+      if (init?.method === "POST") {
+        return { ok: true, json: () => Promise.resolve({ id: "conv_new" }) } as Response;
+      }
+      return { ok: true, status: 200, json: () => Promise.resolve({}) } as Response;
+    });
+    renderLanding();
+    await fillAndSend();
+
+    await waitFor(() => expect(createCalls().length).toBe(1));
+    const body = JSON.parse(createCalls()[0][1].body as string) as Record<string, unknown>;
+    expect((body.git as { branch_name: string }).branch_name).toMatch(/^worktree-[0-9a-f]{8}$/);
+  });
+
+  it("binds the existing worktree when the raced probe reveals the workspace is one", async () => {
+    // Mirrors the settled prefill: a workspace that turns out to be a linked
+    // worktree is bound (branch recorded), not nested inside a fresh one.
+    const LINKED = "/Users/corey/projects/alpha-worktrees/feature-x";
+    setProjectConfig({ host_id: "host_1", workspace: LINKED, use_worktree: true });
+    vi.mocked(useHostWorktrees).mockReturnValue({
+      data: undefined,
+      isError: false,
+    } as ReturnType<typeof useHostWorktrees>);
+    vi.mocked(authenticatedFetch).mockImplementation(async (url, init) => {
+      if (String(url).includes("/worktrees")) {
+        return {
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              object: "list",
+              data: [
+                { path: REPO, branch: "main", is_main: true, detached: false },
+                { path: LINKED, branch: "feature-x", is_main: false, detached: false },
+              ],
+            }),
+        } as Response;
+      }
+      if (init?.method === "POST") {
+        return { ok: true, json: () => Promise.resolve({ id: "conv_new" }) } as Response;
+      }
+      return { ok: true, status: 200, json: () => Promise.resolve({}) } as Response;
+    });
+    renderLanding();
+    await fillAndSend("feature-x");
+
+    await waitFor(() => expect(createCalls().length).toBe(1));
+    const body = JSON.parse(createCalls()[0][1].body as string) as Record<string, unknown>;
+    const git = body.git as { branch_name: string; existing_worktree?: boolean };
+    expect(git.branch_name).toBe("feature-x");
+    expect(git.existing_worktree).toBe(true);
+  });
+
+  it("does not re-probe or add git when the seed already decided the workspace is not a repo", async () => {
+    // The probe resolved before Send and found no git repo: the seed decision
+    // is made, so submit must not fetch again or manufacture a git block.
+    setProjectConfig({ host_id: "host_1", workspace: REPO, use_worktree: true });
+    vi.mocked(useHostWorktrees).mockReturnValue({
+      data: [] as UseHostWorktreesModule.HostWorktree[],
+      isError: false,
+    } as ReturnType<typeof useHostWorktrees>);
+    vi.mocked(authenticatedFetch).mockImplementation(async (_url, init) => {
+      if (init?.method === "POST") {
+        return { ok: true, json: () => Promise.resolve({ id: "conv_new" }) } as Response;
+      }
+      return { ok: true, status: 200, json: () => Promise.resolve({}) } as Response;
+    });
+    renderLanding();
+    await fillAndSend();
+
+    await waitFor(() => expect(createCalls().length).toBe(1));
+    expect(probeCalls().length).toBe(0);
+    const body = JSON.parse(createCalls()[0][1].body as string) as Record<string, unknown>;
     expect(body.git).toBeUndefined();
   });
 });

@@ -212,7 +212,7 @@ import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
 import { useHostFilesystem, type HostFilesystemEntry } from "@/hooks/useHostFilesystem";
-import { useHostWorktrees } from "@/hooks/useHostWorktrees";
+import { hostWorktreesQueryOptions, useHostWorktrees } from "@/hooks/useHostWorktrees";
 import { useNativeServerSwitcherForMainSurface } from "@/hooks/useNativeServerSwitcher";
 import type { WorkspaceFile } from "@/hooks/useWorkspaceChangedFiles";
 import type { Conversation } from "@/hooks/useConversations";
@@ -4407,6 +4407,63 @@ export function NewChatLandingScreen() {
       // in an existing worktree sends no git opts — the workspace is bound
       // straight to that dir, which also sidesteps the "branch already
       // exists" guard.
+      //
+      // The enabled worktree default can lose a race to Send: its seed effect
+      // waits on the workspace's git-ness probe (useHostWorktrees), but
+      // nothing gates submit on that seed, so a prompt Send would silently
+      // drop the default and start the session in the repo's main checkout.
+      // When no branch is in place and the seed decision hasn't landed for
+      // this workspace, resolve the probe now (deduped with any in-flight
+      // request) and derive the decision the settled composer would have
+      // made. Fail-open: a probe error or timeout creates the session
+      // without git opts, as before. Armed here, awaited at the point of
+      // use, so the navigate-first jump stays instant — and a plain `null`
+      // (no promise, no await) when the default doesn't apply, so every
+      // other create path keeps its exact timing.
+      const lateWorktreeDefault: Promise<{
+        branchName: string;
+        baseBranch?: string;
+        existingWorktree?: boolean;
+      } | null> | null = (() => {
+        if (sandboxSelected || selectedHostId === null || workspaceTrimmed === "") return null;
+        if (trimmedBranch !== "" || prefilledBranch !== "") return null;
+        // The seed decision already ran for this workspace (seeded, cleared
+        // by the user, or found non-git) — nothing to rescue.
+        if (worktreeSeededForRef.current === workspaceTrimmed) return null;
+        if ((prefillConfig?.useWorktree ?? readAlwaysUseWorktree()) !== true) return null;
+        const probeHostId = selectedHostId;
+        return (async () => {
+          const worktrees = await Promise.race([
+            queryClient
+              .fetchQuery(hostWorktreesQueryOptions(probeHostId, workspaceTrimmed))
+              .catch(() => null),
+            // Bounded: a hung probe must not hold the create hostage.
+            new Promise<null>((resolve) => {
+              setTimeout(() => resolve(null), 15_000);
+            }),
+          ]);
+          if (worktrees === null) return null;
+          // Workspace already IS a linked worktree: bind it (records the
+          // branch for the sidebar + delete flow), mirroring the settled
+          // prefill.
+          const target = normalizeWorkspacePath(workspaceTrimmed);
+          const active = worktrees.find(
+            (w) => !w.is_main && normalizeWorkspacePath(w.path) === target,
+          );
+          if (active?.branch) return { branchName: active.branch, existingWorktree: true };
+          if (!worktrees.some((w) => w.is_main)) return null;
+          // Preempt the seed effect (same pattern as the fork-fresh seed) so
+          // it can't also fill a different branch; keep the field in sync
+          // with the branch this create uses, and keep the seed retractable.
+          worktreeSeededForRef.current = workspaceTrimmed;
+          const branch = generateBranchName();
+          setAutoSeededBranch(branch);
+          return {
+            branchName: branch,
+            baseBranch: projectBaseBranch ?? readDefaultBaseBranch() ?? undefined,
+          };
+        })();
+      })();
       const agent = agentList.find((a) => a.id === effectiveAgentId);
       const nativeAgent = nativeCodingAgentForAvailableAgent(agent);
       const nativeLabels = nativeWrapperLabelsForAgent(agent);
@@ -4542,7 +4599,7 @@ export function NewChatLandingScreen() {
             ? { branchName: trimmedBranch, baseBranch: baseBranch.trim() || undefined }
             : startInExistingWorktree
               ? { branchName: trimmedBranch, existingWorktree: true }
-              : undefined;
+              : ((lateWorktreeDefault === null ? null : await lateWorktreeDefault) ?? undefined);
           await launchRunner(selectedHostId, data.id, workspaceTrimmed, gitOpts);
         }
         // Clear pending agent after successful creation.
@@ -4560,6 +4617,10 @@ export function NewChatLandingScreen() {
         const matchOwnCreate = (item: SessionListWireItem) =>
           item.parent_session_id == null &&
           item.labels?.[CLIENT_CREATE_TOKEN_LABEL] === createToken;
+        // Awaited after the navigate-first jump, so a held probe delays only
+        // the create POST, not the user's landing→chat feedback. No await at
+        // all when the default isn't armed.
+        const lateGit = lateWorktreeDefault === null ? null : await lateWorktreeDefault;
         const createRequest = authenticatedFetch("/v1/sessions", {
           method: "POST",
           headers: {
@@ -4601,7 +4662,13 @@ export function NewChatLandingScreen() {
                     ? { branch_name: trimmedBranch, base_branch: baseBranch.trim() || undefined }
                     : startInExistingWorktree
                       ? { branch_name: trimmedBranch, existing_worktree: true }
-                      : undefined,
+                      : lateGit !== null
+                        ? {
+                            branch_name: lateGit.branchName,
+                            base_branch: lateGit.baseBranch,
+                            ...(lateGit.existingWorktree ? { existing_worktree: true } : {}),
+                          }
+                        : undefined,
                 }),
             // Native-wrapper labels + codex bypass + the born-filed project
             // label (see `createLabels` above).
