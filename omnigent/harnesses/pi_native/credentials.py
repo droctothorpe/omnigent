@@ -547,6 +547,47 @@ def _databricks_pi_provider(entry: ProviderEntry, *, model: str | None) -> PiPro
     )
 
 
+def _connect_broker_pi_provider(*, model: str | None) -> PiProviderConfig | None:
+    """Pi provider for a managed connect host, or ``None`` when not one.
+
+    The Pi counterpart to ``_connect_broker_claude_config``: when the owner linked
+    Databricks via the connect flow (host-only ``[omnigent]`` profile + broker
+    sidecar) but configured no omnigent provider, route Pi through the workspace
+    gateway with a broker-minted ``!command`` apiKey. ``ucode configure`` (host
+    boot) populated ucode state, so the model resolves to a served id rather than
+    the legacy bundled-catalog default.
+    """
+    from omnigent.host.databricks_credential import (
+        HOST_DATABRICKS_PROFILE,
+        broker_token_command,
+    )
+    from omnigent.inner.databricks_executor import _read_databrickscfg_host
+    from omnigent.onboarding.provider_config import ProviderEntry
+    from omnigent.onboarding.ucode_state import read_ucode_state
+
+    host = _read_databrickscfg_host(HOST_DATABRICKS_PROFILE)
+    if not host or not broker_token_command(host.rstrip("/")):
+        return None  # not a managed connect host
+    host = host.rstrip("/")
+    served_model = model
+    if served_model is None:
+        workspace_state = read_ucode_state(host)
+        agent_state = workspace_state.agent("claude") if workspace_state else None
+        served_model = agent_state.model if agent_state else None
+    entry = ProviderEntry(name="databricks", kind=DATABRICKS_KIND, profile=HOST_DATABRICKS_PROFILE)
+    resolved = _databricks_pi_provider(entry, model=served_model)
+    if resolved is not None and resolved.credential_warning:
+        # The host-only [omnigent] profile deliberately carries no token — the
+        # bearer is minted from the broker by the !command apiKey at request time —
+        # so _databricks_pi_provider's live-credential probe is expected to fail
+        # here. Drop its "login expired" warning so it doesn't surface as a false
+        # error banner on a session that authenticates fine through the broker.
+        import dataclasses
+
+        resolved = dataclasses.replace(resolved, credential_warning=None)
+    return resolved
+
+
 def _databricks_credential_warning(profile: str | None) -> str:
     """User-facing notice for an unresolvable Databricks profile.
 
@@ -1212,6 +1253,9 @@ def resolve_pi_native_provider(
         # no longer shadows it.
         entry = default_provider_for_harness(config, PI_SURFACE)
         if entry is None:
+            broker_resolved = _connect_broker_pi_provider(model=model)
+            if broker_resolved is not None:
+                return broker_resolved
             _LOGGER.info(
                 "pi-native: no omnigent-configured provider for the pi/anthropic/openai "
                 "surface; Pi will use its own login."

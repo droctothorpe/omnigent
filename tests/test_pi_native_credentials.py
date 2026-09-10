@@ -2266,3 +2266,56 @@ def test_cli_config_pi_provider_discovery_failure_falls_back_to_catalog_default(
     assert provider.model == "catalog-databricks-claude-default", (
         f"discovery failure must fall back to catalog default; got {provider.model!r}"
     )
+
+
+def test_connect_broker_managed_host_resolves_without_configured_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A managed connect host with no configured provider still resolves a Pi
+    Databricks provider via the broker (the connect-broker fallback).
+
+    No omnigent provider is configured, so ``default_provider_for_harness``
+    returns None; the host-only ``[omnigent]`` profile + broker sidecar then route
+    Pi through the gateway with a broker ``!command`` apiKey and the ucode-served
+    model. The live-credential probe fails on the token-less profile, but that
+    warning is suppressed (the broker mints per request).
+    """
+    from types import SimpleNamespace
+
+    from omnigent.inner import databricks_executor
+
+    monkeypatch.setattr(
+        databricks_executor, "_read_databrickscfg_host", lambda profile: "https://ws.example"
+    )
+    monkeypatch.setattr(
+        "omnigent.host.databricks_credential.broker_token_command",
+        lambda host, *a, **k: "python3 -m omnigent.host.databricks_credential token --coords /x",
+    )
+    monkeypatch.setattr(
+        "omnigent.onboarding.ucode_state.read_ucode_state",
+        lambda host: SimpleNamespace(
+            agent=lambda name: SimpleNamespace(model="system.ai.claude-sonnet-4-6")
+        ),
+    )
+
+    provider = creds.resolve_pi_native_provider(config_loader=lambda: {"providers": {}})
+
+    assert provider is not None
+    assert provider.base_url == "https://ws.example/ai-gateway/anthropic"
+    assert provider.model == "system.ai.claude-sonnet-4-6"  # ucode-served, not legacy catalog
+    assert provider.api_key.startswith("!")  # broker command, minted per request
+    assert provider.credential_warning is None  # false "expired" warning suppressed
+
+
+def test_connect_broker_skipped_without_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No broker sidecar (e.g. a laptop) → connect-broker branch no-ops → None,
+    so non-sandbox auth is untouched."""
+    from omnigent.inner import databricks_executor
+
+    monkeypatch.setattr(
+        databricks_executor, "_read_databrickscfg_host", lambda profile: "https://ws.example"
+    )
+    monkeypatch.setattr(
+        "omnigent.host.databricks_credential.broker_token_command", lambda host, *a, **k: None
+    )
+    assert creds.resolve_pi_native_provider(config_loader=lambda: {"providers": {}}) is None
