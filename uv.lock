@@ -3218,6 +3218,10 @@ blaxel = [
 boxlite = [
     { name = "boxlite" },
 ]
+cockroachdb = [
+    { name = "psycopg", extra = ["binary"] },
+    { name = "sqlalchemy-cockroachdb" },
+]
 copilot = [
     { name = "github-copilot-sdk" },
 ]
@@ -3424,6 +3428,7 @@ requires-dist = [
     { name = "protobuf", specifier = ">=6,<8" },
     { name = "protobuf", marker = "extra == 'antigravity'", specifier = ">=7,<8" },
     { name = "psutil", specifier = ">=5.9,<8" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'cockroachdb'", specifier = ">=3.1,<4" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1,<4" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8,<3" },
@@ -3435,6 +3440,7 @@ requires-dist = [
     { name = "sherpa-onnx", marker = "extra == 'dictation'", specifier = ">=1.13,<2" },
     { name = "sherpa-onnx-core", marker = "extra == 'dictation'", specifier = ">=1.13,<2" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
+    { name = "sqlalchemy-cockroachdb", marker = "extra == 'cockroachdb'", specifier = ">=2.0,<3" },
     { name = "starlette", specifier = ">=1.0.1,<2" },
     { name = "tiktoken", specifier = ">=0.7,<1" },
     { name = "tomlkit", specifier = ">=0.12,<1" },
@@ -3443,7 +3449,7 @@ requires-dist = [
     { name = "websockets", specifier = ">=10.4,<15" },
     { name = "zstandard", specifier = ">=0.22,<1" },
 ]
-provides-extras = ["claude-sdk", "openai-agents", "all", "bedrock", "kms", "s3", "vertex", "modal", "daytona", "blaxel", "boxlite", "microsandbox", "cwsandbox", "e2b", "islo", "openshell", "kubernetes", "vault", "tracing", "agents-sdk", "antigravity", "copilot", "dictation", "cursor", "hindsight", "nimble", "slack", "postgres", "databricks", "loadtest"]
+provides-extras = ["claude-sdk", "openai-agents", "cockroachdb", "all", "bedrock", "kms", "s3", "vertex", "modal", "daytona", "blaxel", "boxlite", "microsandbox", "cwsandbox", "e2b", "islo", "openshell", "kubernetes", "vault", "tracing", "agents-sdk", "antigravity", "copilot", "dictation", "cursor", "hindsight", "nimble", "slack", "postgres", "databricks", "loadtest"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -5689,6 +5695,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/93/db/b3b08fb78d56c42439d050bca1cd71811af732c332d965c2ac84feaa3a03/sqlalchemy_cloudflare_d1-0.3.10.tar.gz", hash = "sha256:7660182dd12224042d7a3eecb502107ef3979900c0459edfd77be81665be54a6", size = 420132, upload-time = "2026-05-05T20:31:55.564Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/25/56/437b3622d54a7a4aed3d26ee0eba590ae3e918387a3607a8509e7f30effd/sqlalchemy_cloudflare_d1-0.3.10-py3-none-any.whl", hash = "sha256:c29abda17c755bfe18a9246a67e29785d852610d0cc73bfce0ead90c4d75b274", size = 28145, upload-time = "2026-05-05T20:31:54.354Z" },
+]
+
+[[package]]
+name = "sqlalchemy-cockroachdb"
+version = "2.0.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sqlalchemy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c0/46/1462dd4734c58e04b754db71a9607de6d748dedea86e30007b5ae7b4e3db/sqlalchemy_cockroachdb-2.0.4.tar.gz", hash = "sha256:f66354d2b93da89cb4524c5b78a44d0cf5a8943d328b7f0aee4aa1dfc6178b65", size = 31803, upload-time = "2026-04-23T18:12:28.147Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f2/f1/e08ec3fc57b6f890e8f6eb16734c4865626635f4863cc2fe7d259699ce7b/sqlalchemy_cockroachdb-2.0.4-py3-none-any.whl", hash = "sha256:0804306a733a1fe09b2d496eadf8bf35d878862b6138e69175136fa2ca0ce5d0", size = 22726, upload-time = "2026-04-23T18:12:26.936Z" },
 ]
 
 [[package]]

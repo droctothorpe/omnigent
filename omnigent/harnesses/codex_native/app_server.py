@@ -3168,6 +3168,47 @@ def resolve_native_codex_launch(
             summary=f"Codex config.toml provider {provider_id!r} (ambient fallback)",
         )
 
+    from omnigent.host.databricks_credential import api_key_auth_precludes_broker
+
+    if entry is None and not api_key_auth_precludes_broker(spec):
+        # Managed connect host: no spec/global/ambient provider, but the owner
+        # linked Databricks via the connect flow (host-only [omnigent] profile +
+        # broker sidecar). Route Codex through the workspace gateway, minting the
+        # bearer via the broker — the Codex counterpart to
+        # _connect_broker_claude_config. ucode configure (host boot) populated
+        # ucode state, so the model resolves to a served id. An explicit spec
+        # ApiKeyAuth resolves to None above too, but Codex threads that key
+        # itself, so it must not be rerouted through the owner's gateway.
+        from omnigent.host.databricks_credential import (
+            HOST_DATABRICKS_PROFILE,
+            broker_token_command,
+        )
+        from omnigent.inner.databricks_executor import _read_databrickscfg_host
+
+        connect_host = _read_databrickscfg_host(HOST_DATABRICKS_PROFILE)
+        if connect_host and broker_token_command(connect_host.rstrip("/")):
+            connect_host = connect_host.rstrip("/")
+            resolved_model = _resolve_databricks_codex_model(
+                connect_host, HOST_DATABRICKS_PROFILE, model
+            )
+            log_info_once(
+                _logger,
+                "native-codex routing: managed connect host — Databricks AI gateway "
+                "via the credential broker (host-only [omnigent] profile + sidecar).",
+            )
+            return NativeCodexLaunch(
+                config_overrides=_databricks_codex_config_overrides(
+                    model=resolved_model,
+                    base_url=_databricks_codex_base_url(connect_host),
+                    auth_command=_databricks_codex_auth_command(
+                        connect_host, HOST_DATABRICKS_PROFILE
+                    ),
+                ),
+                model=resolved_model,
+                profile=None,
+                summary="Databricks AI gateway (managed connect host, broker-minted)",
+            )
+
     if entry is None:
         log_info_once(
             _logger,
