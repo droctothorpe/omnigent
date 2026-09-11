@@ -301,12 +301,6 @@ databricks = [
     # psycopg pin from the `postgres` extra so the two never drift.
     "omnigent[postgres]",
     "pymysql>=1.1,<2",
-    # Databricks-specific MCP servers. Not imported by core Omnigent
-    # code, so it is opt-in here rather than a default dependency. Floored
-    # at 0.9.0 (the release the lock already resolves): with the old >=0.1.0
-    # floor, a fresh install could satisfy the ai-bridge floor below by
-    # dropping mcp to 0.1.0, which pulls no mlflow/pyarrow at all.
-    "databricks-mcp>=0.9.0",
     # Floor the transitive databricks-ai-bridge: older releases pull a
     # databricks-vectorsearch that pins protobuf 5.x (conflicts with our
     # protobuf>=6), so the resolver backtracks to an ai-bridge that caps
