@@ -12,6 +12,13 @@ required-version = ">=0.11.8"
 # `--refresh`, or a dependency change).
 exclude-newer = "P7D"
 
+# Temporary cap-lift: mlflow (transitive via the `databricks` extra's
+# `databricks-mcp` dependency) still blocks plain resolution of
+# `cryptography>=50`, even though the Trivy finding is fixed on the 50.x line.
+# Keep this override narrow to the lockfile remediation and drop it once the
+# Databricks/MLflow dependency path no longer requires the cap-lift.
+override-dependencies = ["cryptography>=43.0.0,<51"]
+
 # Per-package cooldown exemptions (each scoped to one package, a fixed date
 # just past its publish time, so the global P7D supply-chain cooldown still
 # guards every other dependency):
