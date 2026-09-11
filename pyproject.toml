@@ -409,6 +409,21 @@ omni = "omnigent.cli:main"
 # Keep plain `uv sync` aligned with the published base package. Repository
 # workflows opt into the smallest dependency group they need.
 default-groups = []
+# Fail loudly on a uv too old to honor the settings below.
+required-version = ">=0.11.8"
+# Dependency cooldown: never resolve a distribution uploaded within the last
+# 7 days, so a compromised or yanked release has a window to surface before it
+# gets pinned.
+exclude-newer = "P7D"
+# Temporary cap-lift: the remaining Databricks/MLflow-adjacent dependency path
+# still blocks plain resolution of `cryptography>=50`, even though the Trivy
+# finding is fixed on the 50.x line. Keep this override narrow to the lockfile
+# remediation and drop it once the underlying transitive constraint is gone.
+override-dependencies = ["cryptography>=43.0.0,<51"]
+# Per-package cooldown exemptions (each scoped to one package, a fixed date
+# just past its publish time, so the global P7D supply-chain cooldown still
+# guards every other dependency).
+exclude-newer-package = { cwsandbox = "2026-06-12T00:00:00Z", google-antigravity = "2026-06-12T00:00:00Z", nimble-python = "2026-07-29T00:00:00Z" }
 
 # `antigravity` requires protobuf>=7 (google-antigravity ships gencode
 # compiled against protobuf 7.x). The following extras/groups all cap their

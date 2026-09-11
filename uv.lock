@@ -39,6 +39,7 @@ members = [
     "omnigent",
     "omnigent-issue-prioritization",
 ]
+overrides = [{ name = "cryptography", specifier = ">=43.0.0,<51" }]
 
 [[package]]
 name = "absl-py"
