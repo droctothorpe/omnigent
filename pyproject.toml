@@ -416,6 +416,13 @@ omni = "omnigent.cli:main"
 # workflows opt into the smallest dependency group they need.
 default-groups = []
 
+# Temporary cap-lift: mlflow (transitive via the `databricks` extra's
+# `databricks-mcp` dependency) still blocks plain resolution of
+# `cryptography>=50`, even though the Trivy finding is fixed on the 50.x line.
+# Keep this override narrow to the lockfile remediation and drop it once the
+# Databricks/MLflow dependency path no longer requires the cap-lift.
+override-dependencies = ["cryptography>=43.0.0,<51"]
+
 # `antigravity` requires protobuf>=7 (google-antigravity ships gencode
 # compiled against protobuf 7.x). The following extras/groups all cap their
 # own transitive deps at protobuf<7, making them mutually exclusive with
