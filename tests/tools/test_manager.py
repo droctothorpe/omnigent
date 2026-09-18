@@ -1395,14 +1395,12 @@ def test_async_inbox_tools_not_registered_when_async_disabled() -> None:
     assert "sys_cancel_async" not in names
 
 
-
 def test_timer_tools_registered_when_enabled() -> None:
     mgr = ToolManager(AgentSpec(spec_version=1, timers=True))
     names = {schema["function"]["name"] for schema in mgr.get_tool_schemas()}
 
     assert "sys_timer_set" in names
     assert "sys_timer_cancel" in names
-
 
 
 def test_unknown_builtin_logs_warning_and_skips(caplog: pytest.LogCaptureFixture) -> None:
@@ -1416,7 +1414,6 @@ def test_unknown_builtin_logs_warning_and_skips(caplog: pytest.LogCaptureFixture
 
     assert mgr.get_tool("definitely_missing") is None
     assert "Unknown built-in tool 'definitely_missing'" in caplog.text
-
 
 
 def test_create_builtin_handles_web_fetch_and_upload_file() -> None:
@@ -1435,7 +1432,6 @@ def test_create_builtin_handles_web_fetch_and_upload_file() -> None:
     assert type(upload_file).__name__ == "UploadFileTool"
 
 
-
 def test_os_env_registration_noops_when_factory_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1447,7 +1443,6 @@ def test_os_env_registration_noops_when_factory_returns_none(
 
     assert mgr._os_env is None
     assert all(not name.startswith("sys_os_") for name in mgr.get_tool_names())
-
 
 
 def test_invalid_spec_declared_client_local_tool_name_is_skipped(
@@ -1473,7 +1468,6 @@ def test_invalid_spec_declared_client_local_tool_name_is_skipped(
     assert "Spec-declared client local tool 'bad name' has invalid name" in caplog.text
 
 
-
 def test_spec_declared_client_local_tool_requires_parameters() -> None:
     spec = AgentSpec(
         spec_version=1,
@@ -1490,7 +1484,6 @@ def test_spec_declared_client_local_tool_requires_parameters() -> None:
 
     with pytest.raises(ValueError, match="has no ``parameters`` block"):
         ToolManager(spec)
-
 
 
 def test_uc_function_local_tool_registers_schema_defaults_and_description() -> None:
@@ -1523,7 +1516,6 @@ def test_uc_function_local_tool_registers_schema_defaults_and_description() -> N
     }
 
 
-
 def test_invalid_uc_function_name_is_skipped(caplog: pytest.LogCaptureFixture) -> None:
     spec = AgentSpec(
         spec_version=1,
@@ -1542,7 +1534,6 @@ def test_invalid_uc_function_name_is_skipped(caplog: pytest.LogCaptureFixture) -
 
     assert mgr.get_tool("bad name") is None
     assert "UC function tool 'bad name' has invalid name" in caplog.text
-
 
 
 def test_invalid_local_python_tool_name_is_skipped(
@@ -1592,7 +1583,6 @@ def test_invalid_local_python_tool_name_is_skipped(
     assert "Local tool 'bad name' has invalid name" in caplog.text
 
 
-
 def test_omnigent_callable_tool_collision_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     class _CollidingCallableTool(Tool):
         @classmethod
@@ -1633,7 +1623,6 @@ def test_omnigent_callable_tool_collision_raises(monkeypatch: pytest.MonkeyPatch
         ToolManager(spec)
 
 
-
 def test_shutdown_logs_close_and_tool_failures(caplog: pytest.LogCaptureFixture) -> None:
     class _ExplodingOSEnv:
         def close(self) -> None:
@@ -1664,7 +1653,6 @@ def test_shutdown_logs_close_and_tool_failures(caplog: pytest.LogCaptureFixture)
 
     assert "os_env.close() failed during shutdown" in caplog.text
     assert "tool _exploding shutdown failed" in caplog.text
-
 
 
 def test_get_tool_names_returns_registered_names() -> None:
