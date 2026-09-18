@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from omnigent_client.tools import ToolState, tool
+from pydantic import BaseModel
 
 from omnigent.tools import _runner
 
@@ -21,10 +22,14 @@ def _string_tool() -> str:
     return "ok"
 
 
+class _ToolResult(BaseModel):
+    value: int
+
+
 @tool
-def _int_tool() -> int:
-    """Return a typed integer."""
-    return 7
+def _structured_tool() -> _ToolResult:
+    """Return a typed result."""
+    return _ToolResult(value=7)
 
 
 @tool
@@ -168,7 +173,9 @@ def test_serialize_result_passes_strings_through() -> None:
 
 
 def test_serialize_result_uses_return_annotation_type_adapter() -> None:
-    assert _runner._serialize_result(_int_tool, 7) == "7"
+    result = _structured_tool()
+
+    assert json.loads(_runner._serialize_result(_structured_tool, result)) == {"value": 7}
 
 
 def test_serialize_result_falls_back_to_json_for_unannotated_target() -> None:
