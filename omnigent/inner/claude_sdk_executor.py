@@ -375,7 +375,7 @@ def _get_inline_data_uri_info(value: Any) -> tuple[str, int] | None:  # type: ig
 
     A resolved attachment block looks like:
 
-    .. code-block:: jsonc
+    .. code-block:: text
 
         {"type": "input_image",
          "filename": "screenshot.png",

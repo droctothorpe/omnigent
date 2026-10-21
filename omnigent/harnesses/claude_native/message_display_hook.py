@@ -17,7 +17,7 @@ and :mod:`omnigent.harnesses.claude_native.forwarder`.
 
 Observed ``MessageDisplay`` payload (this Claude build):
 
-.. code-block:: jsonc
+.. code-block:: text
 
     {
       "hook_event_name": "MessageDisplay",
