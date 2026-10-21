@@ -656,9 +656,6 @@ known-first-party = ["omnigent"]
 "omnigent/runtime/**/*.py" = [
     "ARG001", "ARG002", "BLE001", "B008", "RUF012",
 ]
-"omnigent/terminals/**/*.py" = [
-    "ARG001", "ARG002", "BLE001", "B008", "RUF012",
-]
 "omnigent/tools/**/*.py" = [
     "ARG001", "ARG002", "BLE001", "B008", "RUF012",
 ]
