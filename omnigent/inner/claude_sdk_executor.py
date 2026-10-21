@@ -373,7 +373,9 @@ def _get_inline_data_uri_info(value: Any) -> tuple[str, int] | None:  # type: ig
     """If ``value`` contains an inline ``data:*;base64,...`` URI, return its
     ``(media_type, base64_char_count)``; otherwise ``None``.
 
-    A resolved attachment block looks like::
+    A resolved attachment block looks like:
+
+    .. code-block:: jsonc
 
         {"type": "input_image",
          "filename": "screenshot.png",

@@ -569,6 +569,9 @@ extend-exclude = [
     "omnigent/api/**/*_pb2.pyi",
 ]
 
+[tool.ruff.format]
+docstring-code-format = true
+
 [tool.ruff.lint]
 # ``E``/``F``  — pycodestyle + pyflakes baseline
 # ``I``        — import sorting
