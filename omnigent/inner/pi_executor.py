@@ -1343,7 +1343,7 @@ class _PiRpcSession:
         """
         try:
             return await asyncio.wait_for(self._line_queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
     def stdout_at_eof(self) -> bool:
@@ -1373,7 +1373,7 @@ class _PiRpcSession:
                 await asyncio.wait_for(
                     self.process.wait(), timeout=_RPC_SESSION_CLOSE_REAP_TIMEOUT_S
                 )
-            except (asyncio.TimeoutError, ProcessLookupError, RuntimeError):
+            except (TimeoutError, ProcessLookupError, RuntimeError):
                 # RuntimeError can happen when the subprocess was created on a
                 # different event loop (e.g. test fixtures that call close() in
                 # a fresh loop).  Fall back to synchronous kill.

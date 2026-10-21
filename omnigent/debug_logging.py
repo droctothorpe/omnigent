@@ -35,7 +35,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -1356,7 +1356,7 @@ class SseFileHandler(logging.Handler):
 
     def _format_line(self, item: _SseFileItem) -> bytes:
         row = {
-            "ts": datetime.fromtimestamp(item.created, tz=timezone.utc).isoformat(),
+            "ts": datetime.fromtimestamp(item.created, tz=UTC).isoformat(),
             "source": self._source,
             "level": item.level,
             "conversation_id": item.session_id,

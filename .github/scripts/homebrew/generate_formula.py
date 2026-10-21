@@ -360,7 +360,7 @@ def resolve_closure(
     """
     extras_spec = f"[{','.join(extras)}]" if extras else ""
     requirement = f"omnigent{extras_spec}=={version}"
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     cutoff = (now - datetime.timedelta(days=cooldown)).strftime("%Y-%m-%dT%H:%M:%SZ")
     # The lockstep packages are exempted up to "now" rather than skipped, so a
     # typo'd name still gets a cooldown rather than silently getting none.

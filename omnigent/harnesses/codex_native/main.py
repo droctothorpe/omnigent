@@ -16,7 +16,7 @@ import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
@@ -2105,7 +2105,7 @@ def _codex_resume_rollout_path(codex_home: Path, external_session_id: str) -> Pa
     existing = _find_codex_rollout(codex_home, external_session_id)
     if existing is not None:
         return existing
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     partition = (
         codex_home / "sessions" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
     )
@@ -2902,7 +2902,7 @@ def _codex_rollout_timestamp() -> str:
     :returns: ISO-8601 timestamp with ``Z`` suffix, e.g.
         ``"2026-06-08T12:34:56.789Z"``.
     """
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 async def _patch_external_session_id(

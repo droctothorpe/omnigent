@@ -439,9 +439,7 @@ def _connection_refused(exc: BaseException) -> bool:
     :returns: ``True`` for a connection-refused failure, ``False``
         otherwise (fail toward "not refused" — the loop keeps retrying).
     """
-    # BaseExceptionGroup is a 3.11+ builtin (we require 3.12); ruff's pinned
-    # py310 target misflags it as undefined.
-    if isinstance(exc, BaseExceptionGroup):  # noqa: F821
+    if isinstance(exc, BaseExceptionGroup):
         return all(_connection_refused(sub) for sub in exc.exceptions)
     if not isinstance(exc, OSError):
         return False

@@ -1702,9 +1702,7 @@ def _format_version() -> str:
     if info is None:
         return f"omnigent {version_str}"
     epoch, sha = info
-    when = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    when = datetime.datetime.fromtimestamp(epoch, tz=datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     if sha:
         # Short SHA (first 8 chars) — enough to disambiguate in bug
         # reports without making the line unwieldy.

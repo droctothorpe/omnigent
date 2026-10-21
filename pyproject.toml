@@ -552,11 +552,7 @@ ignore_errors = true
 
 [tool.ruff]
 line-length = 99
-# NOTE: kept at py310 even though requires-python is >=3.12. Bumping this to
-# py312 makes ruff's UP041 rewrite `asyncio.TimeoutError` -> `TimeoutError`
-# (aliased since 3.11) across the whole codebase — a separate, out-of-scope
-# migration that belongs in its own cleanup PR.
-target-version = "py310"
+target-version = "py312"
 # Vendored upstream code — not ours to restyle.
 #  - ``omnigent/inner/databricks_mcps/google``: Google MCP server source.
 #  - ``assistant-ui/``: assistant-ui.com React/Python suite imported as a
@@ -590,6 +586,12 @@ docstring-code-format = true
 #                tasks, unused noqa, ...)
 select = ["E", "F", "I", "UP", "ARG", "BLE", "B", "SIM", "RET", "C4", "PIE", "DTZ", "LOG", "RUF"]
 ignore = [
+    # Preserve runtime type-alias, enum, and generic semantics. These rewrites
+    # need compatibility review rather than automatic syntax modernization.
+    "UP040",
+    "UP042",
+    "UP046",
+    "UP047",
     # ARG003 (unused class-method args): too noisy on ABC-subclass signatures
     # where the arg is required by the interface contract.
     "ARG003",

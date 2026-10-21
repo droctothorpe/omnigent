@@ -18,6 +18,7 @@ import sys
 import tempfile
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import TYPE_CHECKING, Protocol, TextIO, TypeAlias
 
 from omnigent_client import (
@@ -2434,7 +2435,7 @@ class _SessionsChatReplAdapter:
                         self._turn_done.wait(),
                         timeout=1.0,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     snap = await self._client.sessions.get(session_id)
                     if snap.status in ("idle", "failed"):
                         self._turn_done.set()
@@ -2514,7 +2515,7 @@ class _SessionsChatReplAdapter:
                         self._turn_done.wait(),
                         timeout=1.0,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     snap = await self._client.sessions.get(session_id)
                     if snap.status in ("idle", "failed"):
                         self._turn_done.set()
@@ -5538,7 +5539,7 @@ async def _cmd_switch(
     host: TerminalHost,
     fmt: RichBlockFormatter,
 ) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from rich.table import Table
     from rich.text import Text
@@ -5558,7 +5559,7 @@ async def _cmd_switch(
             table.add_column("Created", style="dim")
             for i, s in enumerate(sessions_list, 1):
                 when = (
-                    datetime.fromtimestamp(s.created_at, tz=timezone.utc)
+                    datetime.fromtimestamp(s.created_at, tz=UTC)
                     .astimezone()
                     .strftime("%b %d %H:%M")
                 )
@@ -6333,7 +6334,7 @@ def _build_github_issue_url(
     from urllib.parse import quote
 
     session_line = f"`{session_id}`" if session_id else "not started"
-    timestamp = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     what_happened = description if description else "<!-- Describe what went wrong -->"
 
     info_lines = [
@@ -8852,7 +8853,7 @@ async def _run_bang_command(
     timed_out = False
     try:
         out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=_BANG_TIMEOUT_S)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         timed_out = True
         proc.kill()
         out_b, err_b = await proc.communicate()

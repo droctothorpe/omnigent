@@ -1959,7 +1959,7 @@ class ClaudeSDKExecutor(Executor):
                             _unset_env_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
                         )
                     await asyncio.wait_for(client.connect(), timeout=_CONNECT_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 await self._force_close_client(client)
                 tail = "\n".join(line.rstrip() for line in connect_stderr[-40:])
                 detail = tail or "(no CLI stderr captured)"
@@ -2182,7 +2182,7 @@ class ClaudeSDKExecutor(Executor):
                     try:
                         with suppress(Exception):
                             await asyncio.wait_for(process.wait(), timeout=5)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         _kill_process_tree(process)
                         with suppress(Exception):
                             await process.wait()
@@ -3034,7 +3034,7 @@ class ClaudeSDKExecutor(Executor):
                     client.query(sdk_prompt, session_id=session_key),
                     timeout=_QUERY_START_TIMEOUT_SECONDS,
                 )
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise TimeoutError(
                     f"Claude SDK query start timed out after {int(_QUERY_START_TIMEOUT_SECONDS)}s"
                 ) from exc

@@ -9894,7 +9894,7 @@ async def _ensure_runner_relay_ready_impl(
             handle.ready.wait(),
             timeout=_RUNNER_RELAY_READY_TIMEOUT_S,
         )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         if handle.task.done():
             raise OmnigentError(
                 "Runner stream relay exited before becoming ready",
@@ -13145,7 +13145,7 @@ async def _run_runner_status_probe(
                 ),
                 timeout=_RUNNER_STATUS_PROBE_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             failure = f"no answer within {_RUNNER_STATUS_PROBE_TIMEOUT_S:g}s"
         except (httpx.HTTPError, ConnectionError) as exc:
             failure = f"{type(exc).__name__}: {exc}"
